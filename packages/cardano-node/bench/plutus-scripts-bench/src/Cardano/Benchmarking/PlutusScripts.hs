@@ -1,0 +1,94 @@
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Cardano.Benchmarking.PlutusScripts
+    ( encodePlutusScript
+    , findPlutusScript
+    , getAllScripts
+    , listPlutusScripts
+    , asAnyLang
+    , normalizeModuleName
+    ) where
+
+import           Prelude
+
+import           Data.ByteString.Lazy as LBS (ByteString)
+import           Data.List (find)
+import           Data.Text (pack, split)
+import           System.FilePath (takeBaseName)
+
+import           Cardano.Api
+
+import qualified Cardano.Benchmarking.PlutusScripts.CustomCall as CustomCall
+import qualified Cardano.Benchmarking.PlutusScripts.CustomCallV3 as CustomCallV3
+import qualified Cardano.Benchmarking.PlutusScripts.EcdsaSecp256k1Loop as ECDSA
+import qualified Cardano.Benchmarking.PlutusScripts.EcdsaSecp256k1LoopV3 as ECDSAV3
+import qualified Cardano.Benchmarking.PlutusScripts.ExpModInteger as ExpModInteger
+import qualified Cardano.Benchmarking.PlutusScripts.HashOntoG2AndAdd as HashG2Add
+import qualified Cardano.Benchmarking.PlutusScripts.Loop2024 as Loop2024
+import qualified Cardano.Benchmarking.PlutusScripts.LoopV3 as LoopV3
+import qualified Cardano.Benchmarking.PlutusScripts.MultiScalarMulG1 as MultiScalarMulG1
+import qualified Cardano.Benchmarking.PlutusScripts.Ripemd160 as Ripemd160
+import qualified Cardano.Benchmarking.PlutusScripts.SchnorrSecp256k1Loop as Schnorr
+import qualified Cardano.Benchmarking.PlutusScripts.SchnorrSecp256k1LoopV3 as SchnorrV3
+import qualified Cardano.Benchmarking.PlutusScripts.SupplementalDatum as SupplementalDatum
+import           Cardano.Benchmarking.ScriptAPI
+
+
+getAllScripts :: [PlutusBenchScript]
+getAllScripts =
+  [ CustomCall.script
+  , CustomCallV3.script
+  , ECDSA.script
+  , ECDSAV3.script
+  , ExpModInteger.script
+  , HashG2Add.script
+  , Loop2024.script
+  , LoopV3.script
+  , MultiScalarMulG1.script
+  , Ripemd160.script
+  , Schnorr.script
+  , SchnorrV3.script
+  , SupplementalDatum.script
+  ]
+
+listPlutusScripts ::
+     [String]
+listPlutusScripts
+  = psName <$> getAllScripts
+
+findPlutusScript ::
+     String
+  -> Maybe ScriptInAnyLang
+findPlutusScript s
+  =   psScript
+  <$> find (\x -> last (split (=='.') . pack . psName $ x) == s') getAllScripts
+  where
+    s' = pack $ takeBaseName s
+
+encodePlutusScript ::
+     ScriptInAnyLang
+  -> LBS.ByteString
+encodePlutusScript
+  = \case
+    ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV1) s -> textEnvelopeToJSON Nothing s
+    ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV2) s -> textEnvelopeToJSON Nothing s
+    ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV3) s -> textEnvelopeToJSON Nothing s
+    _                                                       -> "{}"
+
+
+asAnyLang :: forall lang. IsPlutusScriptLanguage lang =>
+     PlutusScript lang
+  -> ScriptInAnyLang
+asAnyLang script
+  = toScriptInAnyLang $ PlutusScript (plutusScriptVersion @lang) script
+
+-- "A.B.C" --> "C.hs"
+normalizeModuleName ::
+     String
+  -> String
+normalizeModuleName
+  = (++ ".hs") . reverse . takeWhile (/= '.') . reverse

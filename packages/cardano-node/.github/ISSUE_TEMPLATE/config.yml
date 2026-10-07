@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Cardano CLI Issues
+    url: https://github.com/IntersectMBO/cardano-cli/issues
+    about: Report CLI related issues here
+  - name: Cardano API Issues
+    url: https://github.com/IntersectMBO/cardano-api/issues
+    about: Report API related issues here
+  - name: Cardano gRPC Issues
+    url: https://github.com/IntersectMBO/cardano-api/issues
+    about: Report gRPC endpoint related issues here

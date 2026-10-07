@@ -1,0 +1,179 @@
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Cardano.Testnet.Test.Cli.Transaction.RegisterDeregisterStakeAddress
+  ( hprop_tx_register_deregister_stake_address
+  ) where
+
+import           Cardano.Api as Api
+
+import           Cardano.CLI.Type.Key (SomeSigningKey (AStakeSigningKey))
+import           Cardano.Testnet
+
+import           Prelude
+
+import           Control.Monad
+import           Data.Default.Class
+import qualified Data.List.NonEmpty as NEL
+import qualified Data.Map as M
+import           Data.Maybe
+import qualified Data.Text as Text
+import           System.FilePath ((</>))
+
+import           Testnet.Components.Configuration
+import           Testnet.Components.Query
+import           Testnet.Process.Cli.Keys
+import           Testnet.Process.Cli.SPO (createStakeKeyDeregistrationCertificate,
+                   createStakeKeyRegistrationCertificate)
+import           Testnet.Process.Run (execCli', execCliAny, mkExecConfig)
+import           Testnet.Property.Util (integrationRetryWorkspace)
+import           Testnet.Start.Types
+import           Testnet.Types
+
+import           Hedgehog
+import qualified Hedgehog as H
+import qualified Hedgehog.Extras as H
+
+
+-- | Execute me with:
+-- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/register deregister stake address in transaction build/"'@
+hprop_tx_register_deregister_stake_address :: Property
+hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "register-deregister-stake-addr" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+  -- Start a local test net
+  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let tempAbsPath' = unTmpAbsPath tempAbsPath
+      tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
+
+  work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
+
+  let ceo = ConwayEraOnwardsConway
+      sbe = convert ceo
+      eraName = eraToString sbe
+      creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationGenesisOptions = def { genesisEpochLength = 200 }
+        }
+
+  TestnetRuntime
+    { testnetMagic
+    , testnetNodes
+    , wallets=wallet0:wallet1:_
+    , configurationFile
+    }
+    <- createAndRunTestnet creationOptions def conf
+
+  let node = NEL.head testnetNodes
+  poolSprocket1 <- H.noteShow $ nodeSprocket node
+  execConfig <- mkExecConfig tempBaseAbsPath poolSprocket1 testnetMagic
+  let socketPath = nodeSocketPath node
+
+  epochStateView <- getEpochStateView configurationFile socketPath
+
+  H.note_ $ "Sprocket: " <> show poolSprocket1
+  H.note_ $ "Abs path: " <> tempAbsBasePath'
+  H.note_ $ "Socketpath: " <> unFile socketPath
+  H.note_ $ "Foldblocks config file: " <> unFile configurationFile
+
+  -- Register stake address
+  let stakeCertFp = work </> "stake.regcert"
+      stakeCertDeregFp = work </> "stake.deregcert"
+      stakeKeys =  KeyPair { verificationKey = File $ work </> "stake.vkey"
+                           , signingKey = File $ work </> "stake.skey"
+                           }
+
+  cliStakeAddressKeyGen stakeKeys
+  keyDeposit <- getKeyDeposit epochStateView ceo
+  createStakeKeyRegistrationCertificate
+    tempAbsPath (AnyShelleyBasedEra sbe) (verificationKey stakeKeys) keyDeposit stakeCertFp
+
+  -- obtain stake key hash as ledger's Credential
+  AStakeSigningKey key <- H.leftFailM . H.evalIO $
+    readFormattedFileAnyOf
+      [FromSomeType (AsSigningKey AsStakeKey) AStakeSigningKey]
+      [FromSomeType (AsSigningKey AsStakeKey) AStakeSigningKey]
+      (signingKey stakeKeys)
+  stakeKeyHash <- H.noteShow . toShelleyStakeCredential . StakeCredentialByKey . verificationKeyHash $ getVerificationKey key
+
+  stakeCertTxBodyFp <- H.note $ work </> "stake.registration.txbody"
+  stakeCertTxSignedFp <- H.note $ work </> "stake.registration.tx"
+
+  txin1 <- findLargestUtxoForPaymentKey epochStateView sbe wallet0
+
+  (_, stdout, stderr) <- execCliAny execConfig
+    [ eraName, "transaction", "build"
+    , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet0
+    , "--tx-in", Text.unpack $ renderTxIn txin1
+    , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet1) <> "+" <> show @Int 10_000_000
+    , "--certificate-file", stakeCertFp
+    , "--witness-override", show @Int 2
+    , "--out-file", stakeCertTxBodyFp
+    ]
+  H.note_ stdout
+  H.note_ stderr
+
+  void $ execCli' execConfig
+    [ eraName, "transaction", "sign"
+    , "--tx-body-file", stakeCertTxBodyFp
+    , "--signing-key-file", signingKeyFp $ paymentKeyInfoPair wallet0
+    , "--signing-key-file", signingKeyFp stakeKeys
+    , "--out-file", stakeCertTxSignedFp
+    ]
+
+  H.note_ "Check that stake address isn't registered yet"
+  getAccountsStates epochStateView sbe >>=
+    flip H.assertWith
+      (isNothing . M.lookup stakeKeyHash)
+
+  void $ execCli' execConfig
+    [ eraName, "transaction", "submit"
+    , "--tx-file", stakeCertTxSignedFp
+    ]
+
+
+  H.note_ "Check that stake address is registered"
+  void $ retryUntilM epochStateView (WaitForBlocks 5)
+    (getAccountsStates epochStateView sbe)
+    (M.member stakeKeyHash)
+
+  -- deregister stake address
+  createStakeKeyDeregistrationCertificate
+    tempAbsPath sbe (verificationKey stakeKeys) keyDeposit stakeCertDeregFp
+
+  stakeCertDeregTxBodyFp <- H.note $ work </> "stake.deregistration.txbody"
+  stakeCertDeregTxSignedFp <- H.note $ work </> "stake.deregistration.tx"
+
+  txin2 <- findLargestUtxoForPaymentKey epochStateView sbe wallet1
+
+  (_, stdout', stderr') <- execCliAny execConfig
+    [ eraName, "transaction", "build"
+    , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet1
+    , "--tx-in", Text.unpack $ renderTxIn txin2
+    , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet0) <> "+" <> show @Int 10_000_000
+    , "--certificate-file", stakeCertDeregFp
+    , "--witness-override", show @Int 2
+    , "--out-file", stakeCertDeregTxBodyFp
+    ]
+  H.note_ stdout'
+  H.note_ stderr'
+
+  void $ execCli' execConfig
+    [ eraName, "transaction", "sign"
+    , "--tx-body-file", stakeCertDeregTxBodyFp
+    , "--signing-key-file", signingKeyFp $ paymentKeyInfoPair wallet1
+    , "--signing-key-file", signingKeyFp stakeKeys
+    , "--out-file", stakeCertDeregTxSignedFp
+    ]
+
+  void $ execCli' execConfig
+    [ eraName, "transaction", "submit"
+    , "--tx-file", stakeCertDeregTxSignedFp
+    ]
+
+  H.note_ "Check that stake address is deregistered"
+  void $ retryUntilM epochStateView (WaitForBlocks 5)
+    (getAccountsStates epochStateView sbe)
+    (M.notMember stakeKeyHash)
+

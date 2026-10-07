@@ -1,0 +1,287 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Cardano.Node.Queries
+  ( -- * KES
+    MaxKESEvolutions (..)
+  , OperationalCertStartKESPeriod (..)
+  , KESMetricsData (..)
+  , HasKESMetricsData (..)
+  -- * General ledger
+  , LedgerQueries(..)
+  -- * Node kernel
+  , NodeKernelData(..)
+  , nkQueryChain
+  , nkQueryLedger
+  , mapNodeKernelDataIO
+  , setNodeKernel
+  , mkNodeKernelData
+  -- * Re-exports
+  , NodeKernel (..)
+  , LocalConnectionId
+  , RemoteConnectionId
+  , StrictMaybe(..)
+  , fromSMaybe
+  ) where
+
+import qualified Cardano.Chain.Block as Byron
+import qualified Cardano.Chain.UTxO as Byron
+import           Cardano.Crypto.KES.Class (Period)
+import           Cardano.Ledger.BaseTypes (StrictMaybe (..), fromSMaybe)
+import qualified Cardano.Ledger.Conway.State as Conway
+import qualified Cardano.Ledger.Shelley.LedgerState as Shelley
+import qualified Cardano.Ledger.State as Ledger
+import           Cardano.Network.NodeToClient (LocalConnectionId)
+import           Cardano.Network.NodeToNode (RemoteAddress, RemoteConnectionId)
+import           Cardano.Protocol.TPraos.OCert (KESPeriod (..))
+import           Ouroboros.Consensus.Block (ForgeStateInfo)
+import           Ouroboros.Consensus.Byron.Ledger.Block (ByronBlock)
+import qualified Ouroboros.Consensus.Byron.Ledger.Block as Byron
+import qualified Ouroboros.Consensus.Byron.Ledger.Ledger as Byron
+import qualified Ouroboros.Consensus.Cardano as Cardano
+import qualified Ouroboros.Consensus.Cardano.Block as Cardano
+import           Ouroboros.Consensus.HardFork.Combinator
+import           Ouroboros.Consensus.HardFork.Combinator.AcrossEras (OneEraForgeStateInfo (..))
+import           Ouroboros.Consensus.HardFork.Combinator.Embed.Unary
+import           Ouroboros.Consensus.Ledger.Abstract (EmptyMK)
+import           Ouroboros.Consensus.Ledger.Extended (ExtLedgerState)
+import           Ouroboros.Consensus.Node (NodeKernel (..))
+import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
+import qualified Ouroboros.Consensus.Shelley.Ledger as Shelley
+import           Ouroboros.Consensus.Shelley.Ledger.Block (ShelleyBlock)
+import           Ouroboros.Consensus.Shelley.Node ()
+import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
+import           Ouroboros.Consensus.TypeFamilyWrappers
+import           Ouroboros.Consensus.Util.Orphans ()
+import qualified Ouroboros.Network.AnchoredFragment as AF
+
+import           Control.Monad.STM (atomically)
+import           Data.Foldable (foldMap')
+import           Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import qualified Data.Map.Strict as Map
+import           Data.Monoid (Sum (..))
+import qualified Data.Set as Set (size)
+import           Data.SOP
+import           Data.SOP.Functors
+import           Data.Word (Word64)
+import           Lens.Micro ((^.))
+
+--
+-- * KES
+--
+-- | The maximum number of evolutions that a KES key can undergo before it is
+-- considered expired.
+newtype MaxKESEvolutions = MaxKESEvolutions Word64
+
+-- | The start KES period of the configured operational certificate.
+newtype OperationalCertStartKESPeriod = OperationalCertStartKESPeriod Period
+
+--
+-- * KESMetricsData
+--
+-- | KES-related data to be traced as metrics.
+data KESMetricsData
+  = NoKESMetricsData
+  -- ^ The current protocol does not support KES.
+  | TPraosKESMetricsData
+      !Period
+      -- ^ The current KES period of the hot key, relative to the start KES
+      -- period of the operational certificate.
+      !MaxKESEvolutions
+      -- ^ The configured max KES evolutions.
+      !OperationalCertStartKESPeriod
+      -- ^ The start KES period of the configured operational certificate.
+
+class HasKESMetricsData blk where
+  -- Because 'ForgeStateInfo' is a type family, we need a Proxy argument to
+  -- disambiguate.
+  getKESMetricsData :: Proxy blk -> ForgeStateInfo blk -> KESMetricsData
+
+  -- Default to 'NoKESMetricsData'
+  getKESMetricsData _ _ = NoKESMetricsData
+
+instance HasKESMetricsData (ShelleyBlock protocol c) where
+  getKESMetricsData _ forgeStateInfo =
+      TPraosKESMetricsData currKesPeriod maxKesEvos oCertStartKesPeriod
+    where
+      HotKey.KESInfo
+        { kesStartPeriod = KESPeriod startKesPeriod
+        , kesEvolution = currKesPeriod
+        , kesEndPeriod = KESPeriod endKesPeriod
+        } = forgeStateInfo
+
+      maxKesEvos = MaxKESEvolutions $
+          fromIntegral $ endKesPeriod - startKesPeriod
+
+      oCertStartKesPeriod = OperationalCertStartKESPeriod startKesPeriod
+
+instance HasKESMetricsData ByronBlock where
+
+instance All HasKESMetricsData xs => HasKESMetricsData (HardForkBlock xs) where
+  getKESMetricsData _ forgeStateInfo =
+      case forgeStateInfo of
+        CurrentEraLacksBlockForging _ -> NoKESMetricsData
+        CurrentEraForgeStateUpdated currentEraForgeStateInfo ->
+            hcollapse
+          . hcmap (Proxy @HasKESMetricsData) getOne
+          . getOneEraForgeStateInfo
+          $ currentEraForgeStateInfo
+    where
+      getOne :: forall blk. HasKESMetricsData blk
+             => WrapForgeStateInfo blk
+             -> K KESMetricsData blk
+      getOne = K . getKESMetricsData (Proxy @blk) . unwrapForgeStateInfo
+
+--
+-- * General ledger
+--
+class LedgerQueries blk where
+  ledgerUtxoSize     :: LedgerState blk EmptyMK -> Int
+  ledgerDelegMapSize :: LedgerState blk EmptyMK -> Int
+
+class LedgerConwayQueries blk where
+  ledgerDRepCount    :: LedgerState blk EmptyMK -> Int
+  ledgerDRepMapSize  :: LedgerState blk EmptyMK -> Int
+
+instance LedgerQueries Byron.ByronBlock where
+  ledgerUtxoSize = Map.size . Byron.unUTxO . Byron.cvsUtxo . Byron.byronLedgerState
+  ledgerDelegMapSize _ = 0
+
+instance (Ledger.EraAccounts era, Shelley.EraCertState era) => LedgerQueries (Shelley.ShelleyBlock protocol era) where
+  ledgerUtxoSize =
+      Map.size
+    . Ledger.unUTxO
+    . (^. Shelley.nesEsL
+       .  Shelley.esLStateL
+       .  Shelley.lsUTxOStateL
+       .  Shelley.utxoL
+      )
+    . Shelley.shelleyLedgerState
+  ledgerDelegMapSize =
+      getSum
+    . foldMap' (Sum . Set.size . Ledger.spsDelegators)
+    . Shelley.psStakePools
+    . (^. Shelley.nesEsL
+      .   Shelley.esLStateL
+      .   Shelley.lsCertStateL
+      .   Shelley.certPStateL
+      )
+    . Shelley.shelleyLedgerState
+
+instance Conway.ConwayEraCertState era => LedgerConwayQueries (Shelley.ShelleyBlock protocol era) where
+  ledgerDRepCount =
+      Map.size
+    . (^. Shelley.nesEsL
+       .  Shelley.esLStateL
+       .  Shelley.lsCertStateL
+       .  Conway.certVStateL
+       .  Conway.vsDRepsL
+      )
+    . Shelley.shelleyLedgerState
+  ledgerDRepMapSize =
+      Map.foldl' (\acc -> maybe acc (const $ 1 + acc) . (^. Conway.dRepDelegationAccountStateL)) 0
+    . (^. Shelley.nesEsL
+       .  Shelley.esLStateL
+       .  Shelley.lsCertStateL
+       .  Shelley.certDStateL
+       .  Ledger.accountsL
+       .  Ledger.accountsMapL
+      )
+    . Shelley.shelleyLedgerState
+
+instance (LedgerQueries x, NoHardForks x)
+      => LedgerQueries (HardForkBlock '[x]) where
+  ledgerUtxoSize     = ledgerUtxoSize     . unFlip . project . Flip
+  ledgerDelegMapSize = ledgerDelegMapSize . unFlip . project . Flip
+
+instance (LedgerConwayQueries x, NoHardForks x)
+      => LedgerConwayQueries (HardForkBlock '[x]) where
+  ledgerDRepCount    = ledgerDRepCount    . unFlip . project . Flip
+  ledgerDRepMapSize  = ledgerDRepMapSize  . unFlip . project . Flip
+
+instance LedgerQueries (Cardano.CardanoBlock c) where
+  ledgerUtxoSize = \case
+    Cardano.LedgerStateByron     ledgerByron    -> ledgerUtxoSize ledgerByron
+    Cardano.LedgerStateShelley   ledgerShelley  -> ledgerUtxoSize ledgerShelley
+    Cardano.LedgerStateAllegra   ledgerAllegra  -> ledgerUtxoSize ledgerAllegra
+    Cardano.LedgerStateMary      ledgerMary     -> ledgerUtxoSize ledgerMary
+    Cardano.LedgerStateAlonzo    ledgerAlonzo   -> ledgerUtxoSize ledgerAlonzo
+    Cardano.LedgerStateBabbage   ledgerBabbage  -> ledgerUtxoSize ledgerBabbage
+    Cardano.LedgerStateConway    ledgerConway   -> ledgerUtxoSize ledgerConway
+    Cardano.LedgerStateDijkstra  ledgerDijkstra -> ledgerUtxoSize ledgerDijkstra
+  ledgerDelegMapSize = \case
+    Cardano.LedgerStateByron   ledgerByron   -> ledgerDelegMapSize ledgerByron
+    Cardano.LedgerStateShelley ledgerShelley -> ledgerDelegMapSize ledgerShelley
+    Cardano.LedgerStateAllegra ledgerAllegra -> ledgerDelegMapSize ledgerAllegra
+    Cardano.LedgerStateMary    ledgerMary    -> ledgerDelegMapSize ledgerMary
+    Cardano.LedgerStateAlonzo  ledgerAlonzo  -> ledgerDelegMapSize ledgerAlonzo
+    Cardano.LedgerStateBabbage ledgerBabbage -> ledgerDelegMapSize ledgerBabbage
+    Cardano.LedgerStateConway  ledgerConway  -> ledgerDelegMapSize ledgerConway
+    Cardano.LedgerStateDijkstra  ledgerDijkstra  -> ledgerDelegMapSize ledgerDijkstra
+
+instance LedgerConwayQueries (Cardano.CardanoBlock c) where
+  ledgerDRepCount = \case
+    Cardano.LedgerStateByron   _ledgerByron   -> 0
+    Cardano.LedgerStateShelley _ledgerShelley -> 0
+    Cardano.LedgerStateAllegra _ledgerAllegra -> 0
+    Cardano.LedgerStateMary    _ledgerMary    -> 0
+    Cardano.LedgerStateAlonzo  _ledgerAlonzo  -> 0
+    Cardano.LedgerStateBabbage _ledgerBabbage -> 0
+    Cardano.LedgerStateConway  ledgerConway  -> ledgerDRepCount ledgerConway
+    Cardano.LedgerStateDijkstra  ledgerDijkstra  -> ledgerDRepCount ledgerDijkstra
+  ledgerDRepMapSize = \case
+    Cardano.LedgerStateByron   _ledgerByron   -> 0
+    Cardano.LedgerStateShelley _ledgerShelley -> 0
+    Cardano.LedgerStateAllegra _ledgerAllegra -> 0
+    Cardano.LedgerStateMary    _ledgerMary    -> 0
+    Cardano.LedgerStateAlonzo  _ledgerAlonzo  -> 0
+    Cardano.LedgerStateBabbage _ledgerBabbage -> 0
+    Cardano.LedgerStateConway  ledgerConway  -> ledgerDRepMapSize ledgerConway
+    Cardano.LedgerStateDijkstra  ledgerDijkstra  -> ledgerDRepMapSize ledgerDijkstra
+
+--
+-- * Node kernel
+--
+newtype NodeKernelData blk =
+  NodeKernelData
+  { unNodeKernelData :: IORef (StrictMaybe (NodeKernel IO RemoteAddress LocalConnectionId blk))
+  }
+
+mkNodeKernelData :: IO (NodeKernelData blk)
+mkNodeKernelData = NodeKernelData <$> newIORef SNothing
+
+setNodeKernel :: NodeKernelData blk
+              -> NodeKernel IO RemoteAddress LocalConnectionId blk
+              -> IO ()
+setNodeKernel (NodeKernelData ref) nodeKern =
+  writeIORef ref $ SJust nodeKern
+
+mapNodeKernelDataIO ::
+  (NodeKernel IO RemoteAddress LocalConnectionId blk -> IO a)
+  -> NodeKernelData blk
+  -> IO (StrictMaybe a)
+mapNodeKernelDataIO f (NodeKernelData ref) =
+  readIORef ref >>= traverse f
+
+nkQueryLedger ::
+     (ExtLedgerState blk EmptyMK -> a)
+  -> NodeKernel IO RemoteAddress LocalConnectionId blk
+  -> IO a
+nkQueryLedger f NodeKernel{getChainDB} =
+  f <$> atomically (ChainDB.getCurrentLedger getChainDB)
+
+nkQueryChain ::
+     (AF.AnchoredFragment (Header blk) -> a)
+  -> NodeKernel IO RemoteAddress LocalConnectionId blk
+  -> IO a
+nkQueryChain f NodeKernel{getChainDB} =
+  f <$> atomically (ChainDB.getCurrentChain getChainDB)

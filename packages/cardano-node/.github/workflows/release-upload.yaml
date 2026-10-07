@@ -1,0 +1,139 @@
+name: Post Release Upload
+# This makes it easy to get download release binaries built using
+# a github action for any tagged commit.
+#
+# This workflow builds and uploads the macOS, win and linux
+# binary packages as github assets.
+#
+# It uses `--builders "" --max-jobs 0` to ensure the assets are
+# from the IOG cache.
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+  push:
+    tags:
+      - '**'
+env:
+  # Only to avoid some repetition
+  FLAKE_REF: github:${{ github.repository }}/${{ github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  wait-for-hydra:
+    name: "Wait for hydra check-runs"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Waiting for ci/hydra-build:required to complete
+      run: |
+        while [[ true ]]; do
+          check_name='ci/hydra-build:required'
+          conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=$check_name" --paginate --jq '.check_runs[].conclusion')
+          case "$conclusion" in
+            success)
+              echo "$check_name succeeded"
+              exit 0;;
+            '')
+              echo "$check_name pending. Waiting 30s..."
+              sleep 30;;
+            *)
+              echo "$check_name terminated unsuccessfully"
+              exit 1;;
+          esac
+        done
+
+  pull:
+    needs: [wait-for-hydra]
+    strategy:
+      matrix:
+        arch:
+          - linux-amd64
+          - linux-arm64
+          - macos-amd64
+          - macos-arm64
+          - win-amd64
+    name: "Download Asset from the Cache"
+    runs-on: ubuntu-latest
+    outputs:
+      node_version: ${{ steps.cardano-node-version.outputs.VERSION }}
+    steps:
+      - name: Install Nix with good defaults
+        uses: cachix/install-nix-action@b97f05dcb019ddea06450a50ef6203d2fdc19fee # v31
+        with:
+          extra_nix_config: |
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            extra-substituters = https://cache.iog.io/
+          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Display flake metadata
+        id: flake-metadata
+        run: |
+          nix flake metadata "$FLAKE_REF"
+          nix flake metadata "$FLAKE_REF" --json | jq -r '"LOCKED_URL=\(.url)"' >> "$GITHUB_OUTPUT"
+      - name: Display cardano-node version
+        id: cardano-node-version
+        env:
+          LOCKED_URL: ${{ steps.flake-metadata.outputs.LOCKED_URL }}
+        run: |
+          VERSION=$(nix eval --raw "${LOCKED_URL}#legacyPackages.x86_64-linux.cardanoNodePackages.cardano-node.identifier.version")
+          echo "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Build
+        env:
+          LOCKED_URL: ${{ steps.flake-metadata.outputs.LOCKED_URL }}
+          NODE_VERSION: ${{ steps.cardano-node-version.outputs.VERSION }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          case "$ARCH" in
+            linux-amd64)
+              nix build --builders "" --max-jobs 0 "${LOCKED_URL}#hydraJobs.x86_64-linux.musl.cardano-node-linux"
+              cp result/cardano-node-*-*.tar.gz "cardano-node-${NODE_VERSION}-linux-amd64.tar.gz"
+              ;;
+            linux-arm64)
+              nix build --builders "" --max-jobs 0 "${LOCKED_URL}#hydraJobs.aarch64-linux.musl.cardano-node-linux"
+              cp result/cardano-node-*-*.tar.gz "cardano-node-${NODE_VERSION}-linux-arm64.tar.gz"
+              ;;
+            macos-amd64)
+              nix build --builders "" --max-jobs 0 "${LOCKED_URL}#hydraJobs.x86_64-darwin.native.cardano-node-macos"
+              cp result/cardano-node-*-*.tar.gz "cardano-node-${NODE_VERSION}-macos-amd64.tar.gz"
+              ;;
+            macos-arm64)
+              nix build --builders "" --max-jobs 0 "${LOCKED_URL}#hydraJobs.aarch64-darwin.native.cardano-node-macos"
+              cp result/cardano-node-*-*.tar.gz "cardano-node-${NODE_VERSION}-macos-arm64.tar.gz"
+              ;;
+            win-amd64)
+              nix build --builders "" --max-jobs 0 "${LOCKED_URL}#hydraJobs.x86_64-linux.windows.cardano-node-win"
+              cp result/cardano-node-*-*.zip "cardano-node-${NODE_VERSION}-win-amd64.zip"
+              ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ github.sha }}-${{ matrix.arch }}
+          path: cardano-node-*-*-*.*
+          retention-days: 1
+
+  upload-assets:
+    needs: [pull]
+    name: "Upload Assets"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          merge-multiple: true
+      - name: Checksums
+        env:
+          NODE_VERSION: ${{ needs.pull.outputs.node_version }}
+        run: |
+          sha256sums_filename="cardano-node-${NODE_VERSION}-sha256sums.txt"
+          sha256sum cardano-node-*-*-* > "$sha256sums_filename"
+      - name: Release
+        uses: input-output-hk/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77 # v1
+        with:
+          draft: true
+          files: |
+            cardano-node-*-linux-amd64.tar.gz
+            cardano-node-*-linux-arm64.tar.gz
+            cardano-node-*-macos-amd64.tar.gz
+            cardano-node-*-macos-arm64.tar.gz
+            cardano-node-*-sha256sums.txt
+            cardano-node-*-win-amd64.zip

@@ -1,0 +1,66 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
+-- PlutusV2 must be compiled using plc 1.0
+{-# OPTIONS_GHC -fplugin-opt PlutusTx.Plugin:target-version=1.0.0 #-}
+
+module Cardano.Benchmarking.PlutusScripts.CustomCall (script) where
+
+import           Cardano.Api (PlutusScriptVersion (PlutusScriptV2))
+import           Cardano.Benchmarking.PlutusScripts.CustomCallTypes
+import           Cardano.Benchmarking.ScriptAPI (PlutusBenchScript, mkPlutusBenchScript)
+import           Language.Haskell.TH.Syntax (Exp (LitE), Lit (StringL), Loc (loc_module), qLocation)
+import           PlutusLedgerApi.Common (serialiseCompiledCode)
+import qualified PlutusLedgerApi.V2 as PlutusV2
+import qualified PlutusTx (compile)
+import           PlutusTx.Foldable (sum)
+import           PlutusTx.List (all, length)
+import           PlutusTx.Prelude as Plutus hiding (Semigroup (..), (.), (<$>))
+import           Prelude as Haskell ((.), (<$>))
+
+
+script :: PlutusBenchScript
+script = mkPlutusBenchScript
+           $(LitE . StringL . loc_module <$> qLocation)
+           PlutusScriptV2
+           (serialiseCompiledCode $$(PlutusTx.compile [|| mkValidator ||]))
+
+
+instance Plutus.Eq CustomCallData where
+  CCNone            == CCNone           = True
+  CCInteger i       == CCInteger i'     = i == i'
+  CCSum i is        == CCSum i' is'     = i == i' && is == is'
+  CCByteString s    == CCByteString s'  = s == s'
+  CCConcat s ss     == CCConcat s' ss'  = s == s' && ss == ss'
+  _                 == _                = False
+
+{-# INLINEABLE mkValidator #-}
+mkValidator :: BuiltinData -> BuiltinData -> BuiltinData -> ()
+mkValidator datum_ redeemer_ _txContext =
+  let
+    result = case cmd of
+      EvalSpine       -> length redeemerArg == length datumArg
+      EvalValues      -> redeemerArg == datumArg
+      EvalAndValidate -> all validateValue redeemerArg && redeemerArg == datumArg
+  in if result then () else error ()
+  where
+    datum, redeemer :: CustomCallArg
+    datum     = unwrap datum_
+    redeemer  = unwrap redeemer_
+
+    datumArg            = snd datum
+    (cmd, redeemerArg)  = redeemer
+
+    validateValue :: CustomCallData -> Bool
+    validateValue (CCSum i is)      = i == sum is
+    validateValue (CCConcat s ss)   = s == mconcat ss
+    validateValue _                 = True
+
+{-# INLINEABLE unwrap #-}
+unwrap :: BuiltinData -> CustomCallArg
+unwrap  = PlutusV2.unsafeFromBuiltinData
+-- Note: type-constraining unsafeFromBuiltinData decreases script's execution units.
+

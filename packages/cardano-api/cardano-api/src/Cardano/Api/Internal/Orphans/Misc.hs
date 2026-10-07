@@ -1,0 +1,403 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Api.Internal.Orphans.Misc
+  (
+  )
+where
+
+import Cardano.Api.Error
+import Cardano.Api.Pretty
+
+import Cardano.Chain.Genesis qualified as Byron
+import Cardano.Ledger.Alonzo.PParams qualified as Ledger
+import Cardano.Ledger.Babbage.PParams qualified as Ledger
+import Cardano.Ledger.BaseTypes (strictMaybeToMaybe)
+import Cardano.Ledger.BaseTypes qualified as Ledger
+import Cardano.Ledger.Binary qualified as CBOR
+import Cardano.Ledger.Coin qualified as L
+import Cardano.Ledger.Conway.PParams qualified as Ledger
+import Cardano.Ledger.Dijkstra.PParams qualified as Ledger
+import Cardano.Ledger.HKD (NoUpdate (..))
+import Cardano.Ledger.Plutus.Language qualified as L
+import Cardano.Ledger.Shelley.PParams qualified as Ledger
+import Ouroboros.Consensus.Cardano.Block (EraMismatch (..))
+import Ouroboros.Consensus.HardFork.History.Qry (PastHorizonException (..))
+import Ouroboros.Consensus.HardFork.History.Summary
+  ( Bound (..)
+  , EraEnd (..)
+  , EraSummary (..)
+  )
+import PlutusLedgerApi.Common qualified as P
+
+import Data.Bits (Bits)
+import Data.ListMap (ListMap)
+import Data.ListMap qualified as ListMap
+import Data.Maybe.Strict (StrictMaybe (..))
+import Data.Monoid
+import Data.Text.Encoding.Error qualified as T
+import Data.Type.Equality
+import Data.Typeable
+import GHC.Exts (IsList (..))
+import GHC.Stack (prettyCallStack)
+import Network.Mux qualified as Mux
+import Prettyprinter (indent)
+import Text.Parsec.Error qualified as P
+
+-- | These instances originally existed on the Lovelace type.
+-- As the Lovelace type is deleted and we use L.Coin instead,
+-- these instances are added to L.Coin.  The instances are
+-- purely for the convenience of writing expressions involving
+-- L.Coin but be aware that not all uses of these typeclasses
+-- are valid.
+deriving newtype instance Real L.Coin
+
+deriving newtype instance Integral L.Coin
+
+deriving newtype instance Num L.Coin
+
+deriving newtype instance Bits L.Coin
+
+-- We wrap the individual records with Last and use Last's Semigroup instance.
+-- In this instance we take the last 'Just' value or the only 'Just' value
+instance Semigroup (Ledger.ShelleyPParams StrictMaybe era) where
+  (<>) pp1 pp2 =
+    let fsppTxFeePerByte = lastMappendWith Ledger.sppTxFeePerByte pp1 pp2
+        fsppTxFeeFixed = lastMappendWith Ledger.sppTxFeeFixed pp1 pp2
+        fsppMaxBBSize = lastMappendWith Ledger.sppMaxBBSize pp1 pp2
+        fsppMaxTxSize = lastMappendWith Ledger.sppMaxTxSize pp1 pp2
+        fsppMaxBHSize = lastMappendWith Ledger.sppMaxBHSize pp1 pp2
+        fsppKeyDeposit = lastMappendWith Ledger.sppKeyDeposit pp1 pp2
+        fsppPoolDeposit = lastMappendWith Ledger.sppPoolDeposit pp1 pp2
+        fsppEMax = lastMappendWith Ledger.sppEMax pp1 pp2
+        fsppNOpt = lastMappendWith Ledger.sppNOpt pp1 pp2
+        fsppA0 = lastMappendWith Ledger.sppA0 pp1 pp2
+        fsppRho = lastMappendWith Ledger.sppRho pp1 pp2
+        fsppTau = lastMappendWith Ledger.sppTau pp1 pp2
+        fsppD = lastMappendWith Ledger.sppD pp1 pp2
+        fsppExtraEntropy = lastMappendWith Ledger.sppExtraEntropy pp1 pp2
+        fsppProtocolVersion = lastMappendWith Ledger.sppProtocolVersion pp1 pp2
+        fsppMinUTxOValue = lastMappendWith Ledger.sppMinUTxOValue pp1 pp2
+        fsppMinPoolCost = lastMappendWith Ledger.sppMinPoolCost pp1 pp2
+     in Ledger.ShelleyPParams
+          { Ledger.sppTxFeePerByte = fsppTxFeePerByte
+          , Ledger.sppTxFeeFixed = fsppTxFeeFixed
+          , Ledger.sppMaxBBSize = fsppMaxBBSize
+          , Ledger.sppMaxTxSize = fsppMaxTxSize
+          , Ledger.sppMaxBHSize = fsppMaxBHSize
+          , Ledger.sppKeyDeposit = fsppKeyDeposit
+          , Ledger.sppPoolDeposit = fsppPoolDeposit
+          , Ledger.sppEMax = fsppEMax
+          , Ledger.sppNOpt = fsppNOpt
+          , Ledger.sppA0 = fsppA0
+          , Ledger.sppRho = fsppRho
+          , Ledger.sppTau = fsppTau
+          , Ledger.sppD = fsppD
+          , Ledger.sppExtraEntropy = fsppExtraEntropy
+          , Ledger.sppProtocolVersion = fsppProtocolVersion
+          , Ledger.sppMinUTxOValue = fsppMinUTxOValue
+          , Ledger.sppMinPoolCost = fsppMinPoolCost
+          }
+
+instance Semigroup (Ledger.AlonzoPParams StrictMaybe era) where
+  (<>) p1 p2 =
+    let fappTxFeePerByte = lastMappendWith Ledger.appTxFeePerByte p1 p2
+        fappTxFeeFixed = lastMappendWith Ledger.appTxFeeFixed p1 p2
+        fappMaxBBSize = lastMappendWith Ledger.appMaxBBSize p1 p2
+        fappMaxTxSize = lastMappendWith Ledger.appMaxTxSize p1 p2
+        fappMaxBHSize = lastMappendWith Ledger.appMaxBHSize p1 p2
+        fappKeyDeposit = lastMappendWith Ledger.appKeyDeposit p1 p2
+        fappPoolDeposit = lastMappendWith Ledger.appPoolDeposit p1 p2
+        fappEMax = lastMappendWith Ledger.appEMax p1 p2
+        fappNOpt = lastMappendWith Ledger.appNOpt p1 p2
+        fappA0 = lastMappendWith Ledger.appA0 p1 p2
+        fappRho = lastMappendWith Ledger.appRho p1 p2
+        fappTau = lastMappendWith Ledger.appTau p1 p2
+        fappD = lastMappendWith Ledger.appD p1 p2
+        fappExtraEntropy = lastMappendWith Ledger.appExtraEntropy p1 p2
+        fappProtocolVersion = lastMappendWith Ledger.appProtocolVersion p1 p2
+        fappMinPoolCost = lastMappendWith Ledger.appMinPoolCost p1 p2
+        fappCoinsPerUTxOWord = lastMappendWith Ledger.appCoinsPerUTxOWord p1 p2
+        fappCostModels = lastMappendWith Ledger.appCostModels p1 p2
+        fappPrices = lastMappendWith Ledger.appPrices p1 p2
+        fappMaxTxExUnits = lastMappendWith Ledger.appMaxTxExUnits p1 p2
+        fappMaxBlockExUnits = lastMappendWith Ledger.appMaxBlockExUnits p1 p2
+        fappMaxValSize = lastMappendWith Ledger.appMaxValSize p1 p2
+        fappCollateralPercentage = lastMappendWith Ledger.appCollateralPercentage p1 p2
+        fappMaxCollateralInputs = lastMappendWith Ledger.appMaxCollateralInputs p1 p2
+     in Ledger.AlonzoPParams
+          { Ledger.appTxFeePerByte = fappTxFeePerByte
+          , Ledger.appTxFeeFixed = fappTxFeeFixed
+          , Ledger.appMaxBBSize = fappMaxBBSize
+          , Ledger.appMaxTxSize = fappMaxTxSize
+          , Ledger.appMaxBHSize = fappMaxBHSize
+          , Ledger.appKeyDeposit = fappKeyDeposit
+          , Ledger.appPoolDeposit = fappPoolDeposit
+          , Ledger.appEMax = fappEMax
+          , Ledger.appNOpt = fappNOpt
+          , Ledger.appA0 = fappA0
+          , Ledger.appRho = fappRho
+          , Ledger.appTau = fappTau
+          , Ledger.appD = fappD
+          , Ledger.appExtraEntropy = fappExtraEntropy
+          , Ledger.appProtocolVersion = fappProtocolVersion
+          , Ledger.appMinPoolCost = fappMinPoolCost
+          , Ledger.appCoinsPerUTxOWord = fappCoinsPerUTxOWord
+          , Ledger.appCostModels = fappCostModels
+          , Ledger.appPrices = fappPrices
+          , Ledger.appMaxTxExUnits = fappMaxTxExUnits
+          , Ledger.appMaxBlockExUnits = fappMaxBlockExUnits
+          , Ledger.appMaxValSize = fappMaxValSize
+          , Ledger.appCollateralPercentage = fappCollateralPercentage
+          , Ledger.appMaxCollateralInputs = fappMaxCollateralInputs
+          }
+
+-- We're not interested in trying to mappend the underlying `Maybe` types
+-- we only want to select one or the other therefore we use `Last`.
+lastMappend :: StrictMaybe a -> StrictMaybe a -> StrictMaybe a
+lastMappend a b = Ledger.maybeToStrictMaybe . getLast $ strictMaybeToLast a <> strictMaybeToLast b
+ where
+  strictMaybeToLast :: StrictMaybe a -> Last a
+  strictMaybeToLast = Last . strictMaybeToMaybe
+
+lastMappendWith :: (a -> StrictMaybe b) -> a -> a -> StrictMaybe b
+lastMappendWith l = under2 l lastMappend
+ where
+  under2 :: (a -> c) -> (c -> c -> c) -> a -> a -> c
+  under2 f g x y = g (f x) (f y)
+
+instance Semigroup (Ledger.BabbagePParams StrictMaybe era) where
+  (<>) p1 p2 =
+    let fbppTxFeePerByte = lastMappendWith Ledger.bppTxFeePerByte p1 p2
+        fbppTxFeeFixed = lastMappendWith Ledger.bppTxFeeFixed p1 p2
+        fbppMaxBBSize = lastMappendWith Ledger.bppMaxBBSize p1 p2
+        fbppMaxTxSize = lastMappendWith Ledger.bppMaxTxSize p1 p2
+        fbppMaxBHSize = lastMappendWith Ledger.bppMaxBHSize p1 p2
+        fbppKeyDeposit = lastMappendWith Ledger.bppKeyDeposit p1 p2
+        fbppPoolDeposit = lastMappendWith Ledger.bppPoolDeposit p1 p2
+        fbppEMax = lastMappendWith Ledger.bppEMax p1 p2
+        fbppNOpt = lastMappendWith Ledger.bppNOpt p1 p2
+        fbppA0 = lastMappendWith Ledger.bppA0 p1 p2
+        fbppRho = lastMappendWith Ledger.bppRho p1 p2
+        fbppTau = lastMappendWith Ledger.bppTau p1 p2
+        fbppProtocolVersion = lastMappendWith Ledger.bppProtocolVersion p1 p2
+        fbppMinPoolCost = lastMappendWith Ledger.bppMinPoolCost p1 p2
+        fbppCoinsPerUTxOByte = lastMappendWith Ledger.bppCoinsPerUTxOByte p1 p2
+        fbppCostModels = lastMappendWith Ledger.bppCostModels p1 p2
+        fbppPrices = lastMappendWith Ledger.bppPrices p1 p2
+        fbppMaxTxExUnits = lastMappendWith Ledger.bppMaxTxExUnits p1 p2
+        fbppMaxBlockExUnits = lastMappendWith Ledger.bppMaxBlockExUnits p1 p2
+        fbppMaxValSize = lastMappendWith Ledger.bppMaxValSize p1 p2
+        fbppCollateralPercentage = lastMappendWith Ledger.bppCollateralPercentage p1 p2
+        fbppMaxCollateralInputs = lastMappendWith Ledger.bppMaxCollateralInputs p1 p2
+     in Ledger.BabbagePParams
+          { Ledger.bppTxFeePerByte = fbppTxFeePerByte
+          , Ledger.bppTxFeeFixed = fbppTxFeeFixed
+          , Ledger.bppMaxBBSize = fbppMaxBBSize
+          , Ledger.bppMaxTxSize = fbppMaxTxSize
+          , Ledger.bppMaxBHSize = fbppMaxBHSize
+          , Ledger.bppKeyDeposit = fbppKeyDeposit
+          , Ledger.bppPoolDeposit = fbppPoolDeposit
+          , Ledger.bppEMax = fbppEMax
+          , Ledger.bppNOpt = fbppNOpt
+          , Ledger.bppA0 = fbppA0
+          , Ledger.bppRho = fbppRho
+          , Ledger.bppTau = fbppTau
+          , Ledger.bppProtocolVersion = fbppProtocolVersion
+          , Ledger.bppMinPoolCost = fbppMinPoolCost
+          , Ledger.bppCoinsPerUTxOByte = fbppCoinsPerUTxOByte
+          , Ledger.bppCostModels = fbppCostModels
+          , Ledger.bppPrices = fbppPrices
+          , Ledger.bppMaxTxExUnits = fbppMaxTxExUnits
+          , Ledger.bppMaxBlockExUnits = fbppMaxBlockExUnits
+          , Ledger.bppMaxValSize = fbppMaxValSize
+          , Ledger.bppCollateralPercentage = fbppCollateralPercentage
+          , Ledger.bppMaxCollateralInputs = fbppMaxCollateralInputs
+          }
+
+instance Semigroup (Ledger.ConwayPParams StrictMaybe era) where
+  (<>) p1 p2 =
+    Ledger.ConwayPParams
+      { Ledger.cppTxFeePerByte = lastMappendWithTHKD Ledger.cppTxFeePerByte p1 p2
+      , Ledger.cppTxFeeFixed = lastMappendWithTHKD Ledger.cppTxFeeFixed p1 p2
+      , Ledger.cppMaxBBSize = lastMappendWithTHKD Ledger.cppMaxBBSize p1 p2
+      , Ledger.cppMaxTxSize = lastMappendWithTHKD Ledger.cppMaxTxSize p1 p2
+      , Ledger.cppMaxBHSize = lastMappendWithTHKD Ledger.cppMaxBHSize p1 p2
+      , Ledger.cppKeyDeposit = lastMappendWithTHKD Ledger.cppKeyDeposit p1 p2
+      , Ledger.cppPoolDeposit = lastMappendWithTHKD Ledger.cppPoolDeposit p1 p2
+      , Ledger.cppEMax = lastMappendWithTHKD Ledger.cppEMax p1 p2
+      , Ledger.cppNOpt = lastMappendWithTHKD Ledger.cppNOpt p1 p2
+      , Ledger.cppA0 = lastMappendWithTHKD Ledger.cppA0 p1 p2
+      , Ledger.cppRho = lastMappendWithTHKD Ledger.cppRho p1 p2
+      , Ledger.cppTau = lastMappendWithTHKD Ledger.cppTau p1 p2
+      , Ledger.cppProtocolVersion = NoUpdate -- For conway, protocol version cannot be changed via `PParamsUpdate`
+      , Ledger.cppMinPoolCost = lastMappendWithTHKD Ledger.cppMinPoolCost p1 p2
+      , Ledger.cppCoinsPerUTxOByte = lastMappendWithTHKD Ledger.cppCoinsPerUTxOByte p1 p2
+      , Ledger.cppCostModels = lastMappendWithTHKD Ledger.cppCostModels p1 p2
+      , Ledger.cppPrices = lastMappendWithTHKD Ledger.cppPrices p1 p2
+      , Ledger.cppMaxTxExUnits = lastMappendWithTHKD Ledger.cppMaxTxExUnits p1 p2
+      , Ledger.cppMaxBlockExUnits = lastMappendWithTHKD Ledger.cppMaxBlockExUnits p1 p2
+      , Ledger.cppMaxValSize = lastMappendWithTHKD Ledger.cppMaxValSize p1 p2
+      , Ledger.cppCollateralPercentage = lastMappendWithTHKD Ledger.cppCollateralPercentage p1 p2
+      , Ledger.cppMaxCollateralInputs = lastMappendWithTHKD Ledger.cppMaxCollateralInputs p1 p2
+      , Ledger.cppPoolVotingThresholds = lastMappendWithTHKD Ledger.cppPoolVotingThresholds p1 p2
+      , Ledger.cppDRepVotingThresholds = lastMappendWithTHKD Ledger.cppDRepVotingThresholds p1 p2
+      , Ledger.cppCommitteeMinSize = lastMappendWithTHKD Ledger.cppCommitteeMinSize p1 p2
+      , Ledger.cppCommitteeMaxTermLength = lastMappendWithTHKD Ledger.cppCommitteeMaxTermLength p1 p2
+      , Ledger.cppGovActionLifetime = lastMappendWithTHKD Ledger.cppGovActionLifetime p1 p2
+      , Ledger.cppGovActionDeposit = lastMappendWithTHKD Ledger.cppGovActionDeposit p1 p2
+      , Ledger.cppDRepDeposit = lastMappendWithTHKD Ledger.cppDRepDeposit p1 p2
+      , Ledger.cppDRepActivity = lastMappendWithTHKD Ledger.cppDRepActivity p1 p2
+      , Ledger.cppMinFeeRefScriptCostPerByte =
+          lastMappendWithTHKD Ledger.cppMinFeeRefScriptCostPerByte p1 p2
+      }
+
+instance Semigroup (Ledger.DijkstraPParams StrictMaybe era) where
+  (<>) p1 p2 =
+    Ledger.DijkstraPParams
+      { Ledger.dppTxFeePerByte = lastMappendWithTHKD Ledger.dppTxFeePerByte p1 p2
+      , Ledger.dppTxFeeFixed = lastMappendWithTHKD Ledger.dppTxFeeFixed p1 p2
+      , Ledger.dppMaxBBSize = lastMappendWithTHKD Ledger.dppMaxBBSize p1 p2
+      , Ledger.dppMaxTxSize = lastMappendWithTHKD Ledger.dppMaxTxSize p1 p2
+      , Ledger.dppMaxBHSize = lastMappendWithTHKD Ledger.dppMaxBHSize p1 p2
+      , Ledger.dppKeyDeposit = lastMappendWithTHKD Ledger.dppKeyDeposit p1 p2
+      , Ledger.dppPoolDeposit = lastMappendWithTHKD Ledger.dppPoolDeposit p1 p2
+      , Ledger.dppEMax = lastMappendWithTHKD Ledger.dppEMax p1 p2
+      , Ledger.dppNOpt = lastMappendWithTHKD Ledger.dppNOpt p1 p2
+      , Ledger.dppA0 = lastMappendWithTHKD Ledger.dppA0 p1 p2
+      , Ledger.dppRho = lastMappendWithTHKD Ledger.dppRho p1 p2
+      , Ledger.dppTau = lastMappendWithTHKD Ledger.dppTau p1 p2
+      , Ledger.dppProtocolVersion = NoUpdate -- For Dijkstra, protocol version cannot be changed via PParamsUpdate
+      , Ledger.dppMinPoolCost = lastMappendWithTHKD Ledger.dppMinPoolCost p1 p2
+      , Ledger.dppCoinsPerUTxOByte = lastMappendWithTHKD Ledger.dppCoinsPerUTxOByte p1 p2
+      , Ledger.dppCostModels = lastMappendWithTHKD Ledger.dppCostModels p1 p2
+      , Ledger.dppPrices = lastMappendWithTHKD Ledger.dppPrices p1 p2
+      , Ledger.dppMaxTxExUnits = lastMappendWithTHKD Ledger.dppMaxTxExUnits p1 p2
+      , Ledger.dppMaxBlockExUnits = lastMappendWithTHKD Ledger.dppMaxBlockExUnits p1 p2
+      , Ledger.dppMaxValSize = lastMappendWithTHKD Ledger.dppMaxValSize p1 p2
+      , Ledger.dppCollateralPercentage = lastMappendWithTHKD Ledger.dppCollateralPercentage p1 p2
+      , Ledger.dppMaxCollateralInputs = lastMappendWithTHKD Ledger.dppMaxCollateralInputs p1 p2
+      , Ledger.dppPoolVotingThresholds = lastMappendWithTHKD Ledger.dppPoolVotingThresholds p1 p2
+      , Ledger.dppDRepVotingThresholds = lastMappendWithTHKD Ledger.dppDRepVotingThresholds p1 p2
+      , Ledger.dppCommitteeMinSize = lastMappendWithTHKD Ledger.dppCommitteeMinSize p1 p2
+      , Ledger.dppCommitteeMaxTermLength = lastMappendWithTHKD Ledger.dppCommitteeMaxTermLength p1 p2
+      , Ledger.dppGovActionLifetime = lastMappendWithTHKD Ledger.dppGovActionLifetime p1 p2
+      , Ledger.dppGovActionDeposit = lastMappendWithTHKD Ledger.dppGovActionDeposit p1 p2
+      , Ledger.dppDRepDeposit = lastMappendWithTHKD Ledger.dppDRepDeposit p1 p2
+      , Ledger.dppDRepActivity = lastMappendWithTHKD Ledger.dppDRepActivity p1 p2
+      , Ledger.dppMinFeeRefScriptCostPerByte =
+          lastMappendWithTHKD Ledger.dppMinFeeRefScriptCostPerByte p1 p2
+      , Ledger.dppMaxRefScriptSizePerBlock =
+          lastMappendWithTHKD Ledger.dppMaxRefScriptSizePerBlock p1 p2
+      , Ledger.dppMaxRefScriptSizePerTx =
+          lastMappendWithTHKD Ledger.dppMaxRefScriptSizePerTx p1 p2
+      , Ledger.dppRefScriptCostStride = lastMappendWithTHKD Ledger.dppRefScriptCostStride p1 p2
+      , Ledger.dppRefScriptCostMultiplier =
+          lastMappendWithTHKD Ledger.dppRefScriptCostMultiplier p1 p2
+      , Ledger.dppMaxPledgeLeverage =
+          lastMappendWithTHKD Ledger.dppMaxPledgeLeverage p1 p2
+      , Ledger.dppMinPoolMargin =
+          lastMappendWithTHKD Ledger.dppMinPoolMargin p1 p2
+      , Ledger.dppLeiosAnnouncementPeriodLength =
+          lastMappendWithTHKD Ledger.dppLeiosAnnouncementPeriodLength p1 p2
+      , Ledger.dppLeiosVotePeriodLength = lastMappendWithTHKD Ledger.dppLeiosVotePeriodLength p1 p2
+      , Ledger.dppLeiosDiffusionPeriodLength =
+          lastMappendWithTHKD Ledger.dppLeiosDiffusionPeriodLength p1 p2
+      , Ledger.dppLeiosCommitteeSize = lastMappendWithTHKD Ledger.dppLeiosCommitteeSize p1 p2
+      , Ledger.dppLeiosQuorumStakeThreshold = lastMappendWithTHKD Ledger.dppLeiosQuorumStakeThreshold p1 p2
+      , Ledger.dppMaxEndorserBlockReferencesSize =
+          lastMappendWithTHKD Ledger.dppMaxEndorserBlockReferencesSize p1 p2
+      , Ledger.dppMaxEndorserBlockTxsSize = lastMappendWithTHKD Ledger.dppMaxEndorserBlockTxsSize p1 p2
+      , Ledger.dppMaxEndorserBlockExUnits = lastMappendWithTHKD Ledger.dppMaxEndorserBlockExUnits p1 p2
+      , Ledger.dppMaxRefScriptSizePerEndorserBlock =
+          lastMappendWithTHKD Ledger.dppMaxRefScriptSizePerEndorserBlock p1 p2
+      , Ledger.dppPerasMinCandidateBlockAge =
+          lastMappendWithTHKD Ledger.dppPerasMinCandidateBlockAge p1 p2
+      , Ledger.dppPerasHealingFactor = lastMappendWithTHKD Ledger.dppPerasHealingFactor p1 p2
+      , Ledger.dppPerasCertBoost = lastMappendWithTHKD Ledger.dppPerasCertBoost p1 p2
+      , Ledger.dppPerasTargetCommitteeSize =
+          lastMappendWithTHKD Ledger.dppPerasTargetCommitteeSize p1 p2
+      , Ledger.dppPerasBootstrapRound = lastMappendWithTHKD Ledger.dppPerasBootstrapRound p1 p2
+      , Ledger.dppPerasQuorumThresholdSafetyMargin =
+          lastMappendWithTHKD Ledger.dppPerasQuorumThresholdSafetyMargin p1 p2
+      , Ledger.dppRefInputsCostPerMultiAssetPolicy =
+          lastMappendWithTHKD Ledger.dppRefInputsCostPerMultiAssetPolicy p1 p2
+      , Ledger.dppRefInputsCostPerDatumByte =
+          lastMappendWithTHKD Ledger.dppRefInputsCostPerDatumByte p1 p2
+      }
+
+lastMappendWithTHKD :: (a -> Ledger.THKD g StrictMaybe b) -> a -> a -> Ledger.THKD g StrictMaybe b
+lastMappendWithTHKD f a b = Ledger.THKD $ lastMappendWith (Ledger.unTHKD . f) a b
+
+instance Pretty Mux.Error where
+  pretty err = "Mux layer error:" <+> prettyException err
+
+-- TODO upstream to cardano-ledger
+instance IsList (ListMap k a) where
+  type Item (ListMap k a) = (k, a)
+  fromList = ListMap.fromList
+  toList = ListMap.toList
+
+instance Error CBOR.DecoderError where
+  prettyError = pshow
+
+instance Error P.ScriptDecodeError where
+  prettyError = pshow
+
+instance Error T.UnicodeException where
+  prettyError = pshow
+
+instance Error EraMismatch where
+  prettyError (EraMismatch ledgerEraName' otherEraName') =
+    "The era of the node and the tx do not match. "
+      <> "The node is running in the "
+      <> pshow ledgerEraName'
+      <> " era, but the transaction is for the "
+      <> pshow otherEraName'
+      <> " era."
+
+instance Error Byron.GenesisDataGenerationError where
+  prettyError = pretty . show
+
+instance Error P.ParseError where
+  prettyError = pretty . show
+
+instance Error PastHorizonException where
+  prettyError e =
+    vsep
+      [ "Past horizon! Tried to convert a slot/time past the point where the"
+          <+> "hard fork history is known."
+      , mempty
+      , "Expression:" <+> pshow (pastHorizonExpression e)
+      , mempty
+      , "Era summary (" <> pretty (length $ pastHorizonSummary e) <+> "eras):"
+      , indent 2 . vsep $ zipWith prettyEraSummary [1 :: Int ..] (pastHorizonSummary e)
+      , mempty
+      , "Call stack:"
+      , indent 2 . pretty . prettyCallStack $ pastHorizonCallStack e
+      ]
+   where
+    prettyEraSummary i era =
+      "Era" <+> pretty i <> ":" <+> prettyBound (eraStart era) <+> "-" <+> prettyEraEnd (eraEnd era)
+    prettyBound bound =
+      "slot" <+> pshow (boundSlot bound) <> "," <+> "epoch" <+> pshow (boundEpoch bound)
+    prettyEraEnd EraUnbounded = "unbounded"
+    prettyEraEnd (EraEnd bound) = prettyBound bound
+
+deriving via ShowOf TypeRep instance Pretty TypeRep
+
+instance TestEquality L.SLanguage where
+  testEquality s1 s2 = case (s1, s2) of
+    (L.SPlutusV1, L.SPlutusV1) -> Just Refl
+    (L.SPlutusV2, L.SPlutusV2) -> Just Refl
+    (L.SPlutusV3, L.SPlutusV3) -> Just Refl
+    (L.SPlutusV4, L.SPlutusV4) -> Just Refl
+    _ -> Nothing

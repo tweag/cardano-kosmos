@@ -1,0 +1,166 @@
+module Cardano.Wasm.Api.InfoToTypeScript where
+
+import Cardano.Wasm.Api.Info (tsTypeAsString)
+import Cardano.Wasm.Api.Info qualified as Info
+import Cardano.Wasm.Api.TypeScriptDefs qualified as TypeScript
+
+import Data.List (nub)
+import Data.Map (Map)
+import Data.Map qualified as Map
+import Data.Maybe (fromMaybe)
+
+-- | Converts the Cardano API information to a TypeScript declaration file AST.
+apiInfoToTypeScriptFile :: Info.ApiInfo -> [TypeScript.TypeScriptFile]
+apiInfoToTypeScriptFile apiInfo =
+  ( TypeScript.TypeScriptFile
+      { TypeScript.typeScriptFileName = Info.dashCaseName (Info.mainObject apiInfo) <> ".d.ts"
+      , TypeScript.typeScriptFileContent =
+          virtualObjectInfoToInterfaceDecs
+            mainObjectName
+            False
+            voMap
+            (Info.mainObject apiInfo)
+            ++ [ TypeScript.Declaration
+                   [ Info.initialiseFunctionDoc apiInfo
+                   , "@returns " <> Info.initialiseFunctionReturnDoc apiInfo
+                   ]
+                   ( TypeScript.FunctionDec $
+                       TypeScript.FunctionHeader
+                         { TypeScript.functionName = "initialise"
+                         , TypeScript.functionParams = []
+                         , TypeScript.functionReturnType =
+                             "Promise<" <> Info.virtualObjectName (Info.mainObject apiInfo) <> ">"
+                         }
+                   )
+               , TypeScript.Declaration [] (TypeScript.ExportDec True "initialise")
+               ]
+      }
+  )
+    : virtualObjectInterfaces
+ where
+  virtualObjectInterfaces =
+    map (virtualObjectInfoToTypeScriptFile mainObjectName voMap) (Info.virtualObjects apiInfo)
+
+  voMap = Map.fromList [(Info.virtualObjectName vo, vo) | vo <- Info.virtualObjects apiInfo]
+
+  mainObjectName = Info.virtualObjectName $ Info.mainObject apiInfo
+
+importDeclaration :: Info.VirtualObjectInfo -> TypeScript.Declaration
+importDeclaration vo =
+  TypeScript.Declaration
+    { TypeScript.declarationComment = []
+    , TypeScript.declarationContent =
+        TypeScript.ImportDec (Info.virtualObjectName vo) $ Info.dashCaseName vo
+    }
+
+importDeclarations
+  :: Map String Info.VirtualObjectInfo -> Info.VirtualObjectInfo -> [TypeScript.Declaration]
+importDeclarations voMap (Info.VirtualObjectInfo{Info.virtualObjectMethods = methods}) =
+  map
+    importDeclaration
+    $ nub
+      [ vo
+      | Info.MethodInfo{Info.methodReturnType = Info.NewObject returnType} <- flattenMethods methods
+      , Just vo <- [Map.lookup returnType voMap]
+      ]
+
+flattenMethods :: [Info.MethodHierarchy] -> [Info.MethodInfo]
+flattenMethods = concatMap flattenMethods'
+ where
+  flattenMethods' :: Info.MethodHierarchy -> [Info.MethodInfo]
+  flattenMethods' (Info.MethodInfoEntry mi) = [mi]
+  flattenMethods' (Info.MethodGroupEntry (Info.MethodGroup{Info.groupMethods = methods})) = flattenMethods methods
+
+virtualObjectInfoToTypeScriptFile
+  :: String -> Map String Info.VirtualObjectInfo -> Info.VirtualObjectInfo -> TypeScript.TypeScriptFile
+virtualObjectInfoToTypeScriptFile mainObjectName voMap vo =
+  TypeScript.TypeScriptFile
+    { TypeScript.typeScriptFileName = Info.dashCaseName vo <> ".d.ts"
+    , TypeScript.typeScriptFileContent = virtualObjectInfoToInterfaceDecs mainObjectName True voMap vo
+    }
+
+oxfordCommaSeparatedList :: [String] -> String
+oxfordCommaSeparatedList [] = ""
+oxfordCommaSeparatedList [l] = l
+oxfordCommaSeparatedList [p, l] = p <> " and " <> l
+oxfordCommaSeparatedList [a, p, l] = a <> ", " <> p <> ", and " <> l
+oxfordCommaSeparatedList (h : t) = h <> ", " <> oxfordCommaSeparatedList t
+
+virtualObjectInfoToInterfaceDecs
+  :: String
+  -> Bool
+  -> Map String Info.VirtualObjectInfo
+  -> Info.VirtualObjectInfo
+  -> [TypeScript.Declaration]
+virtualObjectInfoToInterfaceDecs mainObjectName isDefaultExport voMap vo =
+  importDeclarations voMap vo
+    ++ [ TypeScript.Declaration
+           [Info.virtualObjectDoc vo]
+           ( TypeScript.InterfaceDec
+               (Info.virtualObjectName vo)
+               ( [ TypeScript.SingleInterfaceContent $
+                     TypeScript.InterfaceContent
+                       [ "The type of the object, used for identification (the \""
+                           <> Info.virtualObjectName vo
+                           <> "\" string)."
+                       , "Other types of objects would be:"
+                       , oxfordCommaSeparatedList
+                           ( ( if mainObjectName == Info.virtualObjectName vo
+                                 then id
+                                 else (show mainObjectName :)
+                             )
+                               [ show $ Info.virtualObjectName v
+                               | v <- Map.elems voMap
+                               , Info.virtualObjectName v /= Info.virtualObjectName vo
+                               ]
+                           )
+                       ]
+                       (TypeScript.InterfaceProperty "objectType" "string")
+                 ]
+                   <> map
+                     (methodHierarchyToGroupedInterfaceContents (Info.virtualObjectName vo))
+                     (Info.virtualObjectMethods vo)
+               )
+           )
+       ]
+    ++ [ TypeScript.Declaration [] (TypeScript.ExportDec True $ Info.virtualObjectName vo) | isDefaultExport
+       ]
+
+methodHierarchyToGroupedInterfaceContents
+  :: String -> Info.MethodHierarchy -> TypeScript.GroupedInterfaceContent
+methodHierarchyToGroupedInterfaceContents selfTypeName (Info.MethodInfoEntry method) =
+  TypeScript.SingleInterfaceContent $ methodInfoToInterfaceContent selfTypeName method
+methodHierarchyToGroupedInterfaceContents selfTypeName (Info.MethodGroupEntry group) =
+  TypeScript.GroupedInterfaceContent $
+    TypeScript.InterfaceContentGroup
+      (Info.groupDoc group)
+      (Info.groupName group)
+      ( map
+          (methodHierarchyToGroupedInterfaceContents selfTypeName)
+          (Info.groupMethods group)
+      )
+
+methodInfoToInterfaceContent :: String -> Info.MethodInfo -> TypeScript.InterfaceContent
+methodInfoToInterfaceContent selfTypeName method =
+  TypeScript.InterfaceContent
+    ( [Info.methodDoc method]
+        <> map (\p -> "@param " <> Info.paramName p <> " " <> Info.paramDoc p) (Info.methodParams method)
+        <> ["@returns " <> Info.methodReturnDoc method]
+    )
+    ( TypeScript.InterfaceMethod
+        (fromMaybe (Info.methodName method) (Info.methodSimpleName method))
+        (map paramInfoToFunctionParam $ Info.methodParams method)
+        (methodReturnTypeToString selfTypeName $ Info.methodReturnType method)
+    )
+
+paramInfoToFunctionParam :: Info.ParamInfo -> TypeScript.FunctionParam
+paramInfoToFunctionParam p =
+  TypeScript.FunctionParam
+    { TypeScript.paramName = Info.paramName p
+    , TypeScript.paramType = tsTypeAsString $ Info.paramType p
+    }
+
+methodReturnTypeToString :: String -> Info.MethodReturnTypeInfo -> String
+methodReturnTypeToString selfTypeName Info.Fluent = selfTypeName
+methodReturnTypeToString _ (Info.NewObject objTypeName) = "Promise<" <> objTypeName <> ">"
+methodReturnTypeToString _ (Info.OtherType typeName) = "Promise<" <> tsTypeAsString typeName <> ">"

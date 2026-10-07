@@ -1,0 +1,161 @@
+cabal-version: 3.4
+name: cardano-wasm
+version: 10.0.0.0
+copyright: 2020-2026 Input Output Global Inc (IOG).
+author: IOHK
+maintainer: operations@iohk.io
+license: Apache-2.0
+build-type: Simple
+
+common project-config
+  default-language: Haskell2010
+  default-extensions:
+    ImportQualifiedPost
+    OverloadedStrings
+
+  build-depends: base >=4.18 && <5
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wno-unticked-promoted-constructors
+    -Wpartial-fields
+    -Wredundant-constraints
+    -Wunused-packages
+
+library cardano-wasi-lib
+  import: project-config
+  hs-source-dirs:
+    src-lib
+
+  exposed-modules:
+    Cardano.Wasm.Api.Address
+    Cardano.Wasm.Api.Certificate.StakeCertificate
+    Cardano.Wasm.Api.GRPC
+    Cardano.Wasm.Api.Info
+    Cardano.Wasm.Api.InfoToTypeScript
+    Cardano.Wasm.Api.Tx
+    Cardano.Wasm.Api.TypeScriptDefs
+    Cardano.Wasm.Api.Wallet
+    Cardano.Wasm.ExceptionHandling
+    Cardano.Wasm.NumberConversion
+
+  other-modules:
+    Cardano.Wasm.Internal.Api.Era
+    Cardano.Wasm.Internal.Api.Random
+
+  build-depends:
+    aeson,
+    base,
+    base16-bytestring,
+    base64-bytestring,
+    bytestring,
+    cardano-api,
+    cardano-crypto-class,
+    cardano-ledger-api,
+    cardano-strict-containers,
+    casing,
+    containers,
+    exceptions,
+    filepath,
+    microlens,
+    text,
+
+  if arch(wasm32)
+    build-depends:
+      base16-bytestring
+  else
+    build-depends:
+      crypton
+
+executable cardano-wasi
+  import: project-config
+  main-is: Main.hs
+  hs-source-dirs:
+    app-wasi
+    src-wasi
+
+  default-language: Haskell2010
+
+  if arch(wasm32)
+    ghc-options:
+      -no-hs-main
+      "-optl-Wl,--strip-all,--export=hs_init,--export=newTx,--export=newUpcomingEraTx,--export=addTxInput,--export=addSimpleTxOut,--export=appendCertificateToTx,--export=setFee,--export=estimateMinFee,--export=signWithPaymentKey,--export=signWithStakeKey,--export=getUnsignedTxId,--export=alsoSignWithPaymentKey,--export=alsoSignWithStakeKey,--export=toCbor,--export=getSignedTxId,--export=inspectAddress,--export=makeStakeAddressStakeDelegationCertificate,--export=makeStakeAddressStakeDelegationCertificateUpcomingEra,--export=makeStakeAddressRegistrationCertificate,--export=makeStakeAddressRegistrationCertificateUpcomingEra,--export=makeStakeAddressUnregistrationCertificate,--export=makeStakeAddressUnregistrationCertificateUpcomingEra,--export=generatePaymentWallet,--export=generateStakeWallet,--export=restorePaymentWalletFromSigningKeyBech32,--export=restoreStakeWalletFromSigningKeyBech32,--export=generateTestnetPaymentWallet,--export=generateTestnetStakeWallet,--export=restoreTestnetPaymentWalletFromSigningKeyBech32,--export=restoreTestnetStakeWalletFromSigningKeyBech32,--export=getAddressBech32,--export=getBech32ForPaymentVerificationKey,--export=getBech32ForPaymentSigningKey,--export=getBech32ForStakeVerificationKey,--export=getBech32ForStakeSigningKey,--export=getBase16ForPaymentVerificationKeyHash,--export=getBase16ForStakeVerificationKeyHash,--export=mallocNBytes,--export=getStrLen,--export=freeMemory"
+  other-modules:
+    Cardano.Wasi.Internal.Api.Address
+    Cardano.Wasi.Internal.Api.Certificate.StakeCertificate
+    Cardano.Wasi.Internal.Api.GRPC
+    Cardano.Wasi.Internal.Api.Memory
+    Cardano.Wasi.Internal.Api.Tx
+    Cardano.Wasi.Internal.Api.Wallet
+    Cardano.Wasi.Internal.Conversion
+
+  build-depends:
+    aeson,
+    base,
+    cardano-api,
+    cardano-wasm:cardano-wasi-lib,
+    text,
+    utf8-string,
+
+executable cardano-wasm
+  import: project-config
+  main-is: Main.hs
+  hs-source-dirs:
+    app
+    src-wasm
+
+  default-language: Haskell2010
+
+  if arch(wasm32)
+    ghc-options:
+      -no-hs-main
+      -optl-mexec-model=reactor
+      "-optl-Wl,--strip-all"
+  other-modules:
+    Cardano.Wasm.Internal.JavaScript.Bridge
+    Cardano.Wasm.Internal.JavaScript.GRPC
+    Cardano.Wasm.Internal.JavaScript.GRPCTypes
+
+  build-depends:
+    base,
+    cardano-wasm:cardano-wasi-lib,
+    optparse-applicative,
+
+  if arch(wasm32)
+    build-depends:
+      aeson,
+      cardano-api,
+      ghc-experimental,
+      text,
+      utf8-string,
+
+test-suite cardano-wasm-golden
+  type: exitcode-stdio-1.0
+  main-is: cardano-wasm-golden.hs
+  hs-source-dirs: test/cardano-wasm-golden
+
+  if !arch(wasm32)
+    import: project-config
+    build-depends:
+      filepath,
+      hedgehog >=1.1,
+      hedgehog-extras ^>=0.10,
+      tasty,
+      tasty-hedgehog,
+
+    ghc-options:
+      -threaded
+      -rtsopts
+      "-with-rtsopts=-N -T"
+
+    build-tool-depends:
+      cardano-wasm:cardano-wasm,
+      tasty-discover:tasty-discover,
+
+    other-modules:
+      Test.Golden.Cardano.Wasm.TypeScript
+  else
+    build-depends:
+      base

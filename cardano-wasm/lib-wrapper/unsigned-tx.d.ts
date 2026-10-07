@@ -1,0 +1,77 @@
+// unsigned-tx.d.ts
+
+import SignedTx from './signed-tx';
+
+/**
+ * Represents an unsigned transaction.
+ */
+declare interface UnsignedTx {
+    /**
+     * The type of the object, used for identification (the "UnsignedTx" string).
+     * Other types of objects would be:
+     * "CardanoApi", "GrpcConnection", "SignedTx", and "Wallet"
+     */
+    objectType: string;
+
+    /**
+     * Adds a simple transaction input to the transaction.
+     * @param txId The transaction ID of the input UTxO.
+     * @param txIx The index of the input within the UTxO.
+     * @returns The `UnsignedTx` object with the added input.
+     */
+    addTxInput(txId: string, txIx: number): UnsignedTx;
+
+    /**
+     * Adds a simple transaction output to the transaction.
+     * @param destAddr The destination address.
+     * @param lovelaceAmount The amount in lovelaces to output.
+     * @returns The `UnsignedTx` object with the added output.
+     */
+    addSimpleTxOut(destAddr: string, lovelaceAmount: bigint): UnsignedTx;
+
+    /**
+     * Appends a certificate (in CBOR hex string format) to the transaction.
+     * @param certCbor The certificate in CBOR hex string format.
+     * @returns The `UnsignedTx` object with the added certificate.
+     */
+    appendCertificateToTx(certCbor: string): UnsignedTx;
+
+    /**
+     * Sets the fee for the transaction.
+     * @param lovelaceAmount The fee amount in lovelaces.
+     * @returns The `UnsignedTx` object with the set fee.
+     */
+    setFee(lovelaceAmount: bigint): UnsignedTx;
+
+    /**
+     * Estimates the minimum fee for the transaction.
+     * @param protocolParams The protocol parameters.
+     * @param numKeyWitnesses The number of key witnesses.
+     * @param numByronKeyWitnesses The number of Byron key witnesses.
+     * @param totalRefScriptSize The total size of reference scripts in bytes.
+     * @returns A promise that resolves to the estimated minimum fee in lovelaces.
+     */
+    estimateMinFee(protocolParams: any, numKeyWitnesses: number, numByronKeyWitnesses: number, totalRefScriptSize: number): Promise<bigint>;
+
+    /**
+     * Signs the transaction with a payment key.
+     * @param signingKey The signing key to witness the transaction.
+     * @returns A promise that resolves to a `SignedTx` object.
+     */
+    signWithPaymentKey(signingKey: string): Promise<SignedTx>;
+
+    /**
+     * Signs the transaction with a stake key.
+     * @param signingKey The signing key to witness the transaction.
+     * @returns A promise that resolves to a `SignedTx` object.
+     */
+    signWithStakeKey(signingKey: string): Promise<SignedTx>;
+
+    /**
+     * Gets the transaction id (the hash of the transaction body). It can change if the transaction body is modified.
+     * @returns A promise that resolves to the transaction id as a hex string.
+     */
+    getTxId(): Promise<string>;
+}
+
+export default UnsignedTx;

@@ -1,0 +1,1310 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
+
+module Test.Cardano.Api.Experimental
+  ( tests
+  , exampleProtocolParams
+  , exampleProtocolParamsEra
+  )
+where
+
+import Cardano.Api qualified as Api
+import Cardano.Api.Experimental qualified as Exp
+import Cardano.Api.Experimental.AnyScriptWitness
+  ( AnyPlutusScriptWitness
+      ( AnyPlutusCertifyingScriptWitness
+      , AnyPlutusProposingScriptWitness
+      , AnyPlutusSpendingScriptWitness
+      )
+  , PlutusSpendingScriptWitness (PlutusSpendingScriptWitnessV3)
+  )
+import Cardano.Api.Experimental.Era (convert)
+import Cardano.Api.Experimental.Tx qualified as Exp
+import Cardano.Api.Genesis qualified as Genesis
+import Cardano.Api.Ledger qualified as L
+import Cardano.Api.Ledger qualified as Ledger
+import Cardano.Api.Parser.Text qualified as Api
+import Cardano.Api.Plutus qualified as Script
+import Cardano.Api.Tx (Tx (ShelleyTx), toShelleyTxId)
+
+import Cardano.Ledger.Address qualified as L
+import Cardano.Ledger.Alonzo.TxWits qualified as Alonzo
+import Cardano.Ledger.Api qualified as UnexportedLedger
+import Cardano.Ledger.Babbage.TxBody qualified as L
+import Cardano.Ledger.Conway qualified as L
+import Cardano.Ledger.Core qualified as L
+import Cardano.Ledger.Dijkstra.Genesis (DijkstraGenesis (..))
+import Cardano.Ledger.Dijkstra.TxBody qualified as Dijkstra
+import Cardano.Ledger.Mary.Value qualified as Mary
+import Cardano.Ledger.Plutus.Language qualified as Plutus
+import Cardano.Slotting.EpochInfo qualified as Slotting
+import Cardano.Slotting.Slot qualified as Slotting
+import Cardano.Slotting.Time qualified as Slotting
+
+import Control.Monad.Identity (Identity)
+import Data.Bifunctor (first)
+import Data.ByteString qualified as BS
+import Data.Either (isRight)
+import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
+import Data.Maybe.Strict (StrictMaybe (..))
+import Data.OMap.Strict qualified as LOMap
+import Data.Ratio ((%))
+import Data.Set qualified as Set
+import Data.Text.Encoding qualified as Text
+import Data.Time qualified as Time
+import Data.Time.Clock.POSIX qualified as Time
+import Lens.Micro
+
+import Test.Gen.Cardano.Api.Experimental (genAnyScript, genSignedSubTx, genUnsignedSubTx)
+import Test.Gen.Cardano.Api.Typed
+  ( genAddressInEra
+  , genPlutusScriptInEra
+  , genProposal
+  , genShelleyWitnessSigningKey
+  , genSimpleScript
+  , genStakeCredential
+  , genTx
+  , genTxIn
+  )
+
+import Hedgehog (Gen, Property)
+import Hedgehog qualified as H
+import Hedgehog.Extras qualified as H
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Gen.QuickCheck qualified as Q
+import Hedgehog.Internal.Property qualified as H
+import Hedgehog.Range qualified as Range
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.Hedgehog (testProperty)
+
+-- | Tests in this module can be run by themselves by writing:
+-- ```bash
+-- cabal test cardano-api-test --test-options="--pattern=Test.Cardano.Api.Experimental"
+-- ```
+--
+-- IMPORTANT NOTE: If this file requires changes, please update the examples in the
+-- documentation in 'cardano-api/src/Cardano/Api/Experimental.hs' too.
+tests :: TestTree
+tests =
+  testGroup
+    "Test.Cardano.Api.Experimental"
+    [ testProperty
+        "Created transaction with traditional and experimental APIs are equivalent"
+        prop_created_transaction_with_both_apis_are_the_same
+    , testProperty
+        "Check two methods of balancing transaction are equivalent"
+        prop_balance_transaction_two_ways
+    , testProperty
+        "Roundtrip SerialiseAsRawBytes UnsignedTx"
+        prop_roundtrip_serialise_as_raw_bytes_unsigned_tx
+    , testProperty
+        "Roundtrip SerialiseAsRawBytes SignedTx"
+        prop_roundtrip_serialise_as_raw_bytes_signed_tx
+    , testGroup
+        "SerialiseAsCBOR AnyScript"
+        [ testProperty
+            "Roundtrip serialiseToCBOR/deserialiseFromCBOR AnyScript"
+            prop_roundtrip_cbor_any_script
+        ]
+    , testGroup
+        "readAnyScriptBytes"
+        [ testProperty
+            "Roundtrip Plutus script text envelope"
+            prop_roundtrip_plutus_script_text_envelope
+        , testProperty
+            "Read old API simple script text envelope"
+            prop_read_old_api_simple_script_text_envelope
+        , testProperty
+            "Read legacy JSON simple script"
+            prop_read_legacy_json_simple_script
+        , testProperty
+            "Roundtrip readFileAnyScript"
+            prop_roundtrip_read_file_any_script
+        ]
+    , testGroup
+        "Sub-transactions"
+        [ testProperty
+            "Roundtrip SerialiseAsCBOR UnsignedSubTx"
+            prop_roundtrip_cbor_unsigned_sub_tx
+        , testProperty
+            "Roundtrip SerialiseAsCBOR SignedSubTx"
+            prop_roundtrip_cbor_signed_sub_tx
+        , testProperty
+            "Roundtrip TextEnvelope UnsignedSubTx"
+            prop_roundtrip_text_envelope_unsigned_sub_tx
+        , testProperty
+            "Roundtrip TextEnvelope SignedSubTx"
+            prop_roundtrip_text_envelope_signed_sub_tx
+        , testProperty
+            "Sub-transaction envelope types name the era"
+            prop_sub_tx_envelope_types
+        , testProperty
+            "Signing a sub-transaction does not change its id"
+            prop_sign_sub_tx_preserves_id
+        , testProperty
+            "Sub-transaction built from content is embedded under its id"
+            prop_sub_tx_embedded_in_top_level_body
+        , testProperty
+            "Top-level body keeps required top-level guards and starting account balance intervals"
+            prop_makeUnsignedTx_dijkstra_top_level_only_fields
+        ]
+    , testGroup
+        "makeUnsignedTx"
+        [ testProperty
+            "Plutus scripts without protocol params returns MakeUnsignedTxMissingProtocolParams"
+            prop_makeUnsignedTx_plutus_without_pparams
+        , testProperty
+            "Dijkstra-only fields set on a Conway body are rejected, not dropped"
+            prop_makeUnsignedTx_conway_rejects_dijkstra_only_fields
+        , testProperty
+            "Proposal-procedure redeemer pointers follow OMap insertion order, not Ord order"
+            prop_makeUnsignedTx_proposal_redeemer_indices_follow_insertion_order
+        , testProperty
+            "Certifying redeemer indices count unwitnessed certs preceding a plutus-witnessed one"
+            prop_makeUnsignedTx_cert_redeemer_indices_count_unwitnessed_certs
+        ]
+    , testGroup
+        "calcMinFeeRecursive"
+        [ testProperty
+            "well-funded transaction always succeeds"
+            prop_calcMinFeeRecursive_well_funded_succeeds
+        , testProperty
+            "well-funded multi-asset transaction always succeeds"
+            prop_calcMinFeeRecursive_well_funded_multi_asset
+        , testProperty
+            "fee calculation is idempotent"
+            prop_calcMinFeeRecursive_fee_fixpoint
+        , testProperty
+            "underfunded transaction (outputs exceed inputs) always fails"
+            prop_calcMinFeeRecursive_insufficient_funds
+        , testProperty
+            "Precondition: outputs with tokens not in UTxO returns NonAdaAssetsUnbalanced"
+            prop_calcMinFeeRecursive_non_ada_unbalanced
+        , testProperty
+            "Case 1: output with multi-assets below min UTxO returns MinUTxONotMet"
+            prop_calcMinFeeRecursive_min_utxo_not_met
+        , testProperty
+            "Case 2: transaction with no outputs creates change output"
+            prop_calcMinFeeRecursive_no_tx_outs
+        ]
+    ]
+
+prop_roundtrip_cbor_unsigned_sub_tx :: Property
+prop_roundtrip_cbor_unsigned_sub_tx = H.property $ do
+  subTx <- H.forAll genUnsignedSubTx
+  H.tripping
+    subTx
+    Api.serialiseToCBOR
+    (Api.deserialiseFromCBOR Exp.AsUnsignedSubTx)
+
+prop_roundtrip_cbor_signed_sub_tx :: Property
+prop_roundtrip_cbor_signed_sub_tx = H.property $ do
+  subTx <- H.forAll genSignedSubTx
+  H.tripping subTx Api.serialiseToCBOR (Api.deserialiseFromCBOR Exp.AsSignedSubTx)
+
+prop_roundtrip_text_envelope_unsigned_sub_tx :: Property
+prop_roundtrip_text_envelope_unsigned_sub_tx = H.property $ do
+  subTx <- H.forAll genUnsignedSubTx
+  H.tripping subTx (Api.serialiseToTextEnvelope Nothing) Api.deserialiseFromTextEnvelope
+
+prop_roundtrip_text_envelope_signed_sub_tx :: Property
+prop_roundtrip_text_envelope_signed_sub_tx = H.property $ do
+  subTx <- H.forAll genSignedSubTx
+  H.tripping subTx (Api.serialiseToTextEnvelope Nothing) Api.deserialiseFromTextEnvelope
+
+prop_sub_tx_envelope_types :: Property
+prop_sub_tx_envelope_types = H.propertyOnce $ do
+  Api.textEnvelopeType Exp.AsUnsignedSubTx
+    H.=== Api.TextEnvelopeType "Unwitnessed SubTx DijkstraEra"
+  Api.textEnvelopeType Exp.AsSignedSubTx
+    H.=== Api.TextEnvelopeType "Witnessed SubTx DijkstraEra"
+
+prop_sign_sub_tx_preserves_id :: Property
+prop_sign_sub_tx_preserves_id = H.property $ do
+  subTx <- H.forAll genUnsignedSubTx
+  sk <- H.forAllWith (const "<ShelleyWitnessSigningKey>") genShelleyWitnessSigningKey
+  let wit = Exp.makeSubTxKeyWitness subTx sk
+      signed@(Exp.SignedSubTx ledgerTx) = Exp.signSubTx [] [wit] subTx
+  Exp.getUnsignedSubTxId subTx H.=== Exp.getSignedSubTxId signed
+  H.assert $ wit `Set.member` (ledgerTx ^. L.witsTxL . UnexportedLedger.addrTxWitsL)
+
+-- | The construction path end to end: 'Exp.SubTxBodyContent' through
+-- 'Exp.makeUnsignedSubTx', signing, and embedding in a Dijkstra top-level
+-- body, where the ledger keys the sub-transaction by its id. The setters are
+-- the ones shared with 'Exp.TxBodyContent'.
+prop_sub_tx_embedded_in_top_level_body :: Property
+prop_sub_tx_embedded_in_top_level_body = H.property $ do
+  donation <- H.forAll Q.arbitrary
+  guards <- H.forAll Q.arbitrary
+  sk <- H.forAllWith (const "<ShelleyWitnessSigningKey>") genShelleyWitnessSigningKey
+  let content =
+        Exp.defaultSubTxBodyContent
+          & Exp.setTxTreasuryDonation donation
+          & Exp.setTxGuards guards
+  unsigned <- H.evalEither $ Exp.makeUnsignedSubTx content
+  let signed@(Exp.SignedSubTx ledgerSubTx) =
+        Exp.signSubTx [] [Exp.makeSubTxKeyWitness unsigned sk] unsigned
+      subTxId = UnexportedLedger.txIdTx ledgerSubTx
+  ledgerSubTx ^. L.bodyTxL . L.treasuryDonationTxBodyL H.=== donation
+  ledgerSubTx ^. L.bodyTxL . UnexportedLedger.guardsTxBodyL H.=== guards
+  toShelleyTxId (Exp.getSignedSubTxId signed) H.=== subTxId
+  Exp.UnsignedTx tx <-
+    H.evalEither $
+      Exp.makeUnsignedTx Exp.DijkstraEra $
+        Exp.defaultTxBodyContent & Exp.setTxSignedSubTransactions [signed]
+  let subTxs = tx ^. L.bodyTxL . Dijkstra.subTransactionsTxBodyL
+  LOMap.lookup subTxId subTxs H.=== Just ledgerSubTx
+  length subTxs H.=== 1
+
+prop_makeUnsignedTx_dijkstra_top_level_only_fields :: Property
+prop_makeUnsignedTx_dijkstra_top_level_only_fields = H.property $ do
+  requiredGuards <- H.forAll Q.arbitrary
+  startingIntervals <- H.forAll Q.arbitrary
+  let bodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxRequiredTopLevelGuards requiredGuards
+          & Exp.setTxStartingAccountBalanceIntervals startingIntervals
+  Exp.UnsignedTx tx <- H.evalEither $ Exp.makeUnsignedTx Exp.DijkstraEra bodyContent
+  let body = tx ^. L.bodyTxL
+  body ^. Dijkstra.requiredTopLevelGuardsL H.=== requiredGuards
+  body ^. Dijkstra.startingAccountBalanceIntervalsTxBodyL H.=== startingIntervals
+
+prop_roundtrip_cbor_any_script :: Property
+prop_roundtrip_cbor_any_script = H.property $ do
+  script <- H.forAll genAnyScript
+  H.tripping script Api.serialiseToCBOR (Api.deserialiseFromCBOR Exp.AsAnyScript)
+
+prop_roundtrip_plutus_script_text_envelope :: Property
+prop_roundtrip_plutus_script_text_envelope = H.property $ do
+  ps <- H.forAll genPlutusScriptInEra
+  let envelopeJson = Api.serialiseToJSON $ Api.serialiseToTextEnvelope Nothing ps
+  script <- H.evalEither $ Exp.readAnyScriptBytes Exp.ConwayEra envelopeJson
+  script H.=== Exp.AnyPlutusScript ps
+
+-- | The experimental API has no text envelope format for simple scripts, but
+-- the old API produces one via its 'Api.Script' instance (type
+-- \"SimpleScript\", Allegra-era 'Timelock' CBOR), so the simple script arm of
+-- 'Exp.readAnyScriptBytes' is tested against what the old API writes.
+prop_read_old_api_simple_script_text_envelope :: Property
+prop_read_old_api_simple_script_text_envelope = H.property $ do
+  oldScript <- H.forAll genSimpleScript
+  let envelopeJson =
+        Api.serialiseToJSON $ Api.serialiseToTextEnvelope Nothing (Api.SimpleScript oldScript)
+  script <- H.evalEither $ Exp.readAnyScriptBytes Exp.ConwayEra envelopeJson
+  script H.=== Exp.AnySimpleScript (Exp.SimpleScript (Api.toAllegraTimelock oldScript))
+
+prop_read_legacy_json_simple_script :: Property
+prop_read_legacy_json_simple_script = H.property $ do
+  oldScript <- H.forAll genSimpleScript
+  script <- H.evalEither $ Exp.readAnyScriptBytes Exp.ConwayEra (Api.serialiseToJSON oldScript)
+  script H.=== Exp.AnySimpleScript (Exp.SimpleScript (Api.toAllegraTimelock oldScript))
+
+prop_roundtrip_read_file_any_script :: Property
+prop_roundtrip_read_file_any_script = H.propertyOnce . H.moduleWorkspace "any-script" $ \ws -> do
+  oldScript <- H.forAll genSimpleScript
+  let envelopeJson =
+        Api.serialiseToJSON $ Api.serialiseToTextEnvelope Nothing (Api.SimpleScript oldScript)
+      path = ws <> "/simple-script.json"
+  H.evalIO $ BS.writeFile path envelopeJson
+  result <- H.evalIO $ Exp.readFileAnyScript Exp.ConwayEra (Api.File path)
+  script <- H.evalEither result
+  script H.=== Exp.AnySimpleScript (Exp.SimpleScript (Api.toAllegraTimelock oldScript))
+
+prop_created_transaction_with_both_apis_are_the_same :: Property
+prop_created_transaction_with_both_apis_are_the_same = H.propertyOnce $ do
+  let era = Exp.ConwayEra
+  let sbe = Api.convert era
+
+  signedTxTraditional <- exampleTransactionTraditionalWay sbe
+  signedTxExperimental <- exampleTransactionExperimentalWay era
+
+  let oldStyleTx :: Api.Tx Api.ConwayEra = ShelleyTx sbe signedTxExperimental
+
+  oldStyleTx H.=== signedTxTraditional
+ where
+  exampleTransactionTraditionalWay
+    :: H.MonadTest m
+    => Api.ShelleyBasedEra Exp.ConwayEra
+    -> m (Tx Exp.ConwayEra)
+  exampleTransactionTraditionalWay sbe = do
+    txBodyContent <- exampleTxBodyContent sbe
+    signingKey <- exampleSigningKey
+
+    txBody <- H.evalEither $ Api.createTransactionBody sbe txBodyContent
+
+    let signedTx :: Api.Tx Api.ConwayEra = Api.signShelleyTransaction sbe txBody [Api.WitnessPaymentKey signingKey]
+
+    return signedTx
+
+  exampleTransactionExperimentalWay
+    :: H.MonadTest m
+    => Exp.Era Exp.ConwayEra
+    -> m (Ledger.Tx L.TopTx (Api.ShelleyLedgerEra Exp.ConwayEra))
+  exampleTransactionExperimentalWay era = do
+    txBodyContent <- exampleTxBodyContentExperimental era
+    signingKey <- exampleSigningKey
+
+    unsignedTx <- H.evalEither $ Exp.makeUnsignedTx era txBodyContent
+    let witness = Exp.makeKeyWitness era unsignedTx (Api.WitnessPaymentKey signingKey)
+
+    let bootstrapWitnesses = []
+        keyWitnesses = [witness]
+
+    let Exp.SignedTx (signedTx :: Ledger.Tx L.TopTx (Api.ShelleyLedgerEra Exp.ConwayEra)) = Exp.signTx era bootstrapWitnesses keyWitnesses unsignedTx
+    return signedTx
+
+prop_balance_transaction_two_ways :: Property
+prop_balance_transaction_two_ways = H.propertyOnce $ do
+  let era = Exp.ConwayEra
+  let sbe = Api.convert era
+  let meo = Api.MaryEraOnwardsConway
+
+  changeAddress <- getExampleChangeAddress sbe
+  (txBodyContent, newTxBodyContent) <- exampleOldAndNewStyleTxBodyContent era
+  txBody <- H.evalEither $ Api.createTransactionBody sbe txBodyContent
+
+  -- Simple fee estimate (no change output in tx body)
+  -- Old API
+  let oldFees = Api.evaluateTransactionFee sbe exampleProtocolParams txBody 0 1 0
+  -- NEW API
+  unSignTx <- H.evalEither $ Exp.makeUnsignedTx era newTxBodyContent
+  let newFees = Exp.evaluateTransactionFee exampleProtocolParams unSignTx 0 1 0
+
+  oldFees H.=== L.Coin 236
+  newFees H.=== L.Coin 236
+
+  -- Set up the change address used by both the dummy output and the
+  -- recursive fee calculation, so the serialized output sizes match.
+  let paymentCredential :: L.Credential L.Payment
+      paymentCredential =
+        L.KeyHashObj $
+          L.KeyHash
+            "1c14ee8e58fbcbd48dc7367c95a63fd1d937ba989820015db16ac7e5"
+
+      stakingCredential :: L.Credential L.Staking
+      stakingCredential =
+        L.KeyHashObj $
+          L.KeyHash
+            "e37a65ea2f9bcefb645de4312cf13d8ac12ae61cf242a9aa2973c9ee"
+      initialFundedAddress :: L.Addr
+      initialFundedAddress = L.Addr L.Testnet paymentCredential (L.StakeRefBase stakingCredential)
+
+  -- Fee estimate with a dummy change output appended to the tx body.
+  -- This gives a like-for-like comparison with the recursive fee
+  -- calculation, which appends a change output during balancing. The
+  -- dummy output uses an arbitrary ADA value — the exact lovelace amount
+  -- does not affect the serialized size as long as it falls within the
+  -- same CBOR integer encoding bucket (values up to ~4.3 billion
+  -- lovelace use the same 5-byte encoding).
+  let dummyChangeOutput =
+        Api.TxOut
+          (Api.fromShelleyAddr sbe initialFundedAddress)
+          (Api.lovelaceToTxOutValue sbe 1_000_000)
+          Api.TxOutDatumNone
+          Script.ReferenceScriptNone
+      txBodyContentWithChange =
+        txBodyContent
+          & Api.setTxOuts (Api.txOuts txBodyContent ++ [dummyChangeOutput])
+  txBodyWithChange <- H.evalEither $ Api.createTransactionBody sbe txBodyContentWithChange
+  let oldFeesWithChange = Api.evaluateTransactionFee sbe exampleProtocolParams txBodyWithChange 0 1 0
+
+  -- Recursive calc
+  dummyTxIn <-
+    H.evalEither
+      ( Api.toShelleyTxIn
+          <$> Api.runParser
+            Api.parseTxIn
+            "be6efd42a3d7b9a00d09d77a5d41e55ceaf0bd093a8aa8a893ce70d9caafd978#0"
+      )
+
+  let dummyLargeTxOut :: L.BabbageTxOut L.ConwayEra =
+        Exp.obtainCommonConstraints era $
+          L.BabbageTxOut
+            initialFundedAddress
+            (L.MaryValue (L.Coin 12_000_000) mempty)
+            L.NoDatum
+            SNothing
+
+      dummyUTxO = L.UTxO $ Map.singleton dummyTxIn dummyLargeTxOut
+  Exp.UnsignedTx recFeeTx <-
+    H.evalEither $
+      Exp.calcMinFeeRecursive
+        initialFundedAddress
+        unSignTx
+        dummyUTxO
+        exampleProtocolParams
+        mempty
+        mempty
+        0
+  let recFee = recFeeTx ^. (L.bodyTxL . L.feeTxBodyL)
+
+  -- The old-API fee with a dummy change output is higher than the
+  -- recursive fee because the old API's TxOut encoding (via
+  -- createTransactionBody) includes optional Babbage-era fields (datum,
+  -- reference script) even when absent, making the serialized output
+  -- larger. The recursive calculation uses the ledger's mkBasicTxOut
+  -- which produces a more compact encoding.
+  H.note_ $ "Old fees (no change output): " <> show oldFees
+  H.note_ $ "Old fees (with dummy change output): " <> show oldFeesWithChange
+  H.note_ $ "Recursive fees: " <> show recFee
+  oldFeesWithChange H.=== L.Coin 302
+  recFee H.=== L.Coin 259
+
+  -- Balance without ledger context (other that protocol parameters)
+  -- Old api
+  Api.BalancedTxBody
+    _txBodyContent2
+    _txBody2
+    _changeOutput2
+    fees2 <-
+    H.evalEither
+      $ Api.estimateBalancedTxBody
+        meo
+        txBodyContent
+        exampleProtocolParams
+        mempty
+        mempty
+        mempty
+        0
+        1
+        0
+        0
+        changeAddress
+      $ Api.lovelaceToValue 12_000_000
+  -- New api
+  balancedTxBodyContent <-
+    H.evalEither $
+      Exp.estimateBalancedTxBody
+        era
+        newTxBodyContent
+        exampleProtocolParams
+        mempty
+        mempty
+        mempty
+        0
+        1
+        0
+        0
+        changeAddress
+        (Ledger.valueFromList 12_000_000 [])
+
+  fees2 H.=== Exp.txFee balancedTxBodyContent
+  H.note_ $ "Fees 2: " <> show fees2
+
+  -- H.note_ $ "New TxBody 2: " <> show txBody2
+  -- H.note_ $ "New TxBodyContent 2: " <> show txBodyContent2
+  -- H.note_ $ "Change output 2: " <> show changeOutput2
+
+  -- Automatically balance the transaction (with ledger context)
+  currTime <- Api.liftIO Time.getCurrentTime
+  srcTxId <- getExampleSrcTxId
+  let startTime = Time.posixSecondsToUTCTime (Time.utcTimeToPOSIXSeconds currTime - Time.nominalDay)
+  let epochInfo =
+        Api.LedgerEpochInfo $ Slotting.fixedEpochInfo (Slotting.EpochSize 100) (Slotting.mkSlotLength 1000)
+  let utxoToUse =
+        Api.UTxO
+          [
+            ( srcTxId
+            , Api.TxOut
+                changeAddress
+                (Api.lovelaceToTxOutValue sbe 12_000_000)
+                Api.TxOutDatumNone
+                Script.ReferenceScriptNone
+            )
+          ]
+
+  Api.BalancedTxBody
+    _txBodyContent3
+    _txBody3
+    _changeOutput3
+    fees3 <-
+    H.evalEither $
+      Api.makeTransactionBodyAutoBalance
+        sbe
+        (Api.SystemStart startTime)
+        epochInfo
+        (Api.LedgerProtocolParameters exampleProtocolParams)
+        mempty
+        mempty
+        utxoToUse
+        txBodyContent
+        changeAddress
+        Nothing
+
+  H.note_ $ "Fees 3: " <> show fees3
+
+  -- Check old and new api serialises a tx the same way
+
+  newUnsignedTx <- H.evalEither $ Exp.makeUnsignedTx era newTxBodyContent
+  let newTx = Api.serialiseToRawBytes newUnsignedTx
+      oldTx = Api.serialiseToCBOR $ Api.makeSignedTransaction [] txBody
+  newTx H.=== oldTx
+  H.success
+
+exampleProtocolParamsEra :: Exp.Era era -> L.PParams (Exp.LedgerEra era)
+exampleProtocolParamsEra = \case
+  Exp.ConwayEra -> exampleProtocolParams
+  Exp.DijkstraEra ->
+    UnexportedLedger.upgradePParams
+      (dgUpgradePParams Genesis.dijkstraGenesisDefaults)
+      exampleProtocolParams
+
+exampleProtocolParams :: Ledger.PParams UnexportedLedger.ConwayEra
+exampleProtocolParams =
+  UnexportedLedger.upgradePParams conwayUpgrade $
+    UnexportedLedger.upgradePParams () $
+      UnexportedLedger.upgradePParams alonzoUpgrade $
+        UnexportedLedger.upgradePParams () $
+          UnexportedLedger.upgradePParams () $
+            Genesis.sgProtocolParams Genesis.shelleyGenesisDefaults
+ where
+  conwayUpgrade :: Ledger.UpgradeConwayPParams Identity
+  conwayUpgrade = Ledger.cgUpgradePParams Genesis.conwayGenesisDefaults
+
+  alonzoUpgrade :: UnexportedLedger.UpgradeAlonzoPParams Identity
+  alonzoUpgrade =
+    UnexportedLedger.UpgradeAlonzoPParams
+      { UnexportedLedger.uappCoinsPerUTxOWord = Ledger.CoinPerWord $ Ledger.Coin 34_482
+      , UnexportedLedger.uappPlutusV1CostModel = Genesis.defaultV1CostModel -- We are not using scripts for this tests, so this is fine for now
+      , UnexportedLedger.uappPrices =
+          Ledger.Prices
+            { Ledger.prSteps = fromMaybe maxBound $ Ledger.boundRational $ 721 % 10_000_000
+            , Ledger.prMem = fromMaybe maxBound $ Ledger.boundRational $ 577 % 10_000
+            }
+      , UnexportedLedger.uappMaxTxExUnits =
+          Ledger.ExUnits
+            { Ledger.exUnitsMem = 140_000_000
+            , Ledger.exUnitsSteps = 10_000_000_000
+            }
+      , UnexportedLedger.uappMaxBlockExUnits =
+          Ledger.ExUnits
+            { Ledger.exUnitsMem = 62_000_000
+            , Ledger.exUnitsSteps = 20_000_000_000
+            }
+      , UnexportedLedger.uappMaxValSize = 5000
+      , UnexportedLedger.uappCollateralPercentage = 150
+      , UnexportedLedger.uappMaxCollateralInputs = 3
+      }
+
+getExampleSrcTxId :: H.MonadTest m => m Api.TxIn
+getExampleSrcTxId = do
+  srcTxId <-
+    H.evalEither $
+      Api.deserialiseFromRawBytesHex
+        "be6efd42a3d7b9a00d09d77a5d41e55ceaf0bd093a8aa8a893ce70d9caafd978"
+  let srcTxIx = Api.TxIx 0
+  return $ Api.TxIn srcTxId srcTxIx
+
+getExampleDestAddress
+  :: forall era m. (H.MonadTest m, Api.IsCardanoEra era) => m (Api.AddressInEra era)
+getExampleDestAddress = do
+  H.evalMaybe $
+    Api.deserialiseAddress
+      (Api.AsAddressInEra (Api.proxyToAsType (Api.Proxy @era)))
+      "addr_test1vzpfxhjyjdlgk5c0xt8xw26avqxs52rtf69993j4tajehpcue4v2v"
+
+getExampleDestAddressExp
+  :: H.MonadTest m => m Ledger.Addr
+getExampleDestAddressExp = do
+  Api.toShelleyAddr
+    <$> H.evalMaybe
+      ( Api.deserialiseAddress
+          (Api.AsAddressInEra (Api.proxyToAsType (Api.Proxy @Api.ConwayEra)))
+          "addr_test1vzpfxhjyjdlgk5c0xt8xw26avqxs52rtf69993j4tajehpcue4v2v"
+      )
+
+getExampleChangeAddress :: H.MonadTest m => Api.ShelleyBasedEra era -> m (Api.AddressInEra era)
+getExampleChangeAddress sbe = do
+  signingKey <- exampleSigningKey
+  return $
+    Api.shelleyAddressInEra sbe $
+      Api.makeShelleyAddress
+        (Api.Testnet $ Api.NetworkMagic 2)
+        (Api.PaymentCredentialByKey $ Api.verificationKeyHash $ Api.getVerificationKey signingKey)
+        Api.NoStakeAddress
+
+exampleTxBodyContentExperimental
+  :: forall era m
+   . H.MonadTest m
+  => Exp.Era era
+  -> m (Exp.TxBodyContent (Exp.LedgerEra era))
+exampleTxBodyContentExperimental era = do
+  srcTxIn <- getExampleSrcTxId
+  addr <- getExampleDestAddressExp
+  let value = Ledger.valueFromList 10_000_000 []
+      out :: Ledger.TxOut (Exp.LedgerEra era)
+      out = Exp.obtainCommonConstraints era $ Ledger.mkBasicTxOut addr value
+  let txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns
+            [
+              ( srcTxIn
+              , Exp.AnyKeyWitnessPlaceholder
+              )
+            ]
+          & Exp.setTxOuts
+            [ Exp.obtainCommonConstraints era $ Exp.TxOut out
+            ]
+          & Exp.setTxFee 2_000_000
+  return txBodyContent
+
+exampleTxBodyContent
+  :: forall m era
+   . H.MonadTest m
+  => Api.IsCardanoEra era
+  => Api.ShelleyBasedEra era
+  -> m (Api.TxBodyContent Api.BuildTx era)
+exampleTxBodyContent sbe = do
+  srcTxIn <- getExampleSrcTxId
+  destAddress <- getExampleDestAddress @era
+  let txBodyContent =
+        Api.defaultTxBodyContent sbe
+          & Api.setTxIns
+            [
+              ( srcTxIn
+              , Api.BuildTxWith (Api.KeyWitness Api.KeyWitnessForSpending)
+              )
+            ]
+          & Api.setTxOuts
+            [ Api.TxOut
+                destAddress
+                (Api.lovelaceToTxOutValue sbe 10_000_000)
+                Api.TxOutDatumNone
+                Script.ReferenceScriptNone
+            ]
+          & Api.setTxFee (Api.TxFeeExplicit sbe 2_000_000)
+
+  return txBodyContent
+
+exampleOldAndNewStyleTxBodyContent
+  :: forall m era
+   . H.MonadTest m
+  => Api.IsCardanoEra era
+  => Exp.Era era
+  -> m
+       ( Api.TxBodyContent Api.BuildTx era
+       , Exp.TxBodyContent (Exp.LedgerEra era)
+       )
+exampleOldAndNewStyleTxBodyContent era = do
+  let sbe = convert era
+  srcTxIn <- getExampleSrcTxId
+  destAddress <- getExampleDestAddress @era
+  let txBodyContentOldApi =
+        Api.defaultTxBodyContent sbe
+          & Api.setTxIns
+            [
+              ( srcTxIn
+              , Api.BuildTxWith (Api.KeyWitness Api.KeyWitnessForSpending)
+              )
+            ]
+          & Api.setTxOuts
+            [ Api.TxOut
+                destAddress
+                (Api.lovelaceToTxOutValue sbe 10_000_000)
+                Api.TxOutDatumNone
+                Script.ReferenceScriptNone
+            ]
+          & Api.setTxFee (Api.TxFeeExplicit sbe 2_000_000)
+
+  let txBodyContentNewApi =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns
+            [
+              ( srcTxIn
+              , Exp.AnyKeyWitnessPlaceholder
+              )
+            ]
+          & Exp.setTxOuts
+            [ Exp.obtainCommonConstraints era $
+                Exp.TxOut
+                  ( Exp.obtainCommonConstraints era $
+                      Ledger.mkBasicTxOut (Api.toShelleyAddr destAddress) (Ledger.valueFromList 10_000_000 [])
+                  )
+            ]
+          & Exp.setTxFee 2_000_000
+  return (txBodyContentOldApi, txBodyContentNewApi)
+
+exampleSigningKey :: H.MonadTest m => m (Api.SigningKey Api.PaymentKey)
+exampleSigningKey =
+  H.evalEither $
+    Api.deserialiseFromBech32
+      "addr_sk1648253w4tf6fv5fk28dc7crsjsaw7d9ymhztd4favg3cwkhz7x8sl5u3ms"
+
+expEraGen :: Gen (Exp.Some Exp.Era)
+expEraGen =
+  let eras :: [Exp.Some Exp.Era] = [minBound .. maxBound]
+   in Gen.element eras
+
+expTxForEraGen :: Exp.Era era -> Gen (Ledger.Tx L.TopTx (Exp.LedgerEra era))
+expTxForEraGen era = do
+  Exp.obtainCommonConstraints era $ do
+    ShelleyTx _ tx <- genTx (convert era)
+    return tx
+
+prop_roundtrip_serialise_as_raw_bytes_unsigned_tx :: Property
+prop_roundtrip_serialise_as_raw_bytes_unsigned_tx = H.withTests (H.TestLimit 20) $ H.property $ do
+  Exp.Some era <- H.forAll expEraGen
+  Exp.obtainCommonConstraints era $ do
+    tx <- H.forAll $ expTxForEraGen era
+    let signedTx = Exp.UnsignedTx tx
+    signedTx H.=== signedTx
+    H.tripping
+      signedTx
+      (Text.decodeUtf8 . Api.serialiseToRawBytesHex)
+      (first show . Api.deserialiseFromRawBytesHex . Text.encodeUtf8)
+
+prop_roundtrip_serialise_as_raw_bytes_signed_tx :: Property
+prop_roundtrip_serialise_as_raw_bytes_signed_tx = H.withTests (H.TestLimit 20) $ H.property $ do
+  Exp.Some era <- H.forAll expEraGen
+  Exp.obtainCommonConstraints era $ do
+    tx <- H.forAll $ expTxForEraGen era
+    let signedTx = Exp.SignedTx tx
+    signedTx H.=== signedTx
+    H.tripping
+      signedTx
+      (Text.decodeUtf8 . Api.serialiseToRawBytesHex)
+      (first show . Api.deserialiseFromRawBytesHex . Text.encodeUtf8)
+
+-- ---------------------------------------------------------------------------
+-- Regression test for makeUnsignedTx
+-- ---------------------------------------------------------------------------
+
+-- | The body content record is shared by Conway and Dijkstra, so a Dijkstra-only
+-- field can be set on a Conway body. Building must fail, naming the field,
+-- rather than silently producing a body without it. The same content builds in
+-- Dijkstra.
+prop_makeUnsignedTx_conway_rejects_dijkstra_only_fields :: Property
+prop_makeUnsignedTx_conway_rejects_dijkstra_only_fields = H.property $ do
+  guardCredential <- H.forAll Q.arbitrary
+  let bodyContent :: Exp.TxBodyContent era
+      bodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxRequiredTopLevelGuards (Map.singleton guardCredential SNothing)
+  case Exp.makeUnsignedTx Exp.ConwayEra bodyContent of
+    Left err ->
+      err
+        H.=== Exp.MakeUnsignedTxFieldsNotSupportedInEra
+          (Exp.Some Exp.ConwayEra)
+          ("txRequiredTopLevelGuards" :| [])
+    Right _ -> H.failure
+  H.assert . isRight $ Exp.makeUnsignedTx Exp.DijkstraEra bodyContent
+
+-- | Regression test: 'makeUnsignedTx' must return 'Left MakeUnsignedTxMissingProtocolParams'
+-- when the transaction body contains a Plutus script witness but no protocol parameters.
+-- Protocol parameters are required to compute the script integrity hash (script_data_hash).
+prop_makeUnsignedTx_plutus_without_pparams :: Property
+prop_makeUnsignedTx_plutus_without_pparams = H.propertyOnce $ do
+  srcTxIn <- getExampleSrcTxId
+  let dummyRedeemer = Script.unsafeHashableScriptData $ Script.ScriptDataConstructor 0 []
+      plutusWit =
+        Exp.AnyPlutusScriptWitness $
+          AnyPlutusSpendingScriptWitness $
+            PlutusSpendingScriptWitnessV3 $
+              Exp.PlutusScriptWitness
+                Plutus.SPlutusV3
+                (Exp.PReferenceScript srcTxIn)
+                Exp.NoScriptDatum
+                dummyRedeemer
+                (Script.ExecutionUnits 0 0)
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(srcTxIn, plutusWit)]
+          & Exp.setTxFee 0
+  Exp.makeUnsignedTx Exp.ConwayEra txBodyContent
+    H.=== Left Exp.MakeUnsignedTxMissingProtocolParams
+
+-- | 'makeUnsignedTx' must index plutus-witnessed governance proposals'
+-- redeemer pointers ('L.ConwayProposing') by insertion order, never by
+-- 'Ord' order. Insertion order is what the ledger's 'OSet'-backed
+-- 'proposalProceduresTxBodyL' stores them in.
+--
+-- 'propA' and 'propB' only differ in 'pProcDeposit' (the first field
+-- 'Ord' compares), chosen so 'propB' sorts before 'propA' by 'Ord' but is
+-- inserted after it. A regression to 'Ord'-sorted indexing would swap
+-- which redeemer lands at which index.
+prop_makeUnsignedTx_proposal_redeemer_indices_follow_insertion_order :: Property
+prop_makeUnsignedTx_proposal_redeemer_indices_follow_insertion_order = H.property $ do
+  scriptTxIn <- H.forAll genTxIn
+  baseA <- H.forAll (genProposal Api.ConwayEraOnwardsConway)
+  baseB <- H.forAll (genProposal Api.ConwayEraOnwardsConway)
+  let propA = baseA{L.pProcDeposit = 2_000_000}
+      propB = baseB{L.pProcDeposit = 1_000_000}
+
+      mkRedeemer :: Integer -> Script.HashableScriptData
+      mkRedeemer n = Script.unsafeHashableScriptData $ Script.ScriptDataConstructor n []
+
+      mkProposingWitness redeemer =
+        Exp.AnyPlutusScriptWitness $
+          AnyPlutusProposingScriptWitness $
+            Exp.PlutusScriptWitness
+              Plutus.SPlutusV3
+              (Exp.PReferenceScript scriptTxIn)
+              Exp.NoScriptDatum
+              redeemer
+              (Script.ExecutionUnits 0 0)
+
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxProtocolParams exampleProtocolParams
+          & Exp.setTxProposalProcedures
+            ( Exp.mkTxProposalProcedures
+                [ (propA, mkProposingWitness (mkRedeemer 1))
+                , (propB, mkProposingWitness (mkRedeemer 2))
+                ]
+            )
+          & Exp.setTxFee 0
+
+  Exp.UnsignedTx ledgerTx <- H.evalEither $ Exp.makeUnsignedTx Exp.ConwayEra txBodyContent
+
+  -- Sanity check: the body itself is in insertion order regardless of the
+  -- bug under test (the bug only affects redeemer indexing, not the body).
+  let bodyProposals = toList $ ledgerTx ^. L.bodyTxL . UnexportedLedger.proposalProceduresTxBodyL
+  bodyProposals H.=== [propA, propB]
+
+  -- The redeemer map must key 'propA''s witness to index 0 and 'propB''s
+  -- to index 1 (insertion order). 'Ord'-sorted indexing would give the
+  -- opposite, since 'propB' has the smaller deposit and sorts first.
+  let redeemers = ledgerTx ^. L.witsTxL . Alonzo.rdmrsTxWitsL
+      expectedRedeemers =
+        L.Redeemers $
+          Map.fromList
+            [
+              ( L.ConwayProposing (L.AsIx 0)
+              , (Api.toAlonzoData (mkRedeemer 1), Api.toAlonzoExUnits (Script.ExecutionUnits 0 0))
+              )
+            ,
+              ( L.ConwayProposing (L.AsIx 1)
+              , (Api.toAlonzoData (mkRedeemer 2), Api.toAlonzoExUnits (Script.ExecutionUnits 0 0))
+              )
+            ]
+  redeemers H.=== expectedRedeemers
+
+-- | 'makeUnsignedTx' must index a plutus-witnessed certificate's
+-- 'L.ConwayCertifying' redeemer pointer by its position among all
+-- certificates, witnessed and unwitnessed alike, never just among the
+-- witnessed subset.
+--
+-- 'unwitnessedCert' (a plain stake registration, which the ledger never
+-- requires a witness for) is placed before 'witnessedCert'. If unwitnessed
+-- certs were skipped when assigning indices, 'witnessedCert' would land
+-- at index 0 instead of the correct index 1.
+prop_makeUnsignedTx_cert_redeemer_indices_count_unwitnessed_certs :: Property
+prop_makeUnsignedTx_cert_redeemer_indices_count_unwitnessed_certs = H.property $ do
+  stakeCred1 <- H.forAll genStakeCredential
+  stakeCred2 <- H.forAll genStakeCredential
+  scriptTxIn <- H.forAll genTxIn
+  let shelleyCred1 = Api.toShelleyStakeCredential stakeCred1
+      shelleyCred2 = Api.toShelleyStakeCredential stakeCred2
+
+      -- Unwitnessed: a plain stake registration cert needs no witness.
+      unwitnessedCert =
+        Exp.Certificate $ L.ConwayTxCertDeleg (L.ConwayRegCert shelleyCred1 L.SNothing)
+
+      -- Plutus-witnessed: a stake delegation cert witnessed by a plutus script.
+      witnessedCert =
+        Exp.Certificate $
+          L.ConwayTxCertDeleg (L.ConwayDelegCert shelleyCred2 (L.DelegVote L.DRepAlwaysAbstain))
+
+      redeemer = Script.unsafeHashableScriptData $ Script.ScriptDataConstructor 0 []
+
+      certWitness =
+        Exp.AnyPlutusScriptWitness $
+          AnyPlutusCertifyingScriptWitness $
+            Exp.PlutusScriptWitness
+              Plutus.SPlutusV3
+              (Exp.PReferenceScript scriptTxIn)
+              Exp.NoScriptDatum
+              redeemer
+              (Script.ExecutionUnits 0 0)
+
+      certs =
+        Exp.mkTxCertificates
+          Exp.ConwayEra
+          [ (unwitnessedCert, Exp.AnyKeyWitnessPlaceholder)
+          , (witnessedCert, certWitness)
+          ]
+
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxCertificates certs
+          & Exp.setTxProtocolParams exampleProtocolParams
+          & Exp.setTxFee 0
+
+  Exp.UnsignedTx ledgerTx <- H.evalEither $ Exp.makeUnsignedTx Exp.ConwayEra txBodyContent
+
+  let redeemers = ledgerTx ^. L.witsTxL . Alonzo.rdmrsTxWitsL
+      expectedRedeemers =
+        L.Redeemers $
+          Map.fromList
+            [
+              ( L.ConwayCertifying (L.AsIx 1)
+              , (Api.toAlonzoData redeemer, Api.toAlonzoExUnits (Script.ExecutionUnits 0 0))
+              )
+            ]
+  redeemers H.=== expectedRedeemers
+
+-- ---------------------------------------------------------------------------
+-- Property tests for calcMinFeeRecursive
+-- ---------------------------------------------------------------------------
+
+-- | Generates a simple lovelace-only transaction with generous UTxO funding.
+-- @sendCoin@ values span different CBOR unsigned integer encoding sizes
+-- (5-byte and 9-byte), including values near the 2^32 boundary.
+-- The minimum UTxO requirement (~1 ADA) prevents values in the 1–3 byte ranges.
+-- @fundingCoin = sendCoin + surplus@, where surplus is 2–17 ADA, ensuring the
+-- transaction is always well-funded for any realistic fee.
+genFundedSimpleTx
+  :: Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genFundedSimpleTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  -- CBOR unsigned integer encoding sizes: ≤23 → 1 byte, ≤255 → 2 bytes,
+  -- ≤65535 → 3 bytes, ≤4294967295 → 5 bytes, >4294967295 → 9 bytes.
+  -- Minimum UTxO (~1 ADA = 1_000_000 lovelace) constrains sendCoin to
+  -- the 5-byte range at minimum.
+  sendCoin <-
+    L.Coin
+      <$> Gen.choice
+        [ Gen.integral (Range.linear 1_000_000 3_000_000) -- 5-byte CBOR (low)
+        , Gen.integral (Range.linear 100_000_000 500_000_000) -- 5-byte CBOR (mid)
+        , Gen.integral (Range.linear 4_290_000_000 4_300_000_000) -- near 2^32 boundary
+        , Gen.integral (Range.linear 5_000_000_000 10_000_000_000) -- 9-byte CBOR
+        ]
+  -- Surplus of 2–17 ADA ensures funding always exceeds sendCoin + fees.
+  -- Fees are typically < 1000 lovelace with test protocol parameters
+  -- (feePerByte=1, feeFixed=0).
+  surplus <- L.Coin <$> Gen.integral (Range.linear 2_000_000 17_000_000)
+  let fundingCoin = sendCoin + surplus
+  let ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr (L.MaryValue fundingCoin mempty)
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      sendTxOut =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr (L.MaryValue sendCoin mempty)
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [sendTxOut]
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | Like 'genFundedSimpleTx' but the UTxO and output both carry native tokens.
+-- The output sends all tokens; the surplus ADA goes to the change output.
+-- This exercises Case 2's multi-asset handling on the success path.
+genFundedMultiAssetTx
+  :: Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genFundedMultiAssetTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  sendCoin <- L.Coin <$> Gen.integral (Range.linear 2_000_000 5_000_000)
+  surplus <- L.Coin <$> Gen.integral (Range.linear 2_000_000 17_000_000)
+  tokenQty <- Gen.integral (Range.linear 1 1_000_000)
+  let fundingCoin = sendCoin + surplus
+      policyId = L.PolicyID $ L.ScriptHash "1c14ee8e58fbcbd48dc7367c95a63fd1d937ba989820015db16ac7e5"
+      multiAsset = L.MultiAsset $ Map.singleton policyId (Map.singleton (Mary.AssetName "testtoken") tokenQty)
+      ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr (L.MaryValue fundingCoin multiAsset)
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      sendTxOut =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr (L.MaryValue sendCoin multiAsset)
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [sendTxOut]
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | Generates a simple lovelace-only transaction where the single output
+-- (5-10 ADA) greatly exceeds the UTxO funding (0.5-2 ADA).
+genUnderfundedTx
+  :: forall era
+   . Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genUnderfundedTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  fundingCoin <- L.Coin <$> Gen.integral (Range.linear 500_000 2_000_000)
+  sendCoin <- L.Coin <$> Gen.integral (Range.linear 5_000_000 10_000_000)
+  let ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr (L.MaryValue fundingCoin mempty)
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      sendTxOut =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr (L.MaryValue sendCoin mempty)
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [sendTxOut]
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | A well-funded transaction (UTxO >> output + fee) always produces a
+-- successful, fully balanced result with a positive fee.
+prop_calcMinFeeRecursive_well_funded_succeeds :: Property
+prop_calcMinFeeRecursive_well_funded_succeeds = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedSimpleTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left err -> H.annotateShow err >> H.failure
+    Right (Exp.UnsignedTx resultLedgerTx) -> do
+      let resultFee = resultLedgerTx ^. L.bodyTxL . L.feeTxBodyL
+      H.assert $ resultFee > L.Coin 0
+      -- The resulting transaction must be fully balanced (zero balance).
+      let balance =
+            UnexportedLedger.evalBalanceTxBody
+              exampleProtocolParams
+              (const Nothing)
+              (const False)
+              utxo
+              (resultLedgerTx ^. L.bodyTxL)
+      balance H.=== mempty
+
+-- | Like 'prop_calcMinFeeRecursive_well_funded_succeeds' but the UTxO and
+-- output carry native tokens. Verifies that surplus tokens are correctly
+-- distributed to the change output and the result is fully balanced.
+prop_calcMinFeeRecursive_well_funded_multi_asset :: Property
+prop_calcMinFeeRecursive_well_funded_multi_asset = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedMultiAssetTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left err -> H.annotateShow err >> H.failure
+    Right (Exp.UnsignedTx resultLedgerTx) -> do
+      let resultFee = resultLedgerTx ^. L.bodyTxL . L.feeTxBodyL
+      H.assert $ resultFee > L.Coin 0
+      let balance =
+            UnexportedLedger.evalBalanceTxBody
+              exampleProtocolParams
+              (const Nothing)
+              (const False)
+              utxo
+              (resultLedgerTx ^. L.bodyTxL)
+      balance H.=== mempty
+
+-- | 'calcMinFeeRecursive' is idempotent: applying it to its own result
+-- yields the same 'UnsignedTx'.  This confirms the fee has reached a
+-- fixed point and that any surplus was already distributed to outputs.
+prop_calcMinFeeRecursive_fee_fixpoint :: Property
+prop_calcMinFeeRecursive_fee_fixpoint = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedSimpleTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left err -> H.annotateShow err >> H.failure
+    Right resultTx -> do
+      secondResult <-
+        H.evalEither $
+          Exp.calcMinFeeRecursive changeAddr resultTx utxo exampleProtocolParams mempty mempty 0
+      resultTx H.=== secondResult
+
+-- | When the outputs exceed the UTxO value the function returns
+-- 'Left (NotEnoughAdaForNewOutput _)' with a negative deficit coin.
+prop_calcMinFeeRecursive_insufficient_funds :: Property
+prop_calcMinFeeRecursive_insufficient_funds = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genUnderfundedTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left (Exp.NotEnoughAdaForNewOutput deficit) -> H.assert $ deficit < L.Coin 0
+    Left Exp.NonAdaAssetsUnbalanced{} -> H.annotate "Unexpected NonAdaAssetsUnbalanced error" >> H.failure
+    Left Exp.MinUTxONotMet{} -> H.annotate "Unexpected MinUTxONotMet error" >> H.failure
+    Left Exp.FeeCalculationDidNotConverge -> H.annotate "Unexpected FeeCalculationDidNotConverge error" >> H.failure
+    Left err -> H.annotateShow err >> H.failure
+    Right _ -> H.failure
+
+-- | Generates a transaction whose output demands a native token that does
+-- not exist in the UTxO (which is ADA-only). This guarantees a negative
+-- multi-asset balance, triggering the multi-asset precondition check ('NonAdaAssetsUnbalanced').
+genNonAdaUnbalancedTx
+  :: Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genNonAdaUnbalancedTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  fundingCoin <- L.Coin <$> Gen.integral (Range.linear 5_000_000 20_000_000)
+  sendCoin <- L.Coin <$> Gen.integral (Range.linear 1_000_000 3_000_000)
+  tokenQty <- Gen.integral (Range.linear 1 1_000_000)
+  let ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr (L.MaryValue fundingCoin mempty)
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      -- Output demands tokens that don't exist in the ADA-only UTxO
+      policyId = L.PolicyID $ L.ScriptHash "1c14ee8e58fbcbd48dc7367c95a63fd1d937ba989820015db16ac7e5"
+      sendValue =
+        L.MaryValue sendCoin $
+          L.MultiAsset $
+            Map.singleton policyId (Map.singleton (Mary.AssetName "testtoken") tokenQty)
+      sendTxOut =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr sendValue
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [sendTxOut]
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | Generates a two-output transaction where the second output carries native
+-- tokens with only 1000 lovelace — well below the minimum UTxO for a
+-- token-bearing output. The surplus ADA is distributed to the first
+-- output (Case 2), so the second output stays below minimum, triggering
+-- Case 1 ('MinUTxONotMet').
+genMinUTxOViolatingTx
+  :: Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genMinUTxOViolatingTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  tokenQty <- Gen.integral (Range.linear 1 1_000_000)
+  let policyId = L.PolicyID $ L.ScriptHash "1c14ee8e58fbcbd48dc7367c95a63fd1d937ba989820015db16ac7e5"
+      multiAsset = L.MultiAsset $ Map.singleton policyId (Map.singleton (Mary.AssetName "testtoken") tokenQty)
+      -- UTxO has plenty of ADA and the same tokens
+      fundingValue = L.MaryValue (L.Coin 5_000_000) multiAsset
+      ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr fundingValue
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      -- Output 1: ADA only, will receive surplus via balanceTxOuts
+      sendTxOut1 =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr (L.MaryValue (L.Coin 1_000_000) mempty)
+      -- Output 2: tokens with tiny ADA (below min UTxO)
+      sendTxOut2 =
+        Exp.obtainCommonConstraints era $
+          Exp.TxOut $
+            Ledger.mkBasicTxOut addr (L.MaryValue (L.Coin 1_000) multiAsset)
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [sendTxOut1, sendTxOut2]
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | Generates a transaction with inputs but no outputs. Once the fee
+-- converges (Case 3), the positive surplus triggers Case 2, and
+-- 'balanceTxOuts' creates a change output with the surplus.
+genNoOutputsTx
+  :: Exp.Era era
+  -> Gen
+       ( Exp.UnsignedTx (Exp.LedgerEra era)
+       , L.UTxO (Exp.LedgerEra era)
+       , L.Addr
+       )
+genNoOutputsTx era = do
+  let sbe = convert era
+  txIn <- genTxIn
+  addr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  changeAddr <- Api.toShelleyAddr <$> genAddressInEra sbe
+  fundingCoin <- L.Coin <$> Gen.integral (Range.linear 5_000_000 20_000_000)
+  let ledgerTxIn = Api.toShelleyTxIn txIn
+      fundingTxOut =
+        Exp.obtainCommonConstraints era $
+          L.mkBasicTxOut addr (L.MaryValue fundingCoin mempty)
+      utxo = L.UTxO $ Map.singleton ledgerTxIn fundingTxOut
+      txBodyContent =
+        Exp.defaultTxBodyContent
+          & Exp.setTxIns [(txIn, Exp.AnyKeyWitnessPlaceholder)]
+          & Exp.setTxOuts [] -- No outputs!
+          & Exp.setTxFee 0
+  case Exp.makeUnsignedTx era txBodyContent of
+    Left err -> fail $ "makeUnsignedTx: " <> show err
+    Right tx -> return (tx, utxo, changeAddr)
+
+-- | When the output demands tokens not present in the ADA-only UTxO,
+-- the function returns 'Left (NonAdaAssetsUnbalanced _)'.
+prop_calcMinFeeRecursive_non_ada_unbalanced :: Property
+prop_calcMinFeeRecursive_non_ada_unbalanced = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genNonAdaUnbalancedTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left (Exp.NonAdaAssetsUnbalanced _) -> H.success
+    Left Exp.NotEnoughAdaForChangeOutput{} -> H.annotate "Unexpected NotEnoughAdaForChangeOutput" >> H.failure
+    Left Exp.NotEnoughAdaForNewOutput{} -> H.annotate "Unexpected NotEnoughAdaForNewOutput" >> H.failure
+    Left Exp.MinUTxONotMet{} -> H.annotate "Unexpected MinUTxONotMet" >> H.failure
+    Left Exp.FeeCalculationDidNotConverge -> H.annotate "Unexpected FeeCalculationDidNotConverge" >> H.failure
+    Right _ -> H.annotate "Expected NonAdaAssetsUnbalanced but got Right" >> H.failure
+
+-- | When a token-bearing output has less ADA than the minimum UTxO,
+-- the function returns 'Left (MinUTxONotMet actual required)' with
+-- @actual < required@.
+prop_calcMinFeeRecursive_min_utxo_not_met :: Property
+prop_calcMinFeeRecursive_min_utxo_not_met = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genMinUTxOViolatingTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left (Exp.MinUTxONotMet actual required) -> do
+      H.annotate $ "Actual: " <> show actual <> ", Required: " <> show required
+      H.assert $ actual < required
+    Left Exp.NotEnoughAdaForChangeOutput{} -> H.annotate "Unexpected NotEnoughAdaForChangeOutput" >> H.failure
+    Left Exp.NotEnoughAdaForNewOutput{} -> H.annotate "Unexpected NotEnoughAdaForNewOutput" >> H.failure
+    Left Exp.NonAdaAssetsUnbalanced{} -> H.annotate "Unexpected NonAdaAssetsUnbalanced" >> H.failure
+    Left Exp.FeeCalculationDidNotConverge -> H.annotate "Unexpected FeeCalculationDidNotConverge" >> H.failure
+    Right _ -> H.annotate "Expected MinUTxONotMet but got Right" >> H.failure
+
+-- | When the transaction has no outputs, the surplus is sent to a new
+-- change output at the provided change address.
+prop_calcMinFeeRecursive_no_tx_outs :: Property
+prop_calcMinFeeRecursive_no_tx_outs = H.property $ do
+  (unsignedTx, utxo, changeAddr) <- H.forAll $ genNoOutputsTx Exp.ConwayEra
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
+    Left err -> H.annotateShow err >> H.failure
+    Right (Exp.UnsignedTx resultLedgerTx) -> do
+      let outs = toList $ resultLedgerTx ^. L.bodyTxL . L.outputsTxBodyL
+      -- The result should have exactly one output (the change output)
+      length outs H.=== 1

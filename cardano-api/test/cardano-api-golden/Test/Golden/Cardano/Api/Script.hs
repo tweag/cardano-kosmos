@@ -1,0 +1,201 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Test.Golden.Cardano.Api.Script
+  ( test_golden_SimpleScriptV1_All
+  , test_golden_SimpleScriptV1_Any
+  , test_golden_SimpleScriptV1_MofN
+  , test_golden_SimpleScriptV2_All
+  , test_golden_SimpleScriptV2_Any
+  , test_golden_SimpleScriptV2_MofN
+  , test_golden_AlwaysSucceeds
+  , test_roundtrip_SimpleScript_JSON
+  , test_roundtrip_ScriptData
+  , test_roundtrip_HashableScriptData_JSON
+  )
+where
+
+import Cardano.Api
+import Cardano.Api.Parser.Text qualified as P
+
+import Cardano.Ledger.Api.Era qualified as L
+
+import Data.Aeson
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS
+import Data.Text qualified as Text
+import GHC.Stack (HasCallStack)
+import System.Directory (createDirectoryIfMissing)
+import System.Environment (lookupEnv)
+import System.FilePath (takeDirectory, (</>))
+
+import Test.Gen.Cardano.Api.Typed
+
+import Hedgehog ((===))
+import Hedgehog qualified as H
+import Hedgehog.Extras qualified as H
+import Hedgehog.Extras.Aeson
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.Hedgehog (testProperty)
+
+exampleSimpleScriptV1_All :: SimpleScript
+exampleSimpleScriptV1_All =
+  RequireAllOf
+    [ mkRequireSignature "e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8abb6735a"
+    , mkRequireSignature "a687dcc24e00dd3caafbeb5e68f97ca8ef269cb6fe971345eb951756"
+    , mkRequireSignature "0bd1d702b2e6188fe0857a6dc7ffb0675229bab58c86638ffa87ed6d"
+    , mkRequireSignature "dd0044a26cf7d4491ecea720fda11afb59d5725b53afa605fdf695e6"
+    , mkRequireSignature "cf223afe150cc8e89f11edaacbbd55b011ba44fbedef66fbd37d8c9d"
+    , mkRequireSignature "372643e7ef4b41fd2649ada30a89d35cb90b7c14cb5de252e6ce6cb7"
+    , mkRequireSignature "aa453dc184c5037d60e3fbbadb023f4a41bac112f249b76be9bb37ad"
+    , mkRequireSignature "6b732c60c267bab894854d6dd57a04a94e603fcc4c36274c9ed75952"
+    ]
+
+exampleSimpleScriptV1_Any :: SimpleScript
+exampleSimpleScriptV1_Any =
+  RequireAnyOf
+    [ mkRequireSignature "d92b712d1882c3b0f75b6f677e0b2cbef4fbc8b8121bb9dde324ff09"
+    , mkRequireSignature "4d780ed1bfc88cbd4da3f48de91fe728c3530d662564bf5a284b5321"
+    , mkRequireSignature "3a94d6d4e786a3f5d439939cafc0536f6abc324fb8404084d6034bf8"
+    , mkRequireSignature "b12e094d1db7c0fba5121f22db193d0060efed8be43654f861bb68ae"
+    , mkRequireSignature "9be49d56442b4b8b16cab4e43e238bbdefc6c803d554c82fcd5facc3"
+    , mkRequireSignature "622be5fab3b5c3f371a50a535e4d3349c942a98cecee93b24e2fd11d"
+    ]
+
+exampleSimpleScriptV1_MofN :: SimpleScript
+exampleSimpleScriptV1_MofN =
+  RequireMOf
+    2
+    [ mkRequireSignature "2f3d4cf10d0471a1db9f2d2907de867968c27bca6272f062cd1c2413"
+    , mkRequireSignature "f856c0c5839bab22673747d53f1ae9eed84afafb085f086e8e988614"
+    , mkRequireSignature "b275b08c999097247f7c17e77007c7010cd19f20cc086ad99d398538"
+    , mkRequireSignature "686024aecb5884d73a11b9ae4e63931112ba737e878d74638b78513a"
+    ]
+
+exampleSimpleScriptV2_All :: SimpleScript
+exampleSimpleScriptV2_All =
+  RequireAllOf
+    [ mkRequireSignature "e09d36c79dec9bd1b3d9e152247701cd0bb860b5ebfd1de8abb6735a"
+    , RequireTimeBefore (SlotNo 42)
+    ]
+
+exampleSimpleScriptV2_Any :: SimpleScript
+exampleSimpleScriptV2_Any =
+  RequireAnyOf
+    [ mkRequireSignature "d92b712d1882c3b0f75b6f677e0b2cbef4fbc8b8121bb9dde324ff09"
+    , RequireTimeAfter (SlotNo 42)
+    ]
+
+exampleSimpleScriptV2_MofN :: SimpleScript
+exampleSimpleScriptV2_MofN =
+  RequireMOf
+    1
+    [ mkRequireSignature "2f3d4cf10d0471a1db9f2d2907de867968c27bca6272f062cd1c2413"
+    , mkRequireSignature "f856c0c5839bab22673747d53f1ae9eed84afafb085f086e8e988614"
+    , RequireTimeBefore (SlotNo 42)
+    ]
+
+goldenPath :: FilePath
+goldenPath = "test/cardano-api-golden/files/Script"
+
+test_golden_SimpleScriptV1_All :: TestTree
+test_golden_SimpleScriptV1_All =
+  testProperty "golden SimpleScriptV1 All" $
+    goldenTestJsonValuePretty exampleSimpleScriptV1_All (goldenPath </> "SimpleV1/all.script")
+
+test_golden_SimpleScriptV1_Any :: TestTree
+test_golden_SimpleScriptV1_Any =
+  testProperty "golden SimpleScriptV1 Any" $
+    goldenTestJsonValuePretty exampleSimpleScriptV1_Any (goldenPath </> "SimpleV1/any.script")
+
+test_golden_SimpleScriptV1_MofN :: TestTree
+test_golden_SimpleScriptV1_MofN =
+  testProperty "golden SimpleScriptV1 MofN" $
+    goldenTestJsonValuePretty exampleSimpleScriptV1_MofN (goldenPath </> "SimpleV1/atleast.script")
+
+test_golden_SimpleScriptV2_All :: TestTree
+test_golden_SimpleScriptV2_All =
+  testProperty "golden SimpleScriptV2 All" $
+    goldenTestJsonValuePretty exampleSimpleScriptV2_All (goldenPath </> "SimpleV2/all.script")
+
+test_golden_SimpleScriptV2_Any :: TestTree
+test_golden_SimpleScriptV2_Any =
+  testProperty "golden SimpleScriptV2 Any" $
+    goldenTestJsonValuePretty exampleSimpleScriptV2_Any (goldenPath </> "SimpleV2/any.script")
+
+test_golden_SimpleScriptV2_MofN :: TestTree
+test_golden_SimpleScriptV2_MofN =
+  testProperty "golden SimpleScriptV2 MofN" $
+    goldenTestJsonValuePretty exampleSimpleScriptV2_MofN (goldenPath </> "SimpleV2/atleast.script")
+
+-- | Test showing that we can correctly deserialise a Plutus script that was
+-- saved in a CBOR hex-encoded text file or in a CBOR binary file
+test_golden_AlwaysSucceeds :: TestTree
+test_golden_AlwaysSucceeds = do
+  let expectedScriptHash = "58503a1d89a21fc9fc53d6a7cccef47341175a8f47636f57ccbdca2d"
+
+  testGroup
+    "golden AlwaysSucceeds"
+    [ testProperty "golden AlwaysSucceeds PlutusScriptV1 hex-encoded CBOR" $ do
+        let goldenFile = goldenPath </> "PlutusScriptV1/alwayssucceeds.txt"
+        H.propertyOnce $ do
+          H.diffVsGoldenFile
+            (Text.unpack $ serialiseToRawBytesHexText $ examplePlutusScriptAlwaysSucceeds WitCtxTxIn)
+            goldenFile
+
+          cborBytes <- H.evalIO $ BS.readFile goldenFile
+          -- 'BS.strip' is necessary in some scenarios such as when some user opens
+          -- the files and adds a newline (often done automically by their text
+          -- editor)
+          script <- H.evalEither $ deserialiseFromRawBytesHex $ BS.strip cborBytes
+
+          expectedScriptHash === serialiseToRawBytesHexText (hashScript (PlutusScript PlutusScriptV1 script))
+    , testProperty "golden AlwaysSucceeds PlutusScriptV1 bytestring CBOR" $
+        H.propertyOnce $ do
+          let goldenFile = goldenPath </> "PlutusScriptV1/alwayssucceeds.bin"
+              cborBytes = serialiseToCBOR $ examplePlutusScriptAlwaysSucceeds WitCtxTxIn
+
+          -- Write raw CBOR bytes if RECREATE_GOLDEN_FILES is set
+          -- Not using diffVsGoldenFile because we want to save the 'ByteString', and
+          -- not have to convert it to 'Text'.
+          -- Ideally, we should have a `diffVsGoldenBinaryFile
+          recreate <- H.evalIO $ lookupEnv "RECREATE_GOLDEN_FILES"
+          case recreate of
+            Just _ -> H.evalIO $ do
+              createDirectoryIfMissing True (takeDirectory goldenFile)
+              BS.writeFile goldenFile cborBytes
+            Nothing -> pure ()
+
+          -- Read back raw CBOR and deserialize
+          cborBytesRead <- H.evalIO $ BS.readFile goldenFile
+          -- 'BS.strip' is necessary in some scenarios such as when some user opens
+          -- the files and adds a newline (often done automically by their text
+          -- editor)
+          script <-
+            H.evalEither $ deserialiseFromCBOR (AsPlutusScript AsPlutusScriptV1) $ BS.strip cborBytesRead
+
+          expectedScriptHash === serialiseToRawBytesHexText (hashScript (PlutusScript PlutusScriptV1 script))
+    ]
+
+test_roundtrip_SimpleScript_JSON :: TestTree
+test_roundtrip_SimpleScript_JSON =
+  testProperty "roundtrip SimpleScript JSON" . H.property $ do
+    mss <- H.forAll genSimpleScript
+    H.tripping mss encode eitherDecode
+
+test_roundtrip_ScriptData :: TestTree
+test_roundtrip_ScriptData =
+  testProperty "roundtrip ScriptData" . H.property $ do
+    sData <- H.forAll genHashableScriptData
+    sData === fromAlonzoData (toAlonzoData @L.AlonzoEra sData)
+
+test_roundtrip_HashableScriptData_JSON :: TestTree
+test_roundtrip_HashableScriptData_JSON =
+  testProperty "roundtrip HashableScriptData" . H.property $ do
+    sData <- H.forAll genHashableScriptData
+    H.tripping sData scriptDataToJsonDetailedSchema scriptDataFromJsonDetailedSchema
+
+mkRequireSignature :: HasCallStack => Text -> SimpleScript
+mkRequireSignature t =
+  RequireSignature . either error id $
+    P.runParser parseRawBytesHex t

@@ -1,0 +1,340 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
+
+-- | This module provides a way to construct a simple transaction over all eras.
+-- It is exposed for testing purposes only.
+module Cardano.Api.Compatible.Tx
+  ( AnyProtocolUpdate (..)
+  , AnyVote (..)
+  , createCompatibleTx
+  , addWitnesses
+  )
+where
+
+import Cardano.Api.Era
+import Cardano.Api.Experimental.AnyScriptWitness
+import Cardano.Api.Experimental.Era (obtainCommonConstraints)
+import Cardano.Api.Experimental.Tx qualified as Exp
+import Cardano.Api.Experimental.Tx.Internal.AnyWitness
+import Cardano.Api.Experimental.Tx.Internal.AnyWitness qualified as Exp
+import Cardano.Api.Experimental.Tx.Internal.Certificate qualified as Exp
+import Cardano.Api.Plutus.Internal.Script
+import Cardano.Api.ProtocolParameters
+import Cardano.Api.Tx.Internal.Body hiding
+  ( convCertificates
+  , indexTxCertificates
+  , indexWitnessedTxProposalProcedures
+  )
+import Cardano.Api.Tx.Internal.Sign
+import Cardano.Api.Value.Internal
+
+import Cardano.Ledger.Alonzo.Tx qualified as L
+import Cardano.Ledger.Alonzo.TxWits qualified as Alonzo
+import Cardano.Ledger.Api qualified as L
+import Cardano.Ledger.Core qualified as L
+
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Maybe
+import Data.Maybe.Strict
+import Data.Monoid
+import Data.OSet.Strict (OSet)
+import Data.Sequence.Strict qualified as Seq
+import GHC.Exts (IsList (..))
+import Lens.Micro hiding (ix)
+
+data AnyProtocolUpdate era where
+  ProtocolUpdate
+    :: ShelleyToBabbageEra era
+    -> UpdateProposal era
+    -> AnyProtocolUpdate era
+  ProposalProcedures
+    :: ConwayEraOnwards era
+    -> Exp.TxProposalProcedures (ShelleyLedgerEra era)
+    -> AnyProtocolUpdate era
+  NoPParamsUpdate
+    :: ShelleyBasedEra era
+    -> AnyProtocolUpdate era
+
+data AnyVote era where
+  VotingProcedures
+    :: ConwayEraOnwards era
+    -> Exp.TxVotingProcedures (ShelleyLedgerEra era)
+    -> AnyVote era
+  NoVotes :: AnyVote era
+
+-- | Create a transaction in any shelley based era
+createCompatibleTx
+  :: forall era
+   . ShelleyBasedEra era
+  -> [TxIn]
+  -> [Exp.TxOut (ShelleyLedgerEra era)]
+  -> Map L.DataHash (L.Data (ShelleyLedgerEra era))
+  -- ^ Supplemental datums to include in the witness set. Use 'mempty' if
+  -- none are required. The legacy 'TxOut CtxTx era' bundled supplemental
+  -- datums inside outputs; 'Exp.TxOut' only carries the datum hash, so
+  -- callers thread the full datum bodies in here explicitly.
+  -> Lovelace
+  -- ^ Fee
+  -> AnyProtocolUpdate era
+  -> AnyVote era
+  -> Exp.TxCertificates (ShelleyLedgerEra era)
+  -> Either ProtocolParametersConversionError (Tx era)
+createCompatibleTx sbe ins outs extraDatums txFee' anyProtocolUpdate anyVote txCertificates' =
+  shelleyBasedEraConstraints sbe $ do
+    (updateTxBody, extraScriptWitnesses) <-
+      case anyProtocolUpdate of
+        ProtocolUpdate shelleyToBabbageEra updateProposal -> do
+          let ledgerPParamsUpdate = toLedgerUpdate sbe updateProposal
+              updateTxBody :: Endo (L.TxBody L.TopTx (ShelleyLedgerEra era)) =
+                shelleyToBabbageEraConstraints shelleyToBabbageEra $
+                  Endo $ \txb ->
+                    txb & L.updateTxBodyL .~ SJust ledgerPParamsUpdate
+
+          pure (updateTxBody, [])
+        NoPParamsUpdate _ ->
+          pure (mempty, [])
+        ProposalProcedures conwayOnwards proposalProcedures -> do
+          let Exp.TxProposalProcedures propMap = proposalProcedures
+              proposals :: OSet (L.ProposalProcedure (ShelleyLedgerEra era)) = fromList $ fst <$> shelleyBasedEraConstraints sbe (toList propMap)
+
+              proposalWitnesses =
+                [ (ix, witness)
+                | (_, (ix, witness)) <-
+                    indexWitnessedTxProposalProcedures conwayOnwards proposalProcedures
+                ]
+              referenceInputs =
+                [ toShelleyTxIn txIn
+                | (_, wit) <- proposalWitnesses
+                , txIn <- maybeToList $ getAnyWitnessReferenceInput wit
+                ]
+              -- append proposal reference inputs & set proposal procedures
+              updateTxBody :: Endo (L.TxBody L.TopTx (ShelleyLedgerEra era)) =
+                obtainCommonConstraints (convert conwayOnwards) $
+                  Endo $
+                    (L.referenceInputsTxBodyL %~ (<> fromList referenceInputs))
+                      . (L.proposalProceduresTxBodyL .~ proposals)
+
+          pure (updateTxBody, proposalWitnesses)
+
+    let txbody =
+          createCommonTxBody sbe ins outs txFee'
+            & appEndos [setCerts, setRefInputs, updateTxBody]
+
+        updateVotingProcedures =
+          case anyVote of
+            NoVotes -> id
+            VotingProcedures conwayOnwards (Exp.TxVotingProcedures procedures _) ->
+              overwriteVotingProcedures conwayOnwards procedures
+
+        apiScriptWitnesses =
+          [ (ix, witness)
+          | (ix, _, Just witness) <- indexedTxCerts
+          ]
+
+    pure
+      . ShelleyTx sbe
+      $ L.mkBasicTx txbody
+        & L.witsTxL
+          %~ setScriptWitnesses (apiScriptWitnesses <> extraScriptWitnesses)
+        & updateVotingProcedures
+ where
+  era = toCardanoEra sbe
+  appEndos = appEndo . mconcat
+
+  setCerts :: Endo (L.TxBody L.TopTx (ShelleyLedgerEra era))
+  setCerts =
+    shelleyBasedEraConstraints sbe $
+      Endo $
+        L.certsTxBodyL .~ convCertificates txCertificates'
+
+  setRefInputs :: Endo (L.TxBody L.TopTx (ShelleyLedgerEra era))
+  setRefInputs = do
+    let refInputs =
+          [ toShelleyTxIn refInput
+          | (_, _, Just wit) <- indexedTxCerts
+          , refInput <- maybeToList $ getAnyWitnessReferenceInput wit
+          ]
+
+    monoidForEraInEon era $ \beo ->
+      babbageEraOnwardsConstraints beo $
+        Endo $
+          L.referenceInputsTxBodyL .~ fromList refInputs
+
+  overwriteVotingProcedures
+    :: ConwayEraOnwards era
+    -> L.VotingProcedures (ShelleyLedgerEra era)
+    -> L.Tx L.TopTx (ShelleyLedgerEra era)
+    -> L.Tx L.TopTx (ShelleyLedgerEra era)
+  overwriteVotingProcedures conwayOnwards votingProcedures =
+    obtainCommonConstraints (convert conwayOnwards) $
+      (L.bodyTxL . L.votingProceduresTxBodyL) .~ votingProcedures
+
+  indexedTxCerts
+    :: [ ( ScriptWitnessIndex
+         , Exp.Certificate (ShelleyLedgerEra era)
+         , Maybe (Exp.AnyWitness (ShelleyLedgerEra era))
+         )
+       ]
+  indexedTxCerts = indexTxCertificates txCertificates'
+
+  setScriptWitnesses
+    :: [(ScriptWitnessIndex, AnyWitness (ShelleyLedgerEra era))]
+    -> L.TxWits (ShelleyLedgerEra era)
+    -> L.TxWits (ShelleyLedgerEra era)
+  setScriptWitnesses scriptWitnesses =
+    appEndos
+      [ monoidForEraInEon
+          era
+          ( \aeo -> alonzoEraOnwardsConstraints aeo $ Endo $ do
+              let sData = convScriptData' sbe extraDatums scriptWitnesses
+              let (datums, redeemers) = case sData of
+                    TxBodyScriptData _ ds rs -> (ds, rs)
+                    TxBodyNoScriptData -> (mempty, L.Redeemers mempty)
+              (L.datsTxWitsL .~ datums) . (L.rdmrsTxWitsL %~ (<> redeemers))
+          )
+      , monoidForEraInEon
+          era
+          ( \aeo -> allegraEraOnwardsConstraints aeo $ Endo $ do
+              let ledgerScripts = convSimpleScripts sbe scriptWitnesses
+              L.scriptTxWitsL
+                .~ Map.fromList
+                  [ (L.hashScript sw, sw)
+                  | sw <- ledgerScripts
+                  ]
+          )
+      ]
+
+convSimpleScripts
+  :: ShelleyLedgerEra era ~ ledgerera
+  => ShelleyBasedEra era
+  -> [(ScriptWitnessIndex, Exp.AnyWitness (ShelleyLedgerEra era))]
+  -> [L.Script ledgerera]
+convSimpleScripts sbe scriptWitnesses =
+  catMaybes
+    [ shelleyBasedEraConstraints sbe $ Exp.getAnyWitnessSimpleScript anywit
+    | (_, anywit) <- scriptWitnesses
+    ]
+
+convCertificates
+  :: Exp.TxCertificates (ShelleyLedgerEra era)
+  -> Seq.StrictSeq (L.TxCert (ShelleyLedgerEra era))
+convCertificates (Exp.TxCertificates cs) =
+  fromList . map (\(Exp.Certificate c, _) -> c) $ toList cs
+
+convScriptData'
+  :: ShelleyBasedEra era
+  -> Map L.DataHash (L.Data (ShelleyLedgerEra era))
+  -> [(ScriptWitnessIndex, AnyWitness (ShelleyLedgerEra era))]
+  -> TxBodyScriptData era
+convScriptData' sbe extraDatums scriptWitnesses =
+  forEraInEon
+    (convert sbe)
+    TxBodyNoScriptData
+    ( \w ->
+        alonzoEraOnwardsConstraints w $
+          let redeemers = getAnyPlutusScriptWitnessRedeemerPointerMap w scriptWitnesses
+              datums = mconcat [getAnyWitnessScriptData wit | (_, wit) <- scriptWitnesses]
+              supplementalDatums = Alonzo.TxDats extraDatums
+           in TxBodyScriptData w (datums <> supplementalDatums) redeemers
+    )
+
+getAnyPlutusScriptWitnessRedeemerPointerMap
+  :: AlonzoEraOnwards era
+  -> [(ScriptWitnessIndex, Exp.AnyWitness (ShelleyLedgerEra era))]
+  -> L.Redeemers (ShelleyLedgerEra era)
+getAnyPlutusScriptWitnessRedeemerPointerMap w wits =
+  alonzoEraOnwardsConstraints w $
+    Alonzo.Redeemers $
+      fromList
+        [ ( i
+          ,
+            ( toAlonzoData $ getAnyPlutusScriptWitnessRedeemer pswit
+            , toAlonzoExUnits $ getAnyPlutusScriptWitnessExecutionUnits pswit
+            )
+          )
+        | ( idx
+            , AnyPlutusScriptWitness pswit
+            ) <-
+            wits
+        , Just i <- [fromScriptWitnessIndex w idx]
+        ]
+
+createCommonTxBody
+  :: ShelleyBasedEra era
+  -> [TxIn]
+  -> [Exp.TxOut (ShelleyLedgerEra era)]
+  -> Lovelace
+  -> L.TxBody L.TopTx (ShelleyLedgerEra era)
+createCommonTxBody era ins outs txFee' =
+  shelleyBasedEraConstraints era $
+    let txIns' = map toShelleyTxIn ins
+        txOuts' = map (\(Exp.TxOut o) -> o) outs
+     in L.mkBasicTxBody
+          & L.inputsTxBodyL
+            .~ fromList txIns'
+          & L.outputsTxBodyL
+            .~ Seq.fromList txOuts'
+          & L.feeTxBodyL
+            .~ txFee'
+
+-- | Add provided witnesses to the transaction
+addWitnesses
+  :: forall era
+   . [KeyWitness era]
+  -> Tx era
+  -> Tx era
+  -- ^ a signed transaction
+addWitnesses witnesses (ShelleyTx sbe tx) =
+  shelleyBasedEraConstraints sbe $
+    ShelleyTx sbe txCommon
+ where
+  txCommon
+    :: forall ledgerera
+     . ShelleyLedgerEra era ~ ledgerera
+    => L.EraTx ledgerera
+    => L.Tx L.TopTx ledgerera
+  txCommon =
+    tx
+      & L.witsTxL
+        %~ ( ( L.addrTxWitsL
+                 %~ (<> fromList [w | ShelleyKeyWitness _ w <- witnesses])
+             )
+               . ( L.bootAddrTxWitsL
+                     %~ (<> fromList [w | ShelleyBootstrapWitness _ w <- witnesses])
+                 )
+           )
+
+-- | Index proposal procedures by their order ('Ord').
+indexWitnessedTxProposalProcedures
+  :: forall era
+   . ConwayEraOnwards era
+  -> Exp.TxProposalProcedures (ShelleyLedgerEra era)
+  -> [ ( L.ProposalProcedure (ShelleyLedgerEra era)
+       , (ScriptWitnessIndex, AnyWitness (ShelleyLedgerEra era))
+       )
+     ]
+indexWitnessedTxProposalProcedures cOnwards (Exp.TxProposalProcedures proposals) = do
+  let allProposalsList = zip [0 ..] $ obtainCommonConstraints (convert cOnwards) $ toList proposals
+  [ (proposal, (ScriptWitnessIndexProposing ix, anyWitness))
+    | (ix, (proposal, anyWitness)) <- allProposalsList
+    ]
+
+-- | Index certificates by the order they appear in the transaction, including
+-- both witnessed and unwitnessed certs. See 'indexCertificatesWith' for which
+-- certificate types are unwitnessed.
+--
+-- See section 4.1 of https://github.com/intersectmbo/cardano-ledger/releases/latest/download/alonzo-ledger.pdf
+indexTxCertificates
+  :: Exp.TxCertificates (ShelleyLedgerEra era)
+  -> [ ( ScriptWitnessIndex
+       , Exp.Certificate (ShelleyLedgerEra era)
+       , Maybe (AnyWitness (ShelleyLedgerEra era))
+       )
+     ]
+indexTxCertificates (Exp.TxCertificates certsWits) =
+  indexCertificatesWith $ toList certsWits

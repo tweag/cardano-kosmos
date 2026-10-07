@@ -1,0 +1,208 @@
+# Queries
+
+Ouroboros-consensus implements a querying interface to ask information about
+the ledger state or about the shape of the blockchain. This interface is exposed
+via the `LocalStateQuery` mini-protocol (Section 3.13 in [the Ouroboros Network
+Specification](https://ouroboros-network.cardano.intersectmbo.org/pdfs/network-spec/network-spec.pdf)).
+
+Queries can be categorized in 3 classes:
+
+- [Top level
+  queries](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-Ledger-Query.html#t:Query):
+  - `GetSystemStart` returns the start time of the system,
+  - `GetChainBlockNo` returns the current tip block number,
+  - `GetChainPoint` returns the current tip point (slot number and hash),
+  - `DebugLedgerConfig` returns a debug representation of the ledger
+    configuration in use,
+  - `BlockQuery` which depends on the particular block type, concretized in
+    `BlockQuery (HardForkBlock xs)` for the Hard Fork Block and in particular
+    the Cardano block, and `BlockQuery (ShelleyBlock proto era)` for the shelley
+    based eras.
+
+- Hard Fork era independent queries ([`BlockQuery (HardForkBlock
+  xs)`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-Combinator-Ledger-Query.html#t:BlockQuery)):
+  can be answered at any point in the chain.
+  - [`QueryAnytime
+    GetEraStart`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-Combinator-Ledger-Query.html#t:QueryAnytime)
+    which together with an era index returns information about the era start in
+    terms of time, slot, epoch number and Peras round.
+  - [`QueryHardFork
+    GetInterpreter`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-Combinator-Ledger-Query.html#t:QueryHardFork)
+    returns an
+    [`Interpreter`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-History-Qry.html#t:Interpreter)
+    that can be used to inspect the start and end of eras as well as the
+    parameters of each era (slot duration, epoch size, ...)
+  - [`QueryHardFork GetCurrentEra`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-Combinator-Ledger-Query.html#t:QueryHardFork) returns the index of the era at the current
+    tip of the chain.
+
+- Single-era block queries, note these can only be interpreted when the tip of
+  the chain is on the particular era, wrapped in [`QueryIfCurrent`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-HardFork-Combinator-Ledger-Query.html#t:QueryIfCurrent):
+  - Byron queries ([`BlockQuery
+    ByronBlock`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus-cardano/Ouroboros-Consensus-Byron-Ledger-Ledger.html#t:BlockQuery)):
+    which consists only of `GetUpdateInterfaceState` which returns the state of
+    the blockchain. This query can only be answered while the node's tip is
+    still in the Byron era.
+  - Shelley queries ([`BlockQuery (ShelleyBlock proto
+    era)`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus-cardano/Ouroboros-Consensus-Shelley-Ledger-Query.html#t:BlockQuery)):
+    these queries give access to information on the Ledger state. They are
+    discussed below as there are many of them.
+
+## Versioning
+
+Versioning of queries is done in multiple layers, some as global versions, some
+as block-dependent versions. When a client connects to a `cardano-node` they
+negotiate the highest
+[`NodeToClientVersion`](https://ouroboros-network.cardano.intersectmbo.org/cardano-diffusion/api/Cardano-Network-NodeToClient-Version.html#t:NodeToClientVersion)
+they both know about and use that one for deciding which queries are available
+and how to interpret the results.
+
+The top-level available queries depend on the `NodeToClientVersion`.
+
+|`NodeToClientVersion`|`QueryVersion` |Available top-level queries                                                            |
+|---------------------|---------------|---------------------------------------------------------------------------------------|
+|`NodeToClientV_23`   |`QueryVersion3`|`BlockQuery`, `GetSystemStart`, `GetChainBlockNo`, `GetChainPoint`, `DebugLedgerConfig`|
+
+Particular block-query versions are of type `BlockNodeToClientVersion blk`,
+which is associated with the global `NodeToClientVersion` in
+`supportedNodeToClientVersions`. There exist associations for the Byron and
+Shelley blocks alone but those are in principle uninteresting for mainnet, and
+instead we focus on the Cardano version. All the current versions imply also
+`HardForkSpecificNodeToClientVersion3` and `ByronNodeToClientVersion1`:
+
+| `NodeToClientVersion` | `BlockNodeToClientVersion blk` | `ShelleyNodeToClientVersion`   |
+|-----------------------|--------------------------------|--------------------------------|
+| `NodeToClientV_23`    | `CardanoNodeToClientVersion19` | `ShelleyNodeToClientVersion15` |
+
+What determines when a version may be dropped is the `cardano-node` release
+that first shipped it, since a client built against an older `cardano-node` can
+offer nothing newer than that release's maximum:
+
+| `NodeToClientVersion` | First shipped in `cardano-node` |
+|-----------------------|---------------------------------|
+| `NodeToClientV_16`    | 9.0.0                           |
+| `NodeToClientV_17`    | 9.2.0                           |
+| `NodeToClientV_18`    | 10.1.1                          |
+| `NodeToClientV_19`    | 10.2.1                          |
+| `NodeToClientV_20`    | 10.3.1                          |
+| `NodeToClientV_21`    | 10.6.0                          |
+| `NodeToClientV_22`    | 10.6.0                          |
+| `NodeToClientV_23`    | 10.7.0                          |
+
+Note that 11.x introduced no new version: 10.7.1 and 11.0.1 both use
+`ouroboros-consensus-3.0.1.0` and so offer the very same set.
+
+This table is mirrored by the comment on `supportedNodeToClientVersions` for
+`CardanoBlock`, in
+[`Ouroboros/Consensus/Cardano/Node.hs`](https://github.com/IntersectMBO/ouroboros-consensus/blob/main/ouroboros-consensus-cardano/src/ouroboros-consensus-cardano/Ouroboros/Consensus/Cardano/Node.hs);
+keep the two in sync when a new version is added.
+
+## Codecs
+
+Queries are sent over the LocalStateQuery mini-protocol (section 3.13 in [the
+Network
+documentation](https://ouroboros-network.cardano.intersectmbo.org/pdfs/network-spec/network-spec.pdf)). First
+the client has to request the acquisition of a point to run the queries on, and
+after confirmation from the server, the client can send `msgQuery` messages,
+finishing with a `msgRelease` signal.
+
+Queries are encoded with
+[`queryEncodeNodeToClient`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-Ledger-Query.html#v:queryEncodeNodeToClient)
+and decoded with
+[`queryDecodeNodeToClient`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-Ledger-Query.html#v:queryDecodeNodeToClient). Query
+results are encoded via the [`SerialiseResult`](https://ouroboros-consensus.cardano.intersectmbo.org/haddocks/ouroboros-consensus/Ouroboros-Consensus-Node-Serialisation.html#t:SerialiseResult) class.
+
+Query binary format is a CBOR encoding of tagged constructors, followed by the
+arguments for the query. Note the description of the binary format is
+representing almost CBOR diagnostics notation, so containers without underscores
+mean definite-length containers. The top level queries are encoded as:
+
+| Query              | Binary format         |
+|--------------------|-----------------------|
+| `BlockQuery query` | `[0, <encode query>]` |
+| `GetSystemStart`   | `[1]`                 |
+| `GetChainBlockNo`  | `[2]`                 |
+| `GetChainPoint`    | `[3]`                 |
+
+The hard-fork era independent queries are encoded as:
+
+| Query                          | Binary format              |
+|--------------------------------|----------------------------|
+| `QueryIfCurrent blockquery`    | `[0, <encode blockquery>]` |
+| `QueryAnytime GetEraStart era` | `[1, [0], <encode era>]`   |
+| `QueryHardFork GetInterpreter` | `[2, [0]]`                 |
+| `QueryHardFork GetCurrentEra`  | `[2, [1]]`                 |
+
+The block query is an N-ary sum-like construct, so queries for each era are
+encoded in a tagged construct (note that we concretize the Byron query as there
+is only one):
+
+| Query in era | Encoding       | Constructor                  |
+|--------------|----------------|------------------------------|
+| Byron        | `[0, 0]`       | `QZ GetUpdateInterfaceState` |
+| Shelley      | `[1, <query>]` | `QS (QZ query)`              |
+| Allegra      | `[2, <query>]` | `QS (QS (QZ query))`         |
+| ...          | ...            | ...                          |
+
+We will discuss the codecs of the Shelley eras' queries in the section below.
+
+The encoding of results is a CBOR encoding of the value, done without any
+tagging or prefixing. As the client knows which query it sent, it can infer how
+to decode the result. One result does not use the codec of its own type, see
+tag 11 in the table below.
+
+## Shelley queries
+
+The different parts of the Ledger State can be accessed via these Shelley
+queries. The interface is shared among all Shelley-based blocks, but some are
+only accessible when the tip of the chain is in Conway or a later era. The
+encoding of the queries consists of a (definite-length) list containing a tag
+and the serialization of the arguments.
+
+| Tag | Query                                     | Era restriction            | Arguments                                                                                     | Result                                                       |
+|-----|-------------------------------------------|----------------------------|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------|
+| 0   | `GetLedgerTip`                            |                            |                                                                                               | `Point (ShelleyBlock proto era)`                             |
+| 1   | `GetEpochNo`                              |                            |                                                                                               | `EpochNo`                                                    |
+| 2   | `GetNonMyopicMemberRewards`               |                            | `Set (Either Coin (Credential Staking))`                                                      | `NonMyopicMemberRewards`                                     |
+| 3   | `GetCurrentPParams`                       |                            |                                                                                               | `PParams era`                                                |
+| 4   | *(removed, do not reuse)*                 |                            |                                                                                               |                                                              |
+| 5   | *(removed, do not reuse)*                 |                            |                                                                                               |                                                              |
+| 6   | `GetUTxOByAddress`                        |                            | `Set Addr`                                                                                    | `UTxO era`                                                   |
+| 7   | `GetUTxOWhole`                            |                            |                                                                                               | `UTxO era`                                                   |
+| 8   | `DebugEpochState`                         |                            |                                                                                               | `EpochState era`                                             |
+| 9   | `GetCBOR`                                 | that of the internal query | `BlockQuery (ShelleyBlock proto era) fp result`                                               | `BlockQuery (ShelleyBlock proto era) fp (Serialised result)` |
+| 10  | `GetFilteredDelegationsAndRewardAccounts` |                            | `Set (Credential Staking)`                                                                    | `(Delegations, Map (Credential Staking) Coin)`               |
+| 11  | `GetGenesisConfig`                        |                            |                                                                                               | `CompactGenesis`, 15 fields, no `sgExtraConfig`              |
+| 12  | `DebugNewEpochState`                      |                            |                                                                                               | `NewEpochState era`                                          |
+| 13  | `DebugChainDepState`                      |                            |                                                                                               | `ChainDepState proto`                                        |
+| 14  | `GetRewardProvenance`                     |                            |                                                                                               | `RewardProvenance`                                           |
+| 15  | `GetUTxOByTxIn`                           |                            | `Set TxIn`                                                                                    | `UTxO era`                                                   |
+| 16  | `GetStakePools`                           |                            |                                                                                               | `Set (KeyHash StakePool)`                                    |
+| 17  | `GetStakePoolParams`                      |                            | `Set (KeyHash StakePool)`                                                                     | `Map (KeyHash StakePool) PoolParams`                         |
+| 18  | `GetRewardInfoPools`                      |                            |                                                                                               | `(RewardParams, Map (KeyHash StakePool) RewardInfoPool)`     |
+| 19  | `GetPoolState`                            |                            | `Maybe (Set (KeyHash StakePool))`                                                             | `QueryPoolStateResult`                                       |
+| 20  | `GetStakeSnapshots`                       |                            | `Maybe (Set (KeyHash StakePool))`                                                             | `StakeSnapshots`                                             |
+| 21  | *(removed, do not reuse)*                 |                            |                                                                                               |                                                              |
+| 22  | `GetStakeDelegDeposits`                   |                            | `Set StakeCredential`                                                                         | `Map StakeCredential Coin`                                   |
+| 23  | `GetConstitution`                         | †                          |                                                                                               | `Constitution era`                                           |
+| 24  | `GetGovState`                             |                            |                                                                                               | `GovState era`                                               |
+| 25  | `GetDRepState`                            | †                          | `Set (Credential DRepRole)`                                                                   | `Map (Credential DRepRole) DRepState`                        |
+| 26  | `GetDRepStakeDistr`                       | †                          | `Set DRep`                                                                                    | `Map DRep Coin`                                              |
+| 27  | `GetCommitteeMembersState`                | †                          | `Set (Credential ColdCommitteeRole)`, `Set (Credential HotCommitteeRole)`, `Set MemberStatus` | `CommitteeMembersState`                                      |
+| 28  | `GetFilteredVoteDelegatees`               | †                          | `Set (Credential Staking)`                                                                    | `VoteDelegatees`                                             |
+| 29  | `GetAccountState`                         |                            |                                                                                               | `ChainAccountState`                                          |
+| 30  | `GetSPOStakeDistr`                        | †                          | `Set (KeyHash StakePool)`                                                                     | `Map (KeyHash StakePool) Coin`                               |
+| 31  | `GetProposals`                            | †                          | `Set GovActionId`                                                                             | `Seq (GovActionState era)`                                   |
+| 32  | `GetRatifyState`                          | †                          |                                                                                               | `RatifyState era`                                            |
+| 33  | `GetFuturePParams`                        | †                          |                                                                                               | `Maybe (PParams era)`                                        |
+| 34  | `GetLedgerPeerSnapshot`                   |                            | `SingLedgerPeersKind`, encoded as `0` (all peers) or `1` (big peers)                          | `LedgerPeerSnapshot`                                         |
+| 35  | `QueryStakePoolDefaultVote`               | †                          | `KeyHash StakePool`                                                                           | `DefaultVote`                                                |
+| 36  | `GetPoolDistr2`                           |                            | `Maybe (Set (KeyHash StakePool))`                                                             | `PoolDistr`                                                  |
+| 37  | `GetStakeDistribution2`                   |                            |                                                                                               | `PoolDistr`                                                  |
+| 38  | `GetMaxMajorProtocolVersion`              |                            |                                                                                               | `MaxMajorProtVer`                                            |
+| 39  | `GetDRepDelegations`                      | †                          | `Set DRep`                                                                                    | `(Map DRep (Set (Credential Staking)))`                      |
+
+A removed query's tag stays spent: it is never reassigned, because deployed
+clients still encode the removed query with it.
+
+†: these queries can only be answered when the corresponding era is Conway or
+later, as they relate to governance concepts only present starting on Conway.

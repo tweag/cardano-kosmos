@@ -1,0 +1,4 @@
+import: .github/workflows/cabal.project.default.local
+
+package ouroboros-consensus
+  flags: +expensive-invariants

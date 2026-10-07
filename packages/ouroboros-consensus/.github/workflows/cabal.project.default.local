@@ -1,0 +1,5 @@
+package cardano-crypto-praos
+  flags: -external-libsodium-vrf
+
+program-options
+  ghc-options: -Werror

@@ -1,0 +1,480 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Ouroboros.Consensus.Storage.ChainDB.Impl
+  ( -- * Initialization
+    ChainDbArgs (..)
+  , SerialiseDiskConstraints
+  , defaultArgs
+  , openDB
+  , withDB
+
+    -- * Trace types
+  , SelectionChangedInfo (..)
+  , TraceAddBlockEvent (..)
+  , TraceAddPerasCertEvent (..)
+  , TraceChainSelStarvationEvent (..)
+  , TraceCopyToImmutableDBEvent (..)
+  , TraceEvent (..)
+  , TraceFollowerEvent (..)
+  , TraceGCEvent (..)
+  , TraceInitChainSelEvent (..)
+  , TraceIteratorEvent (..)
+  , TraceOpenEvent (..)
+  , TracePipeliningEvent (..)
+  , TraceValidationEvent (..)
+
+    -- * Re-exported for convenience
+  , Args.RelativeMountPoint (..)
+  , ImmutableDB.ImmutableDbSerialiseConstraints
+  , LedgerDB.LedgerDbSerialiseConstraints
+  , VolatileDB.VolatileDbSerialiseConstraints
+
+    -- * Internals for testing purposes
+  , Internal (..)
+  , openDBInternal
+  ) where
+
+import Control.Monad (void, when)
+import Control.Monad.Trans.Class (lift)
+import qualified Control.RAWLock as RAW
+import Control.ResourceRegistry
+  ( allocate
+  , runWithTempRegistry
+  )
+import Control.Tracer
+import Data.Functor ((<&>))
+import qualified Data.Map.Strict as Map
+import Data.Maybe.Strict (StrictMaybe (..))
+import Data.SOP (All, Top)
+import GHC.Stack (HasCallStack)
+import NoThunks.Class
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.Config
+import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory (..))
+import Ouroboros.Consensus.HeaderValidation (mkHeaderWithTime)
+import Ouroboros.Consensus.Ledger.Extended (ledgerState, mkPerasEpochContextResolverHandle)
+import Ouroboros.Consensus.Ledger.Inspect
+import Ouroboros.Consensus.Ledger.SupportsProtocol
+import Ouroboros.Consensus.Peras.Context
+  ( PerasEpochContextResolverHandle (..)
+  , StateSupportsPerasEpochContext
+  , TimeResolutionContextHandle (..)
+  )
+import Ouroboros.Consensus.Storage.ChainDB.API
+  ( ChainDB
+  , PerasCertInclusionViewHandle (..)
+  , PerasVotingViewHandle (..)
+  )
+import qualified Ouroboros.Consensus.Storage.ChainDB.API as API
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Args
+  ( ChainDbArgs
+  , defaultArgs
+  )
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Args as Args
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Background as Background
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.ChainSel as ChainSel
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Follower as Follower
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Iterator as Iterator
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Query as Query
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Types
+import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
+import qualified Ouroboros.Consensus.Storage.ImmutableDB.Stream as ImmutableDB
+import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
+import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
+import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
+import Ouroboros.Consensus.Util (newFuse, whenJust)
+import Ouroboros.Consensus.Util.Args
+import Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Consensus.Util.STM
+  ( Fingerprint (..)
+  , WithFingerprint (..)
+  )
+import Ouroboros.Network.AnchoredFragment (AnchoredFragment)
+import qualified Ouroboros.Network.AnchoredFragment as AF
+import Ouroboros.Network.BlockFetch.ConsensusInterface
+  ( ChainSelStarvation (..)
+  )
+
+{-------------------------------------------------------------------------------
+  Initialization
+-------------------------------------------------------------------------------}
+
+withDB ::
+  forall m blk a.
+  ( IOLike m
+  , All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , SerialiseDiskConstraints blk
+  ) =>
+  Complete Args.ChainDbArgs m blk ->
+  (ChainDB m blk -> m a) ->
+  m a
+withDB args = bracket (fst <$> openDBInternal args True) API.closeDB
+
+openDB ::
+  forall m blk.
+  ( IOLike m
+  , All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , SerialiseDiskConstraints blk
+  ) =>
+  Complete Args.ChainDbArgs m blk ->
+  m (ChainDB m blk)
+openDB args = fst <$> openDBInternal args True
+
+openDBInternal ::
+  forall m blk.
+  ( IOLike m
+  , All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , SerialiseDiskConstraints blk
+  , HasCallStack
+  ) =>
+  Complete Args.ChainDbArgs m blk ->
+  -- | 'True' = Launch background tasks
+  Bool ->
+  m (ChainDB m blk, Internal m blk)
+openDBInternal args launchBgTasks = runWithTempRegistry $ do
+  ( immutableDB
+    , immutableDbTip
+    , volatileDB
+    , ledgerDbGetVolatileSuffix
+    , setGetCurrentChainForLedgerDB
+    ) <- lift $ do
+    traceWith tracer $ TraceOpenEvent StartedOpeningDB
+    traceWith tracer $ TraceOpenEvent StartedOpeningImmutableDB
+    immutableDB <- ImmutableDB.openDB argsImmutableDb
+    immutableDbTip <- atomically $ ImmutableDB.getTip immutableDB
+    let immutableDbTipPoint = ImmutableDB.tipToPoint immutableDbTip
+        immutableDbTipChunk =
+          chunkIndexOfPoint (ImmutableDB.immChunkInfo argsImmutableDb) immutableDbTipPoint
+    traceWith tracer $
+      TraceOpenEvent $
+        OpenedImmutableDB immutableDbTipPoint immutableDbTipChunk
+
+    traceWith tracer $ TraceOpenEvent StartedOpeningVolatileDB
+    volatileDB <- VolatileDB.openDB argsVolatileDb
+    maxSlot <- atomically $ VolatileDB.getMaxSlotNo volatileDB
+    traceWith tracer $ TraceOpenEvent (OpenedVolatileDB maxSlot)
+    traceWith tracer $ TraceOpenEvent StartedOpeningLgrDB
+    (ledgerDbGetVolatileSuffix, setGetCurrentChainForLedgerDB) <- mkLedgerDbGetVolatileSuffix
+    pure
+      ( immutableDB
+      , immutableDbTip
+      , volatileDB
+      , ledgerDbGetVolatileSuffix
+      , setGetCurrentChainForLedgerDB
+      )
+
+  -- Note this is the only step that actually cares about the temporary registry
+  -- while initializing the ChainDB. It opens the handle to the backend and we
+  -- want to track that one to close it on exception. See "Resource management
+  -- in the LedgerDB" in "Ouroboros.Consensus.Storage.LedgerDB.API" for an
+  -- explanation of why.
+  lgrDB <-
+    LedgerDB.openDB
+      argsLgrDb
+      (ImmutableDB.streamAPI immutableDB)
+      (ImmutableDB.tipToPoint immutableDbTip)
+      ( case immutableDbTip of
+          Origin -> IsNotEBB
+          NotOrigin tip -> ImmutableDB.tipIsEBB tip
+      )
+      (Query.getAnyKnownBlock immutableDB volatileDB)
+      ledgerDbGetVolatileSuffix
+
+  lift $ do
+    traceWith tracer $ TraceOpenEvent OpenedLgrDB
+
+    let resolverHandle = mkPerasEpochContextResolverHandle (LedgerDB.getVolatileTip lgrDB)
+    perasCertDB <- PerasCertDB.createDB argsPerasCertDB
+    perasVoteDB <- PerasVoteDB.createDB argsPerasVoteDB resolverHandle
+
+    varInvalid <- newTVarIO (WithFingerprint Map.empty (Fingerprint 0))
+
+    let initChainSelTracer = TraceInitChainSelEvent >$< tracer
+
+    traceWith initChainSelTracer StartedInitChainSelection
+    initialLoE <- Args.cdbsLoE cdbSpecificArgs
+    initialWeights <- atomically $ PerasCertDB.getWeightSnapshot perasCertDB
+    chain <-
+      ChainSel.initialChainSelection
+        immutableDB
+        volatileDB
+        lgrDB
+        initChainSelTracer
+        (Args.cdbsTopLevelConfig cdbSpecificArgs)
+        varInvalid
+        (void initialLoE)
+        (forgetFingerprint initialWeights)
+    traceWith initChainSelTracer InitialChainSelected
+
+    curLedger <- atomically $ LedgerDB.getVolatileTip lgrDB
+    let lcfg = configLedger (Args.cdbsTopLevelConfig cdbSpecificArgs)
+
+        -- the volatile tip ledger state can translate the slots of the volatile
+        -- headers
+        chainWithTime =
+          AF.mapAnchoredFragment
+            ( mkHeaderWithTime
+                lcfg
+                (ledgerState curLedger)
+            )
+            chain
+
+    varChain <- newTVarWithInvariantIO checkInternalChain $ InternalChain chain chainWithTime
+    varTentativeState <- newTVarIO $ initialTentativeHeaderState (Proxy @blk)
+    varTentativeHeader <- newTVarIO SNothing
+    varIterators <- newTVarIO Map.empty
+    varFollowers <- newTVarIO Map.empty
+    varNextIteratorKey <- newTVarIO (IteratorKey 0)
+    varNextFollowerKey <- newTVarIO (FollowerKey 0)
+    varKillBgThreads <- newTVarIO $ return ()
+    immdbLock <- RAW.new ()
+    chainSelFuse <- newFuse "chain selection"
+    chainSelQueue <- newChainSelQueue (Args.cdbsBlocksToAddSize cdbSpecificArgs)
+    varChainSelStarvation <- newTVarIO ChainSelStarvationOngoing
+    varSnapshotDelayRNG <- newTVarIO (Args.cdbsSnapshotDelayRNG cdbSpecificArgs)
+
+    let env =
+          CDB
+            { cdbImmutableDB = immutableDB
+            , cdbVolatileDB = volatileDB
+            , cdbLedgerDB = lgrDB
+            , cdbChain = varChain
+            , cdbTentativeState = varTentativeState
+            , cdbTentativeHeader = varTentativeHeader
+            , cdbIterators = varIterators
+            , cdbFollowers = varFollowers
+            , cdbTopLevelConfig = Args.cdbsTopLevelConfig cdbSpecificArgs
+            , cdbInvalid = varInvalid
+            , cdbNextIteratorKey = varNextIteratorKey
+            , cdbNextFollowerKey = varNextFollowerKey
+            , cdbImmutableDBLock = immdbLock
+            , cdbChainSelFuse = chainSelFuse
+            , cdbTracer = tracer
+            , cdbRegistry = Args.cdbsRegistry cdbSpecificArgs
+            , cdbGcDelay = Args.cdbsGcDelay cdbSpecificArgs
+            , cdbGcInterval = Args.cdbsGcInterval cdbSpecificArgs
+            , cdbKillBgThreads = varKillBgThreads
+            , cdbChainSelQueue = chainSelQueue
+            , cdbLoE = Args.cdbsLoE cdbSpecificArgs
+            , cdbChainSelStarvation = varChainSelStarvation
+            , cdbPerasCertDB = perasCertDB
+            , cdbPerasVoteDB = perasVoteDB
+            , cdbSnapshotDelayRNG = varSnapshotDelayRNG
+            }
+
+    setGetCurrentChainForLedgerDB $ Query.getCurrentChain env
+
+    h <- fmap CDBHandle $ newTVarIO $ ChainDbOpen env
+    let chainDB =
+          API.ChainDB
+            { addBlockAsync = getEnv2 h ChainSel.addBlockAsync
+            , chainSelAsync = getEnv h ChainSel.triggerChainSelectionAsync
+            , getCurrentChain = getEnvSTM h Query.getCurrentChain
+            , getCurrentChainWithTime = getEnvSTM h Query.getCurrentChainWithTime
+            , getTipBlock = getEnv h Query.getTipBlock
+            , getTipHeader = getEnv h Query.getTipHeader
+            , getTipPoint = getEnvSTM h Query.getTipPoint
+            , getBlockComponent = getEnv2 h Query.getBlockComponent
+            , getIsFetched = getEnvSTM h Query.getIsFetched
+            , getIsValid = getEnvSTM h Query.getIsValid
+            , getMaxSlotNo = getEnvSTM h Query.getMaxSlotNo
+            , stream = Iterator.stream h
+            , newFollower = Follower.newFollower h
+            , getIsInvalidBlock = getEnvSTM h Query.getIsInvalidBlock
+            , getChainSelStarvation = getEnvSTM h Query.getChainSelStarvation
+            , closeDB = closeDB h
+            , isOpen = isOpen h
+            , getCurrentLedger = getEnvSTM h Query.getCurrentLedger
+            , getImmutableLedger = getEnvSTM h Query.getImmutableLedger
+            , getPastLedger = getEnvSTM1 h Query.getPastLedger
+            , getHeaderStateHistory = getEnvSTM h Query.getHeaderStateHistory
+            , allocInRegistryReadOnlyForkerAtPoint = getEnv2 h Query.allocInRegistryReadOnlyForkerAtPoint
+            , openReadOnlyForkerAtPoint = getEnv1 h Query.openReadOnlyForkerAtPoint
+            , withReadOnlyForkerAtPoint = getEnvTrans2 h Query.withReadOnlyForkerAtPoint
+            , getStatistics = getEnv h Query.getStatistics
+            , addPerasCertAsync = getEnv1 h ChainSel.addPerasCertAsync
+            , getPerasWeightSnapshot = getEnvSTM h Query.getPerasWeightSnapshot
+            , getLatestPerasCertSeen = getEnvSTM h Query.getLatestPerasCertSeen
+            , getPerasCertsAfter = getEnvSTM1 h Query.getPerasCertsAfter
+            , getPerasCertIds = getEnvSTM h Query.getPerasCertIds
+            , addPerasVoteWithAsyncCertHandling = getEnv1 h ChainSel.addPerasVoteWithAsyncCertHandling
+            , getPerasVotesAfter = getEnvSTM1 h Query.getPerasVotesAfter
+            , getPerasVoteIds = getEnvSTM h Query.getPerasVoteIds
+            , getPerasEpochContextResolverHandle =
+                PerasEpochContextResolverHandle $
+                  getEnvSTM h $
+                    Query.getPerasEpochContextResolver
+            , getPerasVotingViewHandle =
+                PerasVotingViewHandle $ \roundNo ->
+                  getEnvSTM h $
+                    Query.getPerasVotingView
+                      (topLevelConfigLedger (Args.cdbsTopLevelConfig cdbSpecificArgs))
+                      roundNo
+            , getPerasCertInclusionViewHandle =
+                PerasCertInclusionViewHandle $ \roundNo ->
+                  getEnvSTM h $
+                    Query.getPerasCertInclusionView roundNo
+            , getTimeResolutionContextHandle =
+                TimeResolutionContextHandle $
+                  getEnvSTM h $
+                    Query.getTimeResolutionContext
+                      (topLevelConfigLedger (Args.cdbsTopLevelConfig cdbSpecificArgs))
+            , waitForImmutableBlock = getEnv1 h Query.waitForImmutableBlock
+            , getLatestPerasCertOnChainRound = getEnvSTM h Query.getLatestPerasCertOnChainRound
+            }
+    addBlockTestFuse <- newFuse "test chain selection"
+    let testing =
+          Internal
+            { intCopyToImmutableDB = getEnv h Background.copyToImmutableDB
+            , intGarbageCollect = \slot -> getEnv h $ \e -> do
+                Background.garbageCollectBlocks e slot
+                Background.garbageCollectPeras e slot
+                LedgerDB.garbageCollect (cdbLedgerDB e) slot
+            , intTryTakeSnapshot = getEnv h $ \e -> do
+                -- 'tryTakeSnapshot' only enqueues a request for the snapshots;
+                -- as the background thread that would serve it is usually not
+                -- running in the tests using this, serve it ourselves.
+                LedgerDB.tryTakeSnapshot (cdbLedgerDB e)
+                Background.tryServeSnapshotRequestNow e
+            , intAddBlockRunner = getEnv h (Background.addBlockRunner addBlockTestFuse)
+            , intKillBgThreads = varKillBgThreads
+            }
+
+    traceWith tracer $
+      TraceOpenEvent $
+        OpenedDB
+          (castPoint $ AF.anchorPoint chain)
+          (castPoint $ AF.headPoint chain)
+
+    when launchBgTasks $ Background.launchBgTasks env
+
+    -- Note we put the ChainDB in the top level registry before exiting the
+    -- 'runWithTempRegistry' scope. This way, the critical resources (actually
+    -- only the LedgerDB resources, see "Resource management in the LedgerDB"
+    -- note in "Ouroboros.Consensus.Storage.LedgerDB.API") are always tracked by
+    -- a registry. As the ChainDB is so fundamental to the execution of
+    -- Consensus, it is justified for the LedgerDB to temporarily allocate
+    -- resources with 'impossibleToNotTransfer'.
+    _ <- allocate (Args.cdbsRegistry cdbSpecificArgs) (\_ -> return chainDB) API.closeDB
+
+    return ((chainDB, testing), env)
+ where
+  tracer = Args.cdbsTracer cdbSpecificArgs
+  Args.ChainDbArgs
+    argsImmutableDb
+    argsVolatileDb
+    argsLgrDb
+    argsPerasCertDB
+    argsPerasVoteDB
+    cdbSpecificArgs = args
+
+  -- The LedgerDB requires a criterion ('LedgerDB.GetVolatileSuffix')
+  -- determining which of its states are volatile/immutable. Once we have
+  -- initialized the ChainDB we can defer this decision to
+  -- 'Query.getCurrentChain'.
+  --
+  -- However, we initialize the LedgerDB before the ChainDB (for initial chain
+  -- selection), so during that period, we temporarily consider no state (apart
+  -- from the anchor state) as immutable. This is fine as we don't perform eg
+  -- any rollbacks during this period.
+  mkLedgerDbGetVolatileSuffix ::
+    m
+      ( LedgerDB.GetVolatileSuffix m blk
+      , STM m (AnchoredFragment (Header blk)) -> m ()
+      )
+  mkLedgerDbGetVolatileSuffix = do
+    varGetCurrentChain ::
+      StrictTMVar m (OnlyCheckWhnf (STM m (AnchoredFragment (Header blk)))) <-
+      newEmptyTMVarIO
+    let getVolatileSuffix =
+          LedgerDB.GetVolatileSuffix $
+            tryReadTMVar varGetCurrentChain >>= \case
+              -- If @setVarChain@ has not yet been invoked, return the entire
+              -- suffix as volatile.
+              Nothing -> pure id
+              -- Otherwise, return the suffix with the same length as the
+              -- current chain.
+              Just (OnlyCheckWhnf getCurrentChain) -> do
+                curChainLen <- AF.length <$> getCurrentChain
+                pure $ AF.anchorNewest (fromIntegral curChainLen)
+        setVarChain = atomically . writeTMVar varGetCurrentChain . OnlyCheckWhnf
+    pure (getVolatileSuffix, setVarChain)
+
+isOpen :: IOLike m => ChainDbHandle m blk -> STM m Bool
+isOpen (CDBHandle varState) =
+  readTVar varState <&> \case
+    ChainDbClosed -> False
+    ChainDbOpen _env -> True
+
+closeDB ::
+  forall m blk.
+  ( IOLike m
+  , HasHeader (Header blk)
+  , HasCallStack
+  ) =>
+  ChainDbHandle m blk -> m ()
+closeDB (CDBHandle varState) = do
+  mbOpenEnv <-
+    atomically $
+      readTVar varState >>= \case
+        -- Idempotent
+        ChainDbClosed -> return Nothing
+        ChainDbOpen env -> do
+          writeTVar varState ChainDbClosed
+          return $ Just env
+
+  -- Only when the ChainDB was open
+  whenJust mbOpenEnv $ \cdb@CDB{..} -> do
+    Follower.closeAllFollowers cdb
+    Iterator.closeAllIterators cdb
+
+    killBgThreads <- atomically $ readTVar cdbKillBgThreads
+    killBgThreads
+
+    ImmutableDB.closeDB cdbImmutableDB
+    VolatileDB.closeDB cdbVolatileDB
+    LedgerDB.closeDB cdbLedgerDB
+
+    chain <- atomically $ icWithoutTime <$> readTVar cdbChain
+
+    traceWith cdbTracer $
+      TraceOpenEvent $
+        ClosedDB
+          (castPoint $ AF.anchorPoint chain)
+          (castPoint $ AF.headPoint chain)
+
+{-------------------------------------------------------------------------------
+  Auxiliary
+-------------------------------------------------------------------------------}
+
+-- | Lift 'chunkIndexOfSlot' to 'Point'
+--
+-- Returns 'firstChunkNo' in case of 'GenesisPoint'.
+chunkIndexOfPoint :: ImmutableDB.ChunkInfo -> Point blk -> ImmutableDB.ChunkNo
+chunkIndexOfPoint chunkInfo = \case
+  GenesisPoint -> ImmutableDB.firstChunkNo
+  BlockPoint slot _ -> ImmutableDB.chunkIndexOfSlot chunkInfo slot

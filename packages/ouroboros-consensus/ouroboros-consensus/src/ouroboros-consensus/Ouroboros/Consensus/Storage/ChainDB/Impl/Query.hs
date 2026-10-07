@@ -1,0 +1,628 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeOperators #-}
+
+-- | Queries
+module Ouroboros.Consensus.Storage.ChainDB.Impl.Query
+  ( -- * Queries
+    allocInRegistryReadOnlyForkerAtPoint
+  , getBlockComponent
+  , getCurrentChain
+  , getCurrentChainWithTime
+  , getCurrentLedger
+  , getHeaderStateHistory
+  , getImmutableLedger
+  , getIsFetched
+  , getIsInvalidBlock
+  , getIsValid
+  , getMaxSlotNo
+  , getPastLedger
+  , getPerasWeightSnapshot
+  , getLatestPerasCertSeen
+  , getPerasCertsAfter
+  , getPerasCertIds
+  , getPerasVotesAfter
+  , getPerasVoteIds
+  , getLatestPerasCertOnChainRound
+  , getPerasVotingView
+  , getPerasCertInclusionView
+  , getPerasEpochContextResolver
+  , getTimeResolutionContext
+  , getStatistics
+  , getTipBlock
+  , getTipHeader
+  , getTipPoint
+  , openReadOnlyForkerAtPoint
+  , waitForImmutableBlock
+  , withReadOnlyForkerAtPoint
+
+    -- * Low-level queries
+  , getAnyBlockComponent
+  , getAnyKnownBlock
+  , getAnyKnownBlockComponent
+  , getChainSelStarvation
+  ) where
+
+import Cardano.Ledger.BaseTypes (WithOrigin (..))
+import Control.Monad (void)
+import Control.Monad.Trans.Class
+import Control.ResourceRegistry
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Maybe.Strict (strictMaybeToMaybe)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Typeable
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.BlockchainTime.WallClock.Types (WithArrivalTime)
+import Ouroboros.Consensus.Config
+import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory (..))
+import Ouroboros.Consensus.HeaderStateHistory
+  ( HeaderStateHistory (..)
+  )
+import Ouroboros.Consensus.HeaderValidation (HeaderWithTime)
+import Ouroboros.Consensus.Ledger.Abstract (EmptyMK)
+import Ouroboros.Consensus.Ledger.Basics (LedgerConfig)
+import Ouroboros.Consensus.Ledger.Extended
+import Ouroboros.Consensus.Ledger.Peras (PerasState (..))
+import Ouroboros.Consensus.Peras.Cert.Inclusion
+  ( PerasCertInclusionView
+  , mkPerasCertInclusionView
+  )
+import Ouroboros.Consensus.Peras.Context
+  ( PerasEpochContextResolver
+  , StateSupportsPerasEpochContext
+  , TimeResolutionContext (..)
+  , resolveRoundNo
+  )
+import Ouroboros.Consensus.Peras.Voting.View
+  ( PerasVotingView
+  , WithBoostedBlockStatus
+  , mkPerasVotingView
+  , perasChainAtCandidateBlock
+  , runPerasQry
+  )
+import Ouroboros.Consensus.Peras.Weight
+  ( PerasWeightSnapshot
+  , takeVolatileSuffix
+  )
+import Ouroboros.Consensus.Protocol.Abstract
+import Ouroboros.Consensus.Storage.ChainDB.API
+  ( BlockComponent (..)
+  , ChainDbFailure (..)
+  , PerasCertInclusionViewError (..)
+  , PerasVotingViewError (..)
+  )
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Types
+import Ouroboros.Consensus.Storage.ImmutableDB (ImmutableDB)
+import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
+import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
+import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import Ouroboros.Consensus.Storage.PerasCertDB.API
+  ( PerasCertTicketNo
+  , forgetBoostedBlockStatus
+  )
+import Ouroboros.Consensus.Storage.PerasVoteDB.API
+  ( PerasVoteTicketNo
+  )
+import qualified Ouroboros.Consensus.Storage.PerasVoteDB.API as PerasVoteDB
+import Ouroboros.Consensus.Storage.VolatileDB (VolatileDB)
+import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
+import Ouroboros.Consensus.Util (eitherToMaybe)
+import Ouroboros.Consensus.Util.EarlyExit
+import Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Consensus.Util.STM (WithFingerprint (..))
+import Ouroboros.Network.AnchoredFragment (AnchoredFragment)
+import qualified Ouroboros.Network.AnchoredFragment as AF
+import Ouroboros.Network.Block (MaxSlotNo, maxSlotNoFromWithOrigin)
+import Ouroboros.Network.BlockFetch.ConsensusInterface
+  ( ChainSelStarvation (..)
+  )
+import Ouroboros.Network.Protocol.LocalStateQuery.Type
+
+-- | Return the last @k@ headers.
+--
+-- While the in-memory fragment ('cdbChain') might temporarily have more weight
+-- than @k@ (until the background thread has copied those blocks to the
+-- ImmutableDB), this function will never return a fragment heavier than @k@.
+--
+-- The anchor point of the returned fragment will be the most recent
+-- \"immutable\" block, i.e. a block that cannot be rolled back. In
+-- ChainDB.md, we call this block @i@.
+--
+-- Note that the returned fragment may have weight less than @k@ in case the
+-- whole chain itself weights less than @k@, or in case the VolatileDB was
+-- corrupted. In the latter case, we don't take blocks already in the
+-- ImmutableDB into account, as we know they /must/ have been \"immutable\" at
+-- some point, and, therefore, /must/ still be \"immutable\".
+getCurrentChain ::
+  forall m blk.
+  ( IOLike m
+  , StandardHash blk
+  , HasHeader (Header blk)
+  , ConsensusProtocol (BlockProtocol blk)
+  ) =>
+  ChainDbEnv m blk ->
+  STM m (AnchoredFragment (Header blk))
+getCurrentChain cdb@CDB{..} =
+  getCurrentChainLike cdb $ icWithoutTime <$> readTVar cdbChain
+
+-- | Same as 'getCurrentChain', /mutatis mutandi/.
+getCurrentChainWithTime ::
+  forall m blk.
+  ( IOLike m
+  , StandardHash blk
+  , HasHeader (Header blk)
+  , ConsensusProtocol (BlockProtocol blk)
+  , Typeable blk
+  ) =>
+  ChainDbEnv m blk ->
+  STM m (AnchoredFragment (HeaderWithTime blk))
+getCurrentChainWithTime cdb@CDB{..} =
+  getCurrentChainLike cdb $ icWithTime <$> readTVar cdbChain
+
+-- | This function is the generalised helper for 'getCurrentChain' and
+-- 'getCurrentChainWithTime'. See 'getCurrentChain' for the explanation of it's
+-- behaviour.
+getCurrentChainLike ::
+  forall m blk h.
+  ( IOLike m
+  , StandardHash blk
+  , HasHeader h
+  , HeaderHash blk ~ HeaderHash h
+  , ConsensusProtocol (BlockProtocol blk)
+  ) =>
+  ChainDbEnv m blk ->
+  STM m (AnchoredFragment h) ->
+  STM m (AnchoredFragment h)
+getCurrentChainLike cdb@CDB{..} getCurChain = do
+  weights <- forgetFingerprint <$> getPerasWeightSnapshot cdb
+  takeVolatileSuffix weights k <$> getCurChain
+ where
+  k = configSecurityParam cdbTopLevelConfig
+
+-- | Get a 'HeaderStateHistory' populated with the 'HeaderState's of the
+-- last @k@ blocks of the current chain.
+getHeaderStateHistory :: ChainDbEnv m blk -> STM m (HeaderStateHistory blk)
+getHeaderStateHistory = LedgerDB.getHeaderStateHistory . cdbLedgerDB
+
+getTipBlock ::
+  forall m blk.
+  ( IOLike m
+  , HasHeader blk
+  , HasHeader (Header blk)
+  ) =>
+  ChainDbEnv m blk ->
+  m (Maybe blk)
+getTipBlock cdb@CDB{..} = do
+  tipPoint <- atomically $ getTipPoint cdb
+  case pointToWithOriginRealPoint tipPoint of
+    Origin -> return Nothing
+    NotOrigin p -> Just <$> getAnyKnownBlock cdbImmutableDB cdbVolatileDB p
+
+getTipHeader ::
+  forall m blk.
+  ( IOLike m
+  , HasHeader blk
+  , HasHeader (Header blk)
+  ) =>
+  ChainDbEnv m blk ->
+  m (Maybe (Header blk))
+getTipHeader CDB{..} = do
+  anchorOrHdr <- AF.head . icWithoutTime <$> atomically (readTVar cdbChain)
+  case anchorOrHdr of
+    Right hdr -> return $ Just hdr
+    Left anch ->
+      case pointToWithOriginRealPoint (castPoint (AF.anchorToPoint anch)) of
+        Origin -> return Nothing
+        NotOrigin p ->
+          -- In this case, the fragment is empty but the anchor point is not
+          -- genesis. It must be that the VolatileDB got emptied and that our
+          -- current tip is now the tip of the ImmutableDB.
+
+          -- Note that we can't use 'getBlockAtTip' because a block might have
+          -- been appended to the ImmutableDB since we obtained 'anchorOrHdr'.
+          Just <$> ImmutableDB.getKnownBlockComponent cdbImmutableDB GetHeader p
+
+getTipPoint ::
+  forall m blk.
+  (IOLike m, HasHeader (Header blk)) =>
+  ChainDbEnv m blk -> STM m (Point blk)
+getTipPoint CDB{..} =
+  (castPoint . AF.headPoint . icWithoutTime) <$> readTVar cdbChain
+
+getBlockComponent ::
+  forall m blk b.
+  IOLike m =>
+  ChainDbEnv m blk ->
+  BlockComponent blk b ->
+  RealPoint blk ->
+  m (Maybe b)
+getBlockComponent CDB{..} = getAnyBlockComponent cdbImmutableDB cdbVolatileDB
+
+getIsFetched ::
+  forall m blk.
+  (IOLike m, HasHeader blk) =>
+  ChainDbEnv m blk -> STM m (Point blk -> Bool)
+getIsFetched CDB{..} = do
+  checkQueue <- memberChainSelQueue cdbChainSelQueue
+  checkVolDb <- VolatileDB.getIsMember cdbVolatileDB
+  return $ \pt ->
+    case pointToWithOriginRealPoint pt of
+      Origin -> False
+      NotOrigin pt' -> checkQueue pt' || checkVolDb (realPointHash pt')
+
+getIsInvalidBlock ::
+  forall m blk.
+  (IOLike m, HasHeader blk) =>
+  ChainDbEnv m blk ->
+  STM m (WithFingerprint (HeaderHash blk -> Maybe (ExtValidationError blk)))
+getIsInvalidBlock CDB{..} =
+  fmap (fmap (fmap invalidBlockReason) . flip Map.lookup) <$> readTVar cdbInvalid
+
+getChainSelStarvation ::
+  forall m blk.
+  IOLike m =>
+  ChainDbEnv m blk ->
+  STM m ChainSelStarvation
+getChainSelStarvation CDB{..} = readTVar cdbChainSelStarvation
+
+getIsValid ::
+  forall m blk.
+  (IOLike m, HasHeader blk) =>
+  ChainDbEnv m blk ->
+  STM m (RealPoint blk -> Maybe Bool)
+getIsValid CDB{..} = do
+  prevApplied <- LedgerDB.getPrevApplied cdbLedgerDB
+  invalid <- forgetFingerprint <$> readTVar cdbInvalid
+  return $ \pt@(RealPoint _ hash) ->
+    -- A block can not both be in the set of invalid blocks and
+    -- previously-applied blocks, so the order in which we check them does not
+    -- matter.
+    if
+      | Map.member hash invalid -> Just False
+      | Set.member pt prevApplied -> Just True
+      | otherwise -> Nothing
+
+getMaxSlotNo ::
+  forall m blk.
+  (IOLike m, HasHeader (Header blk)) =>
+  ChainDbEnv m blk -> STM m MaxSlotNo
+getMaxSlotNo CDB{..} = do
+  -- Note that we need to look at both the current chain and the VolatileDB
+  -- in all cases (even when the VolatileDB is not empty), because the
+  -- VolatileDB might have been corrupted.
+  --
+  -- For example, imagine the VolatileDB has been corrupted so that it only
+  -- contains block 9'. The ImmutableDB contains blocks 1-10. The max slot
+  -- of the current chain will be 10 (being the anchor point of the empty
+  -- current chain), while the max slot of the VolatileDB will be 9.
+  --
+  -- Moreover, we have to look in 'ChainSelQueue' too.
+  curChainMaxSlotNo <-
+    maxSlotNoFromWithOrigin . AF.headSlot . icWithoutTime
+      <$> readTVar cdbChain
+  volatileDbMaxSlotNo <- VolatileDB.getMaxSlotNo cdbVolatileDB
+  queuedMaxSlotNo <- getMaxSlotNoChainSelQueue cdbChainSelQueue
+  return $ curChainMaxSlotNo `max` volatileDbMaxSlotNo `max` queuedMaxSlotNo
+
+-- | Get current ledger
+getCurrentLedger :: ChainDbEnv m blk -> STM m (ExtLedgerState blk EmptyMK)
+getCurrentLedger CDB{..} = LedgerDB.getVolatileTip cdbLedgerDB
+
+-- | Get the immutable ledger, i.e., typically @k@ blocks back.
+getImmutableLedger :: ChainDbEnv m blk -> STM m (ExtLedgerState blk EmptyMK)
+getImmutableLedger CDB{..} = LedgerDB.getImmutableTip cdbLedgerDB
+
+-- | Get the ledger for the given point.
+--
+-- When the given point is not among the last @k@ blocks of the current
+-- chain (i.e., older than @k@ or not on the current chain), 'Nothing' is
+-- returned.
+getPastLedger ::
+  ChainDbEnv m blk ->
+  Point blk ->
+  STM m (Maybe (ExtLedgerState blk EmptyMK))
+getPastLedger CDB{..} = LedgerDB.getPastLedgerState cdbLedgerDB
+
+allocInRegistryReadOnlyForkerAtPoint ::
+  IOLike m =>
+  ChainDbEnv m blk ->
+  Target (Point blk) ->
+  ResourceRegistry m ->
+  m (Either LedgerDB.GetForkerError (ResourceKey m, LedgerDB.ReadOnlyForker' m blk))
+allocInRegistryReadOnlyForkerAtPoint cdb tgt rr = do
+  (rk, forker) <-
+    allocate
+      rr
+      (\_ -> openReadOnlyForkerAtPoint cdb tgt)
+      (either (const $ pure ()) LedgerDB.roforkerClose)
+  case forker of
+    Left err -> void (release rk) >> pure (Left err)
+    Right v -> pure (Right (rk, v))
+
+openReadOnlyForkerAtPoint ::
+  IOLike m =>
+  ChainDbEnv m blk ->
+  Target (Point blk) ->
+  m (Either LedgerDB.GetForkerError (LedgerDB.ReadOnlyForker' m blk))
+openReadOnlyForkerAtPoint CDB{..} = LedgerDB.openReadOnlyForker cdbLedgerDB
+
+withReadOnlyForkerAtPoint ::
+  IOLike m =>
+  ChainDbEnv m blk ->
+  Target (Point blk) ->
+  ( Either LedgerDB.GetForkerError (LedgerDB.ReadOnlyForker' m blk) ->
+    WithEarlyExit m r
+  ) ->
+  WithEarlyExit m r
+withReadOnlyForkerAtPoint cdb tgt =
+  bracket
+    (lift $ openReadOnlyForkerAtPoint cdb tgt)
+    (either (const $ pure ()) (lift . LedgerDB.roforkerClose))
+
+getStatistics :: IOLike m => ChainDbEnv m blk -> m LedgerDB.Statistics
+getStatistics CDB{..} = LedgerDB.getTipStatistics cdbLedgerDB
+
+getPerasWeightSnapshot ::
+  ChainDbEnv m blk -> STM m (WithFingerprint (PerasWeightSnapshot blk))
+getPerasWeightSnapshot CDB{..} = PerasCertDB.getWeightSnapshot cdbPerasCertDB
+
+getLatestPerasCertSeen ::
+  ChainDbEnv m blk ->
+  STM m (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+getLatestPerasCertSeen CDB{..} = PerasCertDB.getLatestCertSeen cdbPerasCertDB
+
+getPerasCertsAfter ::
+  ChainDbEnv m blk ->
+  PerasCertTicketNo ->
+  STM m (Map PerasCertTicketNo (m (WithArrivalTime (ValidatedPerasCert blk))))
+getPerasCertsAfter CDB{..} = PerasCertDB.getCertsAfter cdbPerasCertDB
+
+getPerasCertIds ::
+  ChainDbEnv m blk -> STM m (Set PerasRoundNo)
+getPerasCertIds CDB{..} = PerasCertDB.getCertIds cdbPerasCertDB
+
+getPerasVotesAfter ::
+  ChainDbEnv m blk ->
+  PerasVoteTicketNo ->
+  STM m (Map PerasVoteTicketNo (WithArrivalTime (ValidatedPerasVote blk)))
+getPerasVotesAfter CDB{..} = PerasVoteDB.getVotesAfter cdbPerasVoteDB
+
+getPerasVoteIds ::
+  ChainDbEnv m blk -> STM m (Set PerasVoteId)
+getPerasVoteIds CDB{..} = PerasVoteDB.getVoteIds cdbPerasVoteDB
+
+getLatestPerasCertOnChainRound ::
+  IOLike m =>
+  ChainDbEnv m blk ->
+  STM m (Maybe PerasRoundNo)
+getLatestPerasCertOnChainRound CDB{..} = do
+  strictMaybeToMaybe
+    . latestPerasCertOnChainRound
+    . perasState
+    <$> LedgerDB.getVolatileTip cdbLedgerDB
+
+getPerasEpochContextResolver ::
+  MonadSTM m =>
+  ChainDbEnv m blk ->
+  STM m (PerasEpochContextResolver blk)
+getPerasEpochContextResolver =
+  fmap (perasEpochContextResolver . perasState) . getCurrentLedger
+
+getPerasVotingView ::
+  ( StateSupportsPerasEpochContext blk
+  , IOLike m
+  , ConsensusProtocol (BlockProtocol blk)
+  , GetHeader blk
+  , BlockSupportsPeras blk
+  ) =>
+  LedgerConfig blk ->
+  PerasRoundNo ->
+  ChainDbEnv m blk ->
+  STM
+    m
+    ( Either
+        PerasVotingViewError
+        (PerasVotingView (WithArrivalTime (ValidatedPerasCert blk)) blk)
+    )
+getPerasVotingView ledgerConfig roundNo env = do
+  resolver <-
+    getPerasEpochContextResolver env
+  case resolveRoundNo resolver roundNo of
+    Left err ->
+      pure $ Left $ PerasVotingViewEpochContextNotFoundForRound err
+    Right epochContext -> do
+      latestCertSeen <-
+        withOriginFromMaybe <$> getLatestPerasCertSeen env
+      latestCertOnChainRoundNo <-
+        withOriginFromMaybe <$> getLatestPerasCertOnChainRound env
+      currentChain <-
+        getCurrentChain env
+      summary <-
+        hardForkSummary ledgerConfig . ledgerState <$> getCurrentLedger env
+      let params = pecParams epochContext
+      let blockMinSlots = perasBlockMinSlots params
+      case ( runPerasQry summary $
+               mkPerasVotingView params roundNo latestCertSeen latestCertOnChainRoundNo
+                 =<< perasChainAtCandidateBlock blockMinSlots roundNo currentChain
+           ) of
+        Left err ->
+          pure $ Left $ PerasVotingViewQryException err
+        Right view ->
+          pure $ Right view
+
+getPerasCertInclusionView ::
+  ( IOLike m
+  , BlockSupportsPeras blk
+  ) =>
+  PerasRoundNo ->
+  ChainDbEnv m blk ->
+  STM
+    m
+    ( Either
+        PerasCertInclusionViewError
+        (Maybe (PerasCertInclusionView (WithArrivalTime (ValidatedPerasCert blk)) blk))
+    )
+getPerasCertInclusionView roundNo env =
+  getLatestPerasCertSeen env >>= \case
+    Nothing ->
+      pure $ Right Nothing
+    Just latestCertSeen -> do
+      resolver <-
+        getPerasEpochContextResolver env
+      case resolveRoundNo resolver roundNo of
+        Left err ->
+          pure $ Left (PerasCertInclusionEpochContextNotFoundForRound err)
+        Right epochContext -> do
+          latestCertOnChainRoundNo <-
+            withOriginFromMaybe <$> getLatestPerasCertOnChainRound env
+          certsInChainDB <-
+            getPerasCertIds env
+          pure $
+            Right $
+              Just $
+                mkPerasCertInclusionView
+                  (pecParams epochContext)
+                  roundNo
+                  (forgetBoostedBlockStatus latestCertSeen)
+                  latestCertOnChainRoundNo
+                  certsInChainDB
+
+getTimeResolutionContext ::
+  MonadSTM m =>
+  LedgerConfig blk ->
+  ChainDbEnv m blk ->
+  STM m (TimeResolutionContext blk)
+getTimeResolutionContext ledgerConfig =
+  fmap (TimeResolutionContext ledgerConfig . ledgerState) . getCurrentLedger
+
+-- | Wait until the slot of the given point is smaller or equal than the immutable tip slot,
+--   and then return:
+--   - the block at the target slot if there is a block in the immutable DB at that slot;
+--   - the block from the next occupied slot.
+--
+-- This function will never return 'Left' as it will block until it could
+-- return a 'Right'. However, the type has to be an 'Either' to avoid a call
+-- to 'error'.
+waitForImmutableBlock ::
+  forall blk m.
+  StandardHash blk =>
+  IOLike m =>
+  ChainDbEnv m blk ->
+  RealPoint blk ->
+  m (Either ImmutableDB.SeekBlockError (RealPoint blk))
+waitForImmutableBlock CDB{cdbImmutableDB} targetRealPoint = do
+  -- first, wait until the target slot is older than the immutable tip
+  _ <-
+    atomically $
+      ImmutableDB.getTip cdbImmutableDB >>= \case
+        Origin -> retry
+        At tip ->
+          check (ImmutableDB.tipSlotNo tip >= realPointSlot targetRealPoint)
+  -- then, query the DB for a point at or directly following the target slot
+  ImmutableDB.getBlockAtOrAfterPoint cdbImmutableDB targetRealPoint >>= \case
+    Left e ->
+      error $
+        "Impossible: waitForImmutableBlock called on "
+          <> show targetRealPoint
+          <> " returned "
+          <> show e
+          <> ". The ImmutableDB could have been concurrently truncated."
+    result@Right{} -> pure result
+
+{-------------------------------------------------------------------------------
+  Unifying interface over the immutable DB and volatile DB, but independent
+  of the ledger DB. These functions therefore do not require the entire
+  Chain DB to have been initialized.
+-------------------------------------------------------------------------------}
+
+-- | Variant of 'getAnyBlockComponent' instantiated with 'GetBlock'.
+getAnyKnownBlock ::
+  forall m blk.
+  ( IOLike m
+  , HasHeader blk
+  ) =>
+  ImmutableDB m blk ->
+  VolatileDB m blk ->
+  RealPoint blk ->
+  m blk
+getAnyKnownBlock immutableDB volatileDB =
+  getAnyKnownBlockComponent immutableDB volatileDB GetBlock
+
+-- | Wrapper around 'getAnyBlockComponent' for blocks we know should exist.
+--
+-- If the block does not exist, this indicates disk failure.
+getAnyKnownBlockComponent ::
+  forall m blk b.
+  ( IOLike m
+  , HasHeader blk
+  ) =>
+  ImmutableDB m blk ->
+  VolatileDB m blk ->
+  BlockComponent blk b ->
+  RealPoint blk ->
+  m b
+getAnyKnownBlockComponent immutableDB volatileDB blockComponent p = do
+  mBlock <-
+    mustExist p
+      <$> getAnyBlockComponent immutableDB volatileDB blockComponent p
+  case mBlock of
+    Right b -> return b
+    Left err -> throwIO err
+
+-- | Get a block component from either the immutable DB or volatile DB.
+--
+-- Returns 'Nothing' if the 'Point' is unknown.
+-- Throws 'NoGenesisBlockException' if the 'Point' refers to the genesis block.
+getAnyBlockComponent ::
+  forall m blk b.
+  IOLike m =>
+  ImmutableDB m blk ->
+  VolatileDB m blk ->
+  BlockComponent blk b ->
+  RealPoint blk ->
+  m (Maybe b)
+getAnyBlockComponent immutableDB volatileDB blockComponent p = do
+  -- Note: to determine whether a block is in the ImmutableDB, we can
+  -- look at the slot of its tip, which we'll call @immTipSlot@. If the
+  -- slot of the requested point > @immTipSlot@, then the block will not
+  -- be in the ImmutableDB but in the VolatileDB. However, there is a
+  -- race condition here: if between the time we got @immTipSlot@ and
+  -- the time we look up the block in the VolatileDB the block was moved
+  -- from the VolatileDB to the ImmutableDB, and it was deleted from the
+  -- VolatileDB, we won't find the block, even though it is in the
+  -- ChainDB.
+  --
+  -- Therefore, we first query the VolatileDB and if the block is not in
+  -- it, then we can get @immTipSlot@ and compare it to the slot of the
+  -- requested point. If the slot <= @immTipSlot@ it /must/ be in the
+  -- ImmutableDB (no race condition here).
+  mbVolatileB <-
+    VolatileDB.getBlockComponent
+      volatileDB
+      blockComponent
+      hash
+  case mbVolatileB of
+    Just b -> return $ Just b
+    Nothing -> do
+      -- ImmutableDB will throw an exception if we ask for a block past the tip
+      immTipSlot <- atomically $ ImmutableDB.getTipSlot immutableDB
+      if NotOrigin (realPointSlot p) > immTipSlot
+        then
+          -- It's not supposed to be in the ImmutableDB and the VolatileDB
+          -- didn't contain it, so return 'Nothing'.
+          return Nothing
+        else
+          eitherToMaybe
+            <$> ImmutableDB.getBlockComponent immutableDB blockComponent p
+ where
+  hash = realPointHash p
+
+mustExist :: RealPoint blk -> Maybe b -> Either (ChainDbFailure blk) b
+mustExist p Nothing = Left $ ChainDbMissingBlock p
+mustExist _ (Just b) = Right b

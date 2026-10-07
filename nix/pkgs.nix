@@ -1,0 +1,250 @@
+# Our packages overlay
+final: prev:
+
+let
+  inherit (builtins) foldl' fromJSON listToAttrs map readFile;
+  inherit (final) pkgs;
+  inherit (prev) lib;
+  inherit (prev) customConfig;
+  # Parametrized helper entrypoint for the workbench development environment.
+  workbench = import ./workbench
+    { inherit pkgs;
+      haskellProject = final.cardanoNodeProject;
+    }
+  ;
+
+in with final;
+{
+  inherit (cardanoNodeProject.args) compiler-nix-name;
+
+  # To make it a flake output so it's available as input to external flakes.
+  inherit workbench;
+
+  # A workbench runner with default parameters from customConfig.
+  # Used in flake.nix for "workbench-ci-test" flake output package for CI.
+  workbench-runner =
+    { profiling          ? {}
+    , profileName        ? customConfig.localCluster.profileName
+    , eraName            ? customConfig.localCluster.eraName
+    , backendName        ? customConfig.localCluster.backendName
+    , stateDir           ? customConfig.localCluster.stateDir
+    , basePort           ? customConfig.localCluster.basePort
+    , useCabalRun        ? customConfig.localCluster.useCabalRun
+    , batchName          ? customConfig.localCluster.batchName
+    , workbenchStartArgs ? customConfig.localCluster.workbenchStartArgs
+    , cardano-node-rev   ? null
+    }:
+    workbench.runner
+      { # To construct the profile attrset with its `materialise-profile` function.
+        inherit profileName;
+        # Era used at runner level (tag name, hardfork params, not in profile).
+        inherit eraName;
+        # To construct backend attrset with its `materialise-profile` function.
+        inherit backendName stateDir basePort useCabalRun profiling;
+        # Parameters for the workbench shell `start-cluster` command.
+        inherit batchName workbenchStartArgs cardano-node-rev;
+      }
+  ;
+
+  cabal = haskell-nix.cabal-install.${compiler-nix-name};
+
+  hlint = haskell-nix.tool "ghc96" "hlint" {
+    version = "3.8";
+    index-state = "2025-04-22T00:00:00Z";
+  };
+
+  ghcid = haskell-nix.tool compiler-nix-name "ghcid" {
+    version = "0.8.7";
+    index-state = "2024-12-24T12:56:48Z";
+  };
+
+  # The ghc-hls point release compatibility table is documented at:
+  # https://haskell-language-server.readthedocs.io/en/latest/support/ghc-version-support.html
+  haskell-language-server = haskell-nix.tool compiler-nix-name "haskell-language-server" rec {
+    src = {
+      ghc8107 = haskell-nix.sources."hls-2.2";
+      ghc927 = haskell-nix.sources."hls-2.0";
+      ghc945 = haskell-nix.sources."hls-2.2";
+      ghc946 = haskell-nix.sources."hls-2.2";
+      ghc947 = haskell-nix.sources."hls-2.5";
+      ghc963 = haskell-nix.sources."hls-2.5";
+      ghc964 = haskell-nix.sources."hls-2.6";
+      ghc981 = haskell-nix.sources."hls-2.6";
+    }.${compiler-nix-name} or haskell-nix.sources."hls-2.10";
+    cabalProject = readFile (src + "/cabal.project");
+    sha256map."https://github.com/pepeiborra/ekg-json"."7a0af7a8fd38045fd15fb13445bdcc7085325460" = "sha256-fVwKxGgM0S4Kv/4egVAAiAjV7QB5PBqMVMCfsv7otIQ=";
+  };
+
+  haskellBuildUtils = prev.haskellBuildUtils.override {
+    inherit compiler-nix-name;
+    index-state = "2024-12-24T12:56:48Z";
+  };
+
+  profiteur = haskell-nix.tool compiler-nix-name "profiteur" {
+    cabalProjectLocal = ''
+      allow-newer: profiteur:base, ghc-prof:base
+    '';
+  };
+
+  cabal-plan = haskell-nix.tool compiler-nix-name "cabal-plan" {
+    cabalProjectLocal = ''
+      flags: +exe
+    '';
+  };
+
+  cardanolib-py = callPackage ./cardanolib-py { };
+
+  scripts = foldl' lib.recursiveUpdate {} [
+    (import ./scripts.nix { inherit pkgs; })
+    (import ./scripts-submit-api.nix { inherit pkgs; })
+    (import ./scripts-tracer.nix { inherit pkgs; })
+  ];
+
+  clusterTests = import ./workbench/tests { inherit pkgs; };
+
+  dockerImage =
+    let
+      defaultConfig = {
+        stateDir = "/data";
+        dbPrefix = "db";
+        socketPath = "/ipc/node.socket";
+        # Direct GHC RTS output to /logs (a writable mount) so it stays off
+        # the container's read-only root. This matters even with
+        # profiling = "none": the lightweight `-t...cardano-node.stats`
+        # summary is emitted on every run, and without a prefix it would be
+        # written to the container's cwd (/), which fails under --read-only.
+        # Profiling/heap/eventlog output (when enabled) lands here too.
+        # Scoped to the image here rather than scripts.nix so bare
+        # `nix run .#<env>/node` is unaffected.
+        profilingOutputDir = "/logs";
+      };
+    in
+    callPackage ./docker {
+      exe = "cardano-node";
+      scripts = import ./scripts.nix {
+        inherit pkgs;
+        customConfigs = [ defaultConfig customConfig ];
+      };
+      script = "node";
+    };
+
+  submitApiDockerImage =
+    let
+      defaultConfig = {
+        socketPath = "/ipc/node.socket";
+        listenAddress = "0.0.0.0";
+      };
+    in
+    callPackage ./docker/submit-api.nix {
+      exe = "cardano-submit-api";
+      scripts = import ./scripts-submit-api.nix {
+        inherit pkgs;
+        customConfigs = [ defaultConfig customConfig ];
+      };
+      script = "submit-api";
+    };
+
+  tracerDockerImage =
+    let
+      defaultConfig = rec {
+        acceptAt = "/ipc/tracer.socket";
+        stateDir = "/logs";
+        logging = [
+          {
+            logRoot = stateDir;
+            logMode = "FileMode";
+            logFormat = "ForHuman";
+          }
+        ];
+        # As with the node image: direct GHC RTS output to /logs (a writable
+        # mount) so it stays off the read-only root. This matters even with
+        # profiling = "none" -- the always-on `-t...cardano-tracer.stats`
+        # summary would otherwise be written to the container cwd (/) and
+        # fail under --read-only. Profiling/heap/eventlog output lands here
+        # too when enabled.
+        profilingOutputDir = "/logs";
+      };
+    in
+    callPackage ./docker/tracer.nix {
+      exe = "cardano-tracer";
+      scripts = import ./scripts-tracer.nix {
+        inherit pkgs;
+        customConfigs = [ defaultConfig customConfig ];
+      };
+      script = "tracer";
+    };
+
+  all-profiles-json = workbench.profile-names-json;
+
+  # The profile data and backend data of the cloud / "*-nomadperf" profiles.
+  # Useful to mix workbench and cardano-node commits, mostly because of scripts.
+  profile-data-nomadperf = listToAttrs (
+    map
+    (profileName:
+      # Era is a workbench-level parameter (not anymore part of profile name).
+      # These flake outputs pin Conway as the era so consumers can refer to
+      # `profile-data-nomadperf.<profile>-coay`. `eraName` is the full ledger
+      # era name used internally; `eraShort` is the 4-letter code embedded in
+      # the public attribute name (matches the run tag).
+      let eraName  = "conway";
+          eraShort = "coay";
+      in {
+        name = "${profileName}-${eraShort}";
+        value =
+          let
+              # Default values only ("run/current", 30000, profiling "none").
+              profile = workbench.profile profileName;
+              backend = workbench.backend
+                { backendName = "nomadcloud";
+                  stateDir    = customConfig.localCluster.stateDir;
+                  basePort    = customConfig.localCluster.basePort;
+                  useCabalRun = customConfig.localCluster.useCabalRun;
+                  profiling = {};
+                }
+              ;
+              profileBundle = profile.profileBundle
+                { inherit backend eraName; }
+              ;
+              materialisedProfile = profile.materialise-profile
+                { inherit profileBundle; }
+              ;
+              backendDataDir = backend.materialise-profile
+                {inherit profileBundle;}
+              ;
+          in pkgs.runCommand "workbench-data-${profileName}-${eraName}" {}
+            ''
+            mkdir "$out"
+            ln -s "${materialisedProfile}" "$out"/profileData
+            ln -s "${backendDataDir}"      "$out"/backendData
+            ''
+        ;
+        }
+    )
+    # Fetch all "*-nomadperf" profiles.
+    (fromJSON (readFile
+      (pkgs.runCommand "cardano-profile-names-cloud" {} ''
+        ${cardanoNodePackages.cardano-profile}/bin/cardano-profile names-cloud > $out
+      ''
+      )
+    ))
+  );
+
+  # Disable failing python uvloop tests
+  python311 = prev.python311.override {
+    packageOverrides = pythonFinal: pythonPrev: {
+      uvloop = pythonPrev.uvloop.overrideAttrs (attrs: {
+        disabledTestPaths = [ "tests/test_tcp.py" "tests/test_sourcecode.py" "tests/test_dns.py" ];
+      });
+    };
+  };
+}
+// lib.optionalAttrs prev.stdenv.hostPlatform.isWindows {
+  abseil-cpp = prev.abseil-cpp.overrideAttrs (finalAttrs: previousAttrs: {
+    buildInputs = previousAttrs.buildInputs ++ [prev.windows.pthreads];
+  });
+}
+// lib.optionalAttrs prev.stdenv.hostPlatform.isMusl {
+  snappy = prev.snappy.overrideAttrs (old: {
+    cmakeFlags = map (f: if f == "-DBUILD_SHARED_LIBS=ON" then "-DBUILD_SHARED_LIBS=OFF" else f) (old.cmakeFlags or []);
+  });
+}

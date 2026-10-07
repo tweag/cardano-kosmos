@@ -1,0 +1,5 @@
+{
+    "type": "Certificate",
+    "description": "Stake Address Deregistration Certificate",
+    "cborHex": "83088201581c919d4c2c9455016289341b1a14dedf697687af31751170d56a31466e1a00061a80"
+}

@@ -36,6 +36,10 @@ package cardano-api
   ghc-options: -XUndecidableSuperClasses
 
 packages:
+  -- tweag
+  packages/peras-testnet
+
+  -- intersectmbo
   packages/cardano-node/cardano-node
   packages/cardano-node/cardano-node-capi
   packages/cardano-node/cardano-node-chairman
@@ -57,6 +61,7 @@ packages:
   packages/cardano-api/cardano-rpc
 
   packages/ouroboros-consensus
+
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node

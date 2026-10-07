@@ -1,0 +1,3 @@
+CardanoProtocolInstantiationError (CardanoProtocolInstantiationDijkstraGenesisReadError (GenesisDecodeError "/home/evgenii/Code/tweag/cardano-peras/testnet/devnet-env/dijkstra-genesis.json" "Error in $: Number of parameters supplied 355 does not match the expected number of 251"))
+
+cardano-node: Dijkstra related : There was an error parsing the genesis file: "/home/evgenii/Code/tweag/cardano-peras/testnet/devnet-env/dijkstra-genesis.json" Error: "Error in $: Number of parameters supplied 355 does not match the expected number of 251"

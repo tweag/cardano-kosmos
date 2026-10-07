@@ -1,0 +1,64 @@
+[90m26-10-07 14:34:29.461[0m [32mINF[0m [1mProcess Compose v1.120.0[0m
+[90m26-10-07 14:34:29.461[0m [32mINF[0m [1mLoaded project from /dev/fd/63[0m
+[90m26-10-07 14:34:29.461[0m [32mINF[0m [1mGlobal shell command: bash -c[0m
+[90m26-10-07 14:34:29.461[0m [32mINF[0m [1mstart http server listening localhost:3030[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mScheduler started[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-5 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mcardano-tracer-stdout is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-1 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-2 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mchairman is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-6 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-7 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mtoxiproxy-server is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mcardano-testnet is waiting for setup to complete successfully[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-3 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mapply-faults is waiting for sync-nodes to complete successfully[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1msync-nodes is waiting for toxiproxy-server to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-4 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.463[0m [32mINF[0m [1mnode-stdout-8 is waiting for cardano-testnet to be healthy[0m
+[90m26-10-07 14:34:29.464[0m [32mINF[0m [1mStarted[0m [36mcommand=[0m["bash","-c","/nix/store/6zpkdjw5jmsmrmwmwqsgnj9f1az713b3-testnet-exe-testnet-0.1.0.0/bin/testnet setup"] [36mprocess=[0msetup
+[90m26-10-07 14:34:30.648[0m [32mINF[0m [1mExited[0m [36mexit_code=[0m0 [36mprocess=[0msetup
+[90m26-10-07 14:34:30.649[0m [32mINF[0m [1mStarted[0m [36mcommand=[0m["bash","-c","/nix/store/6zpkdjw5jmsmrmwmwqsgnj9f1az713b3-testnet-exe-testnet-0.1.0.0/bin/testnet start-local-testnet"] [36mprocess=[0mcardano-testnet
+[90m26-10-07 14:34:31.432[0m [32mINF[0m [1mExited[0m [36mexit_code=[0m1 [36mprocess=[0mcardano-testnet
+[90m26-10-07 14:34:31.432[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.432[0m [31mERR[0m [1mError: process node-stdout-8 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.432[0m [31mERR[0m [1mError: process node-stdout-8 won't run[0m
+[90m26-10-07 14:34:31.432[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-4 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-4 won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process chairman depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process chairman won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-2 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-1 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-1 won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-5 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-5 won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process toxiproxy-server depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process toxiproxy-server won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process cardano-tracer-stdout depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process cardano-tracer-stdout won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-7 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-7 won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mError: process node-stdout-2 won't run[0m
+[90m26-10-07 14:34:31.433[0m [31mERR[0m [1mProcess cardano-testnet was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-6 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-6 won't run[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mProcess toxiproxy-server was aborted and won't become ready[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process sync-nodes depended on toxiproxy-server to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process sync-nodes won't run[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process apply-faults depended on sync-nodes to complete successfully, but it exited with status 1[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process apply-faults won't run[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-3 depended on cardano-testnet to become ready, but it was terminated[0m
+[90m26-10-07 14:34:31.434[0m [31mERR[0m [1mError: process node-stdout-3 won't run[0m
+[90m26-10-07 14:34:31.434[0m [32mINF[0m [1mProject completed[0m
+[90m26-10-07 14:34:31.437[0m [32mINF[0m [1mScheduler stopped[0m
+[90m26-10-07 14:34:31.439[0m [32mINF[0m [1mThank you for using process-compose[0m

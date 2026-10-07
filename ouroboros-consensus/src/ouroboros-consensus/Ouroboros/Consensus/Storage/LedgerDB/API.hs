@@ -1,0 +1,824 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE StandaloneKindSignatures #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+-- | The Ledger DB is responsible for the following tasks:
+--
+-- - __Maintaining the in-memory ledger state at the tip__: When we try to
+--     extend our chain with a new block fitting onto our tip, the block must
+--     first be validated using the right ledger state, i.e., the ledger state
+--     corresponding to the tip.
+--
+-- - __Maintaining the past \(k\) in-memory ledger states__: we might roll back
+--     up to \(k\) blocks when switching to a more preferable fork. Consider the
+--     example below:
+--
+--     <<docs/haddocks/ledgerdb-switch.svg>>
+--
+--     Our current chain's tip is \(C_2\), but the fork containing blocks
+--      \(F_1\), \(F_2\), and \(F_3\) is more preferable. We roll back our chain
+--     to the intersection point of the two chains, \(I\), which must be not
+--     more than \(k\) blocks back from our current tip. Next, we must validate
+--     block \(F_1\) using the ledger state at block \(I\), after which we can
+--     validate \(F_2\) using the resulting ledger state, and so on.
+--
+--     This means that we need access to all ledger states of the past \(k\)
+--     blocks, i.e., the ledger states corresponding to the volatile part of the
+--     current chain. Note that applying a block to a ledger state is not an
+--     invertible operation, so it is not possible to simply /unapply/ \(C_1\)
+--     and \(C_2\) to obtain \(I\).
+--
+--     Access to the last \(k\) ledger states is not only needed for validating
+--     candidate chains, but also by the:
+--
+--     - __Local state query server__: To query any of the past \(k\) ledger
+--       states.
+--
+--     - __Chain sync client__: To validate headers of a chain that intersects
+--        with any of the past \(k\) blocks.
+--
+-- - __Providing 'Ouroboros.Consensus.Ledger.Tables.Basics.LedgerTable's at any of the last \(k\) ledger states__: To apply blocks or transactions on top
+--     of ledger states, the LedgerDB must be able to provide the appropriate
+--     ledger tables at any of those ledger states.
+--
+-- - __Storing snapshots on disk__: To obtain a ledger state for the current tip
+--     of the chain, one has to apply /all blocks in the chain/ one-by-one to
+--     the initial ledger state. When starting up the system with an on-disk
+--     chain containing millions of blocks, all of them would have to be read
+--     from disk and applied. This process can take hours, depending on the
+--     storage and CPU speed, and is thus too costly to perform on each startup.
+--
+--     For this reason, a recent snapshot of the ledger state should be
+--     periodically written to disk. Upon the next startup, that snapshot can be
+--     read and used to restore the current ledger state, as well as the past
+--      \(k\) ledger states.
+--
+-- Note that whenever we say /ledger state/ we mean the @'ExtLedgerState' blk
+-- mk@ type described in "Ouroboros.Consensus.Ledger.Basics".
+--
+-- = Resource management in the LedgerDB
+--
+-- The LedgerDB has currently 3 backends it can use:
+--
+-- - InMemory: This backend is pure except for tracing. No resources are allocated.
+--
+-- - LSM: This backend allocates a 'BlockIOFS' and a 'Session'. Using the
+--   session, new 'Tables' are allocated, but closing the session closes any
+--   existing 'Tables' handles.
+--
+--   Both the 'BlockIOFS' and the 'Session' are stored in the 'ldbResources' of
+--   the LedgerDB, and closing the LedgerDB will release them. The LedgerDB will
+--   be closed by closing the ChainDB which is tracked in the top-level
+--   registry. Therefore we don't need to keep track of the 'Table' handles nor
+--   we need to further keep track of the 'BlockIOFS' and the 'Session'.
+--
+-- = 'Forker' management in the running node
+--
+-- The 'openForkerAtTarget' method of the 'LedgerDB' type is the
+-- lowest-level method for opening a Forker. This comment describes
+-- the tree formed by definition-and-use edges rooted at
+-- 'openForkerAtTarget'. It doesn't describe the entire tree, but
+-- rather just enough to confirm that 'Forker's will not be leaked
+-- /during the extended execution of the running node/. There are a
+-- few helpful clarifications to make before elaborating that tree.
+--
+-- - This comment is only concerned with the running node. In
+--   contrast, the shutting down node is addressed by the "Resource
+--   management in the LedgerDB" section above. There are two key
+--   ideas. First, the shut down routines don't open additional
+--   Forkers. Second, it's OK for the shut down routines to not
+--   necessarily close their local/owned Forkers, since the Forker
+--   backends either don't require that or already take care of open
+--   handles when their top-level "close" method is called.
+--
+-- - Some subtrees, like the 'withTipForker' subtree, are irrelevant
+--   to this comment, because they explicitly use 'bracket' or a
+--   short-lived 'ResourceRegstiry' and so can't contribute to any
+--   leaks. To clarify: there would be leaks if those brackets were
+--   indefinitely nested or if the registry outlived multiple
+--   iterations, etc. But that itself would be an unacceptable stack
+--   leak, for example. Such unbounded nesting/registries are
+--   therefore beyond the scope of this comment.
+--
+-- - Tools (like @db-analyser@) and tests are also beyond the scope of
+--   this comment, so those subtrees are mentioned but not elaborated.
+--
+-- - It turns out that the resulting tree is currently merely a list
+--   of such uninteresting subtrees, so the nub of this comment can be
+--   linear despite describing a tree.
+--
+-- At the time of writing, the (linear spine of the) def-use tree is
+-- as follows.
+--
+-- - 'openForkerAtTarget' is used directly only to define
+--   'withTipForker' (bracketed) and 'openReadOnlyForker'.
+--
+-- - 'openReadOnlyForker' is used directly only in @db-analyser@
+--   (tool), in tests, and to define 'openReadOnlyForkerAtPoint'.
+--
+-- - 'openReadOnlyForkerAtPoint' is used directly only to define
+--   'allocInRegistryReadOnlyForkerAtPoint' (registered), to define
+--   'withReadOnlyForkerAtPoint' (bracketed), and to construct a
+--   'MempoolLedgerDBView'.
+--
+--  - The Forker part of 'MempoolLedgerDBView' is used directly only
+--    in 'initMempoolEnv' (called by 'openMempool') and in
+--    'implSyncWithLedger. If an exception arrives during
+--    'openMempool', then node will shutdown, so leaks are not a
+--    concern here. The syncing-with-ledger use is bracketed via
+--    'modifyMVar_' to close the old forker just before replacing it
+--    with the new one.
+--
+-- === __(image code)__
+-- >>> import Image.LaTeX.Render
+-- >>> import Control.Monad
+-- >>> import System.Directory
+-- >>>
+-- >>> createDirectoryIfMissing True "docs/haddocks/"
+-- >>> :{
+-- >>> either (error . show) pure =<<
+-- >>>  renderToFile "docs/haddocks/ledgerdb-switch.svg" defaultEnv (tikz ["positioning", "arrows"]) "\
+-- >>> \ \\draw (0, 0) -- (50pt, 0) coordinate (I);\
+-- >>> \  \\draw (I) -- ++(20pt,  20pt) coordinate (C1) -- ++(20pt, 0) coordinate (C2);\
+-- >>> \  \\draw (I) -- ++(20pt, -20pt) coordinate (F1) -- ++(20pt, 0) coordinate (F2) -- ++(20pt, 0) coordinate (F3);\
+-- >>> \  \\node at (I)  {$\\bullet$};\
+-- >>> \  \\node at (C1) {$\\bullet$};\
+-- >>> \  \\node at (C2) {$\\bullet$};\
+-- >>> \  \\node at (F1) {$\\bullet$};\
+-- >>> \  \\node at (F2) {$\\bullet$};\
+-- >>> \  \\node at (F3) {$\\bullet$};\
+-- >>> \  \\node at (I) [above left] {$I$};\
+-- >>> \  \\node at (C1) [above] {$C_1$};\
+-- >>> \  \\node at (C2) [above] {$C_2$};\
+-- >>> \  \\node at (F1) [below] {$F_1$};\
+-- >>> \  \\node at (F2) [below] {$F_2$};\
+-- >>> \  \\node at (F3) [below] {$F_3$};\
+-- >>> \  \\draw (60pt, 50pt) node {$\\overbrace{\\hspace{60pt}}$};\
+-- >>> \  \\draw (60pt, 60pt) node[fill=white] {$k$};\
+-- >>> \  \\draw [dashed] (30pt, -40pt) -- (30pt, 45pt);"
+-- >>> :}
+module Ouroboros.Consensus.Storage.LedgerDB.API
+  ( -- * Main API
+    CanUpgradeLedgerTables (..)
+  , LedgerDB (..)
+  , LedgerDB'
+  , LedgerDbPrune (..)
+  , LedgerDbSerialiseConstraints
+  , ResolveBlock
+  , currentPoint
+
+    -- * Initialization
+  , InitDB (..)
+  , InitLog (..)
+  , initialize
+
+    -- ** Tracing
+  , ReplayGoal (..)
+  , ReplayStart (..)
+  , TraceReplayEvent (..)
+  , TraceReplayProgressEvent (..)
+  , TraceReplayStartEvent (..)
+  , decorateReplayTracerWithGoal
+  , decorateReplayTracerWithStart
+
+    -- * Configuration
+  , LedgerDbCfg
+  , LedgerDbCfgF (..)
+  , configLedgerDb
+
+    -- * Exceptions
+  , LedgerDbError (..)
+
+    -- * Forker
+  , openReadOnlyForker
+  , getTipStatistics
+  , withTipForker
+
+    -- * Streaming
+  , StreamingBackend (..)
+  , Yield
+  , Sink
+  , Decoders (..)
+
+    -- * Testing
+  , TestInternals (..)
+  , TestInternals'
+  , WhereToTakeSnapshot (..)
+  ) where
+
+import Cardano.Binary (FromCBOR, ToCBOR)
+import Codec.CBOR.Decoding
+import Codec.CBOR.Read
+import Codec.Serialise
+import Control.Monad.Except
+import Control.Tracer
+import Data.ByteString (ByteString)
+import Data.Kind
+import Data.List.NonEmpty (NonEmpty)
+import Data.MemPack
+import Data.Proxy
+import Data.Set (Set)
+import Data.Typeable (Typeable)
+import Data.Word
+import GHC.Generics (Generic)
+import NoThunks.Class
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.Config
+import Ouroboros.Consensus.HeaderStateHistory
+import Ouroboros.Consensus.HeaderValidation
+import Ouroboros.Consensus.Ledger.Abstract
+import Ouroboros.Consensus.Ledger.Extended
+import Ouroboros.Consensus.Ledger.Inspect
+import Ouroboros.Consensus.Ledger.SupportsProtocol
+import Ouroboros.Consensus.Protocol.Abstract
+import Ouroboros.Consensus.Storage.ChainDB.Impl.BlockCache
+import Ouroboros.Consensus.Storage.ImmutableDB.Stream
+import Ouroboros.Consensus.Storage.LedgerDB.Forker
+import Ouroboros.Consensus.Storage.LedgerDB.Snapshots
+import Ouroboros.Consensus.Storage.Serialisation
+import Ouroboros.Consensus.Util.Args
+import Ouroboros.Consensus.Util.CallStack
+import Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Consensus.Util.IndexedMemPack
+import Ouroboros.Network.Block
+import Ouroboros.Network.Point
+import Ouroboros.Network.Protocol.LocalStateQuery.Type
+import Streaming
+import System.FS.CRC
+
+{-------------------------------------------------------------------------------
+  Main API
+-------------------------------------------------------------------------------}
+
+-- | Serialization constraints required by the 'LedgerDB' to be properly
+-- instantiated with a @blk@.
+type LedgerDbSerialiseConstraints blk =
+  ( Serialise (HeaderHash blk)
+  , EncodeDisk blk (LedgerState blk EmptyMK)
+  , DecodeDisk blk (LedgerState blk EmptyMK)
+  , EncodeDisk blk (AnnTip blk)
+  , DecodeDisk blk (AnnTip blk)
+  , EncodeDisk blk (ChainDepState (BlockProtocol blk))
+  , DecodeDisk blk (ChainDepState (BlockProtocol blk))
+  , IndexedMemPack LedgerState blk (TxOut blk)
+  , MemPack (TxIn blk)
+  , SerializeTablesWithHint LedgerState blk
+  , -- Needed for Peras
+    Typeable blk
+  , Typeable (PerasCrypto blk)
+  , Typeable (PerasVotingCommitteeScheme blk)
+  , FromCBOR (PerasVotingCommittee blk)
+  , ToCBOR (PerasVotingCommittee blk)
+  )
+
+-- | The core API of the LedgerDB component
+type LedgerDB :: (Type -> Type) -> StateKind -> Type -> Type
+data LedgerDB m l blk = LedgerDB
+  { getVolatileTip :: STM m (l blk EmptyMK)
+  -- ^ Get the empty ledger state at the (volatile) tip of the LedgerDB.
+  , getImmutableTip :: STM m (l blk EmptyMK)
+  -- ^ Get the empty ledger state at the immutable tip of the LedgerDB.
+  , getPastLedgerState :: Point blk -> STM m (Maybe (l blk EmptyMK))
+  -- ^ Get an empty ledger state at a requested point in the LedgerDB, if it
+  -- exists.
+  , getHeaderStateHistory ::
+      l ~ ExtLedgerState =>
+      STM m (HeaderStateHistory blk)
+  -- ^ Get the header state history for all ledger states in the LedgerDB.
+  , openForkerAtTarget ::
+      Target (Point blk) ->
+      m (Either GetForkerError (Forker m l blk))
+  -- ^ Acquire a 'Forker' at the requested point. If a ledger state associated
+  -- with the requested point does not exist in the LedgerDB, it will return a
+  -- 'GetForkerError'.
+  --
+  -- Note this will allocate resources; see the "'Forker' management
+  -- in the running node" comment above.
+  , validateFork ::
+      (TraceValidateEvent blk -> m ()) ->
+      BlockCache blk ->
+      Word64 ->
+      NonEmpty (Header blk) ->
+      SuccessForkerAction m l blk ->
+      m (ValidateResult l blk)
+  -- ^ Try to apply a sequence of blocks on top of the LedgerDB, first rolling
+  -- back as many blocks as the passed @Word64@.
+  --
+  -- The passed continuation will be executed if the result of validation is
+  -- fully successful.
+  , getPrevApplied :: STM m (Set (RealPoint blk))
+  -- ^ Get the references to blocks that have previously been applied.
+  , garbageCollect :: SlotNo -> m ()
+  -- ^ Garbage collect references to old state that is older than the given
+  -- slot.
+  --
+  -- Concretely, this affects:
+  --
+  --  * Ledger states (and potentially underlying handles for on-disk storage).
+  --
+  --  * The set of previously applied points.
+  , tryTakeSnapshot :: m ()
+  -- ^ If the 'SnapshotPolicy' with which this LedgerDB was opened indicates
+  -- so, select the ledger states to snapshot and enqueue a 'SnapshotRequest'
+  -- for them on 'snapshotRequestQueue'.
+  --
+  -- This neither blocks nor writes anything to disk itself: the writing (and
+  -- the randomised delay preceding it) is the job of whoever serves
+  -- 'snapshotRequestQueue'. The request is dropped when the queue is already
+  -- occupied.
+  , snapshotRequestQueue :: SnapshotRequestQueue m
+  -- ^ The queue on which 'tryTakeSnapshot' puts its requests. In a running
+  -- node, it is served by a background thread of the ChainDB; see
+  -- 'withSnapshotRequest'.
+  , closeDB :: m ()
+  -- ^ Close the LedgerDB
+  --
+  -- Idempotent.
+  --
+  -- Should only be called on shutdown.
+  }
+  deriving NoThunks via OnlyCheckWhnfNamed "LedgerDB" (LedgerDB m l blk)
+
+type instance HeaderHash (LedgerDB m l blk) = HeaderHash blk
+
+type LedgerDB' m blk = LedgerDB m ExtLedgerState blk
+
+currentPoint ::
+  (GetTip (l blk), HeaderHash (l blk) ~ HeaderHash blk, Functor (STM m)) =>
+  LedgerDB m l blk ->
+  STM m (Point blk)
+currentPoint ldb = castPoint . getTip <$> getVolatileTip ldb
+
+data WhereToTakeSnapshot = TakeAtImmutableTip | TakeAtVolatileTip deriving Eq
+
+data TestInternals m l blk = TestInternals
+  { wipeLedgerDB :: m ()
+  , takeSnapshotNOW :: WhereToTakeSnapshot -> Maybe String -> m ()
+  , push :: l blk DiffMK -> m ()
+  -- ^ Push a ledger state, and prune the 'LedgerDB' to its immutable tip.
+  --
+  -- This does not modify the set of previously applied points.
+  , reapplyThenPushNOW :: blk -> m ()
+  -- ^ Apply block to the tip ledger state (using reapplication), and prune the
+  -- 'LedgerDB' to its immutable tip.
+  --
+  -- This does not modify the set of previously applied points.
+  , truncateSnapshots :: m ()
+  , closeLedgerDB :: m ()
+  , getNumLedgerTablesHandles :: m Word64
+  -- ^ Get the number of referenced 'LedgerTablesHandle's.
+  }
+  deriving NoThunks via OnlyCheckWhnfNamed "TestInternals" (TestInternals m l blk)
+
+type TestInternals' m blk = TestInternals m ExtLedgerState blk
+
+{-------------------------------------------------------------------------------
+  Config
+-------------------------------------------------------------------------------}
+
+data LedgerDbCfgF f l blk = LedgerDbCfg
+  { ledgerDbCfgSecParam :: !(HKD f SecurityParam)
+  , ledgerDbCfg :: !(HKD f (LedgerCfg l blk))
+  , ledgerDbCfgComputeLedgerEvents :: !ComputeLedgerEvents
+  }
+  deriving Generic
+
+type LedgerDbCfg l = Complete LedgerDbCfgF l
+
+deriving instance NoThunks (LedgerCfg l blk) => NoThunks (LedgerDbCfg l blk)
+
+configLedgerDb ::
+  ConsensusProtocol (BlockProtocol blk) =>
+  TopLevelConfig blk ->
+  ComputeLedgerEvents ->
+  LedgerDbCfg ExtLedgerState blk
+configLedgerDb config evs =
+  LedgerDbCfg
+    { ledgerDbCfgSecParam = configSecurityParam config
+    , ledgerDbCfg = ExtLedgerCfg config
+    , ledgerDbCfgComputeLedgerEvents = evs
+    }
+
+{-------------------------------------------------------------------------------
+  Exceptions
+-------------------------------------------------------------------------------}
+
+-- | Database error
+--
+-- Thrown upon incorrect use: invalid input.
+data LedgerDbError
+  = -- | The LedgerDB is closed.
+    --
+    -- This will be thrown when performing some operations on the LedgerDB. The
+    -- 'CallStack' of the operation on the LedgerDB is included in the error.
+    ClosedDBError PrettyCallStack
+  deriving Show
+  deriving anyclass Exception
+
+{-------------------------------------------------------------------------------
+  Forker
+-------------------------------------------------------------------------------}
+
+-- | 'bracket'-style usage of a forker at the LedgerDB tip.
+withTipForker ::
+  IOLike m =>
+  LedgerDB m l blk ->
+  (Forker m l blk -> m a) ->
+  m a
+withTipForker ldb =
+  bracket
+    ( do
+        eFrk <- openForkerAtTarget ldb VolatileTip
+        case eFrk of
+          Left{} -> error "Unreachable, volatile tip MUST be in the LedgerDB"
+          Right frk -> pure frk
+    )
+    forkerClose
+
+-- | Get statistics from the tip of the LedgerDB.
+getTipStatistics ::
+  IOLike m =>
+  LedgerDB m l blk ->
+  m Statistics
+getTipStatistics ldb = withTipForker ldb forkerReadStatistics
+
+openReadOnlyForker ::
+  MonadSTM m =>
+  LedgerDB m l blk ->
+  Target (Point blk) ->
+  m (Either GetForkerError (ReadOnlyForker m l blk))
+openReadOnlyForker ldb pt = fmap readOnlyForker <$> openForkerAtTarget ldb pt
+
+{-------------------------------------------------------------------------------
+  Initialization
+-------------------------------------------------------------------------------}
+
+-- | Initialization log
+--
+-- The initialization log records which snapshots from disk were considered,
+-- in which order, and why some snapshots were rejected. It is primarily useful
+-- for monitoring purposes.
+data InitLog blk
+  = -- | Defaulted to initialization from genesis
+    --
+    -- NOTE: Unless the blockchain is near genesis, or this is the first time we
+    -- boot the node, we should see this /only/ if data corruption occurred.
+    InitFromGenesis
+  | -- | Used a snapshot corresponding to the specified tip
+    InitFromSnapshot DiskSnapshot (RealPoint blk)
+  | -- | Initialization skipped a snapshot
+    --
+    -- We record the reason why it was skipped.
+    --
+    -- NOTE: We should /only/ see this if data corruption occurred or codecs
+    -- for snapshots changed.
+    InitFailure DiskSnapshot (SnapshotFailure blk) (InitLog blk)
+  deriving (Show, Eq, Generic)
+
+-- | Functions required to initialize a LedgerDB
+type InitDB :: Type -> (Type -> Type) -> Type -> Type
+data InitDB db m blk = InitDB
+  { initFromGenesis :: !(m db)
+  -- ^ Create a DB from the genesis state
+  , initFromSnapshot :: !(DiskSnapshot -> m (Either (SnapshotFailure blk) (db, RealPoint blk)))
+  -- ^ Create a DB from a Snapshot
+  , initReapplyBlock :: !(LedgerDbCfg ExtLedgerState blk -> blk -> db -> m db)
+  -- ^ Reapply a block from the immutable DB when initializing the DB. Prune the
+  -- LedgerDB such that there are no volatile states.
+  , currentTip :: !(db -> LedgerState blk EmptyMK)
+  -- ^ Getting the current tip for tracing the Ledger Events.
+  , mkLedgerDb ::
+      !(db -> m (LedgerDB' m blk, TestInternals' m blk))
+  -- ^ Create a LedgerDB from the initialized data structures from previous
+  -- steps.
+  }
+
+-- | Initialize the ledger DB from the most recent snapshot on disk
+--
+-- If no such snapshot can be found, use the genesis ledger DB. Returns the
+-- initialized DB as well as a log of the initialization and the number of
+-- blocks replayed between the snapshot and the tip of the immutable DB.
+--
+-- We do /not/ catch any exceptions thrown during streaming; should any be
+-- thrown, it is the responsibility of the 'ChainDB' to catch these
+-- and trigger (further) validation. We only discard snapshots if
+--
+-- * We cannot deserialise them, or
+--
+-- * they are /ahead/ of the chain, they refer to a slot which is later than the
+--     last slot in the immutable db (or the same slot, if the immutable db
+--     tip is an EBB, as the snapshot could then be for the EBB's same-slot
+--     successor block, which is not in the immutable db).
+--
+-- We do /not/ attempt to use multiple ledger states from disk to construct the
+-- ledger DB. Instead we load only a /single/ ledger state from disk, and
+-- /compute/ all subsequent ones. This is important, because the ledger states
+-- obtained in this way will (hopefully) share much of their memory footprint
+-- with their predecessors.
+initialize ::
+  forall m blk db st.
+  ( IOLike m
+  , LedgerSupportsProtocol blk
+  , InspectLedger blk
+  , HasCallStack
+  ) =>
+  Tracer m (TraceReplayEvent blk) ->
+  Tracer m (TraceSnapshotEvent blk) ->
+  LedgerDbCfg ExtLedgerState blk ->
+  StreamAPI m blk blk ->
+  Point blk ->
+  -- | Whether the block at the replay goal is an EBB. Used to decide whether
+  -- snapshots are ahead of the immutable db, see @snapshotTooRecent@.
+  IsEBB ->
+  InitDB db m blk ->
+  SnapshotManager m blk st ->
+  m (InitLog blk, db)
+initialize
+  replayTracer
+  snapTracer
+  cfg
+  stream
+  replayGoal
+  replayGoalIsEBB
+  dbIface
+  snapManager =
+    listSnapshots snapManager >>= tryNewestFirst id
+   where
+    InitDB{initFromGenesis, initFromSnapshot} = dbIface
+
+    -- \| Whether the given snapshot is ahead of the replay goal (the tip of
+    -- the immutable db), in which case it must be discarded, as replaying
+    -- from it would require blocks that are not in the immutable db.
+    --
+    -- Snapshots are named after the slot of the ledger state they contain,
+    -- so a snapshot named after a slot later than the replay goal is
+    -- necessarily too recent.
+    --
+    -- A snapshot named after the very slot of the replay goal is usually
+    -- fine (this is the common case for the most recent snapshot on a clean
+    -- restart), with one oddity: if the block at the replay goal is an EBB,
+    -- the snapshot could instead be for the EBB's successor block, which
+    -- shares its slot with the EBB but is not in the immutable db. The
+    -- snapshot name alone cannot distinguish the two cases, so we
+    -- conservatively discard such snapshots; EBBs are rare enough for this
+    -- not to matter.
+    snapshotTooRecent :: DiskSnapshot -> Bool
+    snapshotTooRecent s = case pointSlot replayGoal of
+      Origin -> True
+      At p -> case replayGoalIsEBB of
+        IsEBB -> dsNumber s >= unSlotNo p
+        IsNotEBB -> dsNumber s > unSlotNo p
+
+    tryNewestFirst ::
+      (InitLog blk -> InitLog blk) ->
+      [DiskSnapshot] ->
+      m (InitLog blk, db)
+    tryNewestFirst acc [] = do
+      -- We're out of snapshots. Start at genesis
+      traceWith (TraceReplayStartEvent >$< replayTracer) ReplayFromGenesis
+      let replayTracer'' = decorateReplayTracerWithStart (Point Origin) replayTracer'
+
+      initDb <- initFromGenesis
+
+      traceMarkerIO "Genesis loaded"
+      db <-
+        replayStartingWith
+          replayTracer''
+          cfg
+          stream
+          initDb
+          (Point Origin)
+          dbIface
+      return (acc InitFromGenesis, db)
+    tryNewestFirst acc (s : ss) = do
+      if snapshotTooRecent s
+        then do
+          deleteSnapshotIfTemporary snapManager s
+          traceWith snapTracer . InvalidSnapshot s $ InitFailureTooRecent s replayGoal
+          tryNewestFirst (acc . InitFailure s (InitFailureTooRecent s replayGoal)) ss
+        else do
+          eInitDb <- initFromSnapshot s
+          case eInitDb of
+            -- If the snapshot is missing a metadata file, issue a warning and try
+            -- the next oldest snapshot
+            Left err@(InitFailureRead (ReadMetadataError _ MetadataFileDoesNotExist)) -> do
+              traceWith snapTracer $ InvalidSnapshot s err
+              tryNewestFirst (acc . InitFailure s err) ss
+
+            -- If the snapshot's backend is incorrect, issue a warning and try
+            -- the next oldest snapshot
+            Left err@(InitFailureRead (ReadMetadataError _ MetadataBackendMismatch)) -> do
+              traceWith snapTracer $ InvalidSnapshot s err
+              tryNewestFirst (acc . InitFailure s err) ss
+
+            -- If it is a legacy snapshot, issue a warning and try
+            -- the next oldest snapshot
+            Left err@(InitFailureRead ReadSnapshotIsLegacy) -> do
+              traceWith snapTracer $ InvalidSnapshot s err
+              tryNewestFirst (acc . InitFailure s err) ss
+
+            -- If we fail to use this snapshot for any other reason, delete it and
+            -- try an older one
+            Left err -> do
+              deleteSnapshotIfTemporary snapManager s
+              traceWith snapTracer . InvalidSnapshot s $ err
+              tryNewestFirst (acc . InitFailure s err) ss
+            Right (initDb, pt) -> do
+              traceMarkerIO "Snapshot loaded"
+              let pt' = realPointToPoint pt
+              traceWith (TraceReplayStartEvent >$< replayTracer) (ReplayFromSnapshot s (ReplayStart pt'))
+              let replayTracer'' = decorateReplayTracerWithStart pt' replayTracer'
+              db <-
+                replayStartingWith
+                  replayTracer''
+                  cfg
+                  stream
+                  initDb
+                  pt'
+                  dbIface
+              return (acc (InitFromSnapshot s pt), db)
+
+    replayTracer' =
+      decorateReplayTracerWithGoal
+        replayGoal
+        (TraceReplayProgressEvent >$< replayTracer)
+
+-- | Replay all blocks in the Immutable database using the 'StreamAPI' provided
+-- on top of the given @LedgerDB' blk@.
+--
+-- It will also return the number of blocks that were replayed.
+replayStartingWith ::
+  forall m blk db.
+  ( IOLike m
+  , LedgerSupportsProtocol blk
+  , InspectLedger blk
+  , HasCallStack
+  ) =>
+  Tracer m (ReplayStart blk -> ReplayGoal blk -> TraceReplayProgressEvent blk) ->
+  LedgerDbCfg ExtLedgerState blk ->
+  StreamAPI m blk blk ->
+  db ->
+  Point blk ->
+  InitDB db m blk ->
+  m db
+replayStartingWith tracer cfg stream initDb from InitDB{initReapplyBlock, currentTip} = do
+  res <-
+    runExceptT $
+      streamAll
+        stream
+        from
+        id
+        initDb
+        push
+  case res of
+    Left _ ->
+      error $
+        "Critical invariant violation: block "
+          <> show from
+          <> " that was in immutable db is gone before we could open ledgerdb"
+    Right v -> pure v
+ where
+  push :: blk -> db -> m db
+  push blk !db = do
+    !db' <- initReapplyBlock cfg blk db
+
+    let events =
+          inspectLedger
+            (getExtLedgerCfg (ledgerDbCfg cfg))
+            (currentTip db)
+            (currentTip db')
+
+    traceWith tracer (ReplayedBlock (blockRealPoint blk) events)
+    return db'
+
+{-------------------------------------------------------------------------------
+  Trace replay events
+-------------------------------------------------------------------------------}
+
+data TraceReplayEvent blk
+  = TraceReplayStartEvent (TraceReplayStartEvent blk)
+  | TraceReplayProgressEvent (TraceReplayProgressEvent blk)
+  deriving (Show, Eq)
+
+-- | Add the tip of the Immutable DB to the trace event
+decorateReplayTracerWithGoal ::
+  Monad m =>
+  -- | Tip of the ImmutableDB
+  Point blk ->
+  Tracer m (TraceReplayProgressEvent blk) ->
+  Tracer m (ReplayGoal blk -> TraceReplayProgressEvent blk)
+decorateReplayTracerWithGoal immTip = (($ ReplayGoal immTip) >$<)
+
+-- | Add the block at which a replay started.
+decorateReplayTracerWithStart ::
+  Monad m =>
+  -- | Starting point of the replay
+  Point blk ->
+  Tracer m (ReplayGoal blk -> TraceReplayProgressEvent blk) ->
+  Tracer m (ReplayStart blk -> ReplayGoal blk -> TraceReplayProgressEvent blk)
+decorateReplayTracerWithStart start = (($ ReplayStart start) >$<)
+
+-- | Which point the replay started from
+newtype ReplayStart blk = ReplayStart (Point blk) deriving (Eq, Show)
+
+-- | Which point the replay is expected to end at
+newtype ReplayGoal blk = ReplayGoal (Point blk) deriving (Eq, Show)
+
+-- | Events traced while replaying blocks against the ledger to bring it up to
+-- date w.r.t. the tip of the ImmutableDB during initialisation. As this
+-- process takes a while, we trace events to inform higher layers of our
+-- progress.
+data TraceReplayStartEvent blk
+  = -- | There were no LedgerDB snapshots on disk, so we're replaying all blocks
+    -- starting from Genesis against the initial ledger.
+    ReplayFromGenesis
+  | -- | There was a LedgerDB snapshot on disk corresponding to the given tip.
+    -- We're replaying more recent blocks against it.
+    ReplayFromSnapshot
+      DiskSnapshot
+      -- | the block at which this replay started
+      (ReplayStart blk)
+  deriving (Generic, Eq, Show)
+
+-- | We replayed the given block (reference) on the genesis snapshot during
+-- the initialisation of the LedgerDB. Used during ImmutableDB replay.
+--
+-- Using this trace the node could (if it so desired) easily compute a
+-- "percentage complete".
+data TraceReplayProgressEvent blk
+  = ReplayedBlock
+      -- | the block being replayed
+      (RealPoint blk)
+      [LedgerEvent blk]
+      -- | the block at which this replay started
+      (ReplayStart blk)
+      -- | the block at the tip of the ImmutableDB
+      (ReplayGoal blk)
+  deriving (Generic, Eq, Show)
+
+{-------------------------------------------------------------------------------
+  Pruning
+-------------------------------------------------------------------------------}
+
+-- | Options for prunning the LedgerDB
+data LedgerDbPrune
+  = -- | Prune all states, keeping only the current tip.
+    LedgerDbPruneAll
+  | -- | Prune such that all (non-anchor) states are not older than the given
+    -- slot.
+    LedgerDbPruneBeforeSlot SlotNo
+  deriving Show
+
+{-------------------------------------------------------------------------------
+  Streaming
+-------------------------------------------------------------------------------}
+
+-- | A backend that supports streaming the ledger tables
+class StreamingBackend m backend l blk where
+  data YieldArgs m backend l blk
+
+  data SinkArgs m backend l blk
+
+  yield :: Proxy backend -> YieldArgs m backend l blk -> Yield m l blk
+  releaseYieldArgs :: YieldArgs m backend l blk -> m ()
+
+  sink :: Proxy backend -> SinkArgs m backend l blk -> Sink m l blk
+  releaseSinkArgs :: SinkArgs m backend l blk -> m ()
+
+type Yield m l blk =
+  l blk EmptyMK ->
+  ( ( Stream
+        (Of (TxIn blk, TxOut blk))
+        (ExceptT DeserialiseFailure m)
+        (Stream (Of ByteString) m (Maybe CRC)) ->
+      ExceptT DeserialiseFailure m (Stream (Of ByteString) m (Maybe CRC, Maybe CRC))
+    )
+  ) ->
+  ExceptT DeserialiseFailure m (Maybe CRC, Maybe CRC)
+
+type Sink m l blk =
+  l blk EmptyMK ->
+  Stream
+    (Of (TxIn blk, TxOut blk))
+    (ExceptT DeserialiseFailure m)
+    (Stream (Of ByteString) m (Maybe CRC)) ->
+  ExceptT DeserialiseFailure m (Stream (Of ByteString) m (Maybe CRC, Maybe CRC))
+
+data Decoders blk
+  = Decoders
+      (forall s. Decoder s (TxIn blk))
+      (forall s. Decoder s (TxOut blk))

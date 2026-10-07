@@ -6915,14 +6915,14 @@ __metadata:
   linkType: hard
 
 "dompurify@npm:^3.3.1":
-  version: 3.4.9
-  resolution: "dompurify@npm:3.4.9"
+  version: 3.4.16
+  resolution: "dompurify@npm:3.4.16"
   dependencies:
     "@types/trusted-types": "npm:^2.0.7"
   dependenciesMeta:
     "@types/trusted-types":
       optional: true
-  checksum: 10c0/e03d88d5959dcaae172357002d74e47e66fc6685cac8928fe4b02982f7b4051e2b8ff70279e4e6fb13be112c0e5cae11439ab960c06c487cb91a3c1a18baed49
+  checksum: 10c0/65a901c6b6d489d3e898f67223d81dac66d613cda48f5785f0ed52a4ae320c4b2745490a58c14161e29f0273080fea0a0cb234a9ef892650e1a9b2a7befa07a5
   languageName: node
   linkType: hard
 

@@ -61,6 +61,7 @@ packages:
   packages/cardano-api/cardano-rpc
 
   packages/ouroboros-consensus
+  packages/ouroboros-network/ouroboros-network
 
 
 -- Needed when cross compiling

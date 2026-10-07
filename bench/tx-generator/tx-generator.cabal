@@ -1,0 +1,301 @@
+cabal-version: 3.0
+
+name:                   tx-generator
+version:                2.17
+synopsis:               A transaction workload generator for Cardano clusters
+description:            A transaction workload generator for Cardano clusters.
+category:               Cardano,
+                        Test,
+copyright:              2019-2023 Input Output Global Inc (IOG), 2023-2026 Intersect.
+author:                 IOHK
+maintainer:             operations@iohk.io
+license:                Apache-2.0
+license-files:          LICENSE
+                        NOTICE
+build-type:             Simple
+extra-source-files:     README.md
+data-files:             data/*.json
+                        scripts-fallback/*.plutus
+
+flag withplutuslib
+  description:          Enable import and re-compilation of Plutus scripts from plutus-scripts-bench. Default: false; use for dev/test of new benchmarks only.
+  default:              False
+  manual:               True
+
+common project-config
+  default-language:     Haskell2010
+
+common with-library
+  -- This is the inverse to the "buildable" GHC version constraint in plutus-scripts-bench.
+  -- It makes sure, we only depend on that package if it is buildable.
+  -- The tx-generator will fall back to pre-serialized Plutus scripts if this package is not present.
+  if flag(withplutuslib) && !(impl(ghc <9.6) || impl(ghc >=9.7))
+    build-depends:      plutus-scripts-bench ^>= 1.0.5
+    cpp-options:        -DWITH_LIBRARY
+
+common maybe-unix
+  if !os(windows)
+    build-depends:      unix
+
+
+library
+  import:               project-config, with-library, maybe-unix
+
+  hs-source-dirs:       src
+  ghc-options:          -Wall
+                        -Wcompat
+                        -Wincomplete-record-updates
+                        -Wincomplete-uni-patterns
+                        -Wno-prepositive-qualified-module
+                        -Wno-unticked-promoted-constructors
+                        -Wpartial-fields
+                        -fno-warn-safe
+                        -fno-warn-unsafe
+                        -fno-warn-missing-import-lists
+                        -fobject-code -fno-ignore-interface-pragmas
+                        -fno-omit-interface-pragmas
+
+  -- ghc-9.14 gives redundant constraint warnings on some constraints
+  -- that are needed for earlier compilers.
+  if impl(ghc <9.14)
+    ghc-options:
+      -Wredundant-constraints
+
+  exposed-modules:      Cardano.Benchmarking.Command
+                        Cardano.Benchmarking.Compiler
+                        Cardano.Benchmarking.GeneratorTx
+                        Cardano.Benchmarking.GeneratorTx.NodeToNode
+                        Cardano.Benchmarking.GeneratorTx.SizedMetadata
+                        Cardano.Benchmarking.GeneratorTx.Submission
+                        Cardano.Benchmarking.GeneratorTx.SubmissionClient
+                        Cardano.Benchmarking.LogTypes
+                        Cardano.Benchmarking.OuroborosImports
+                        Cardano.Benchmarking.Script
+                        Cardano.Benchmarking.Script.Action
+                        Cardano.Benchmarking.Script.Aeson
+                        Cardano.Benchmarking.Script.Core
+                        Cardano.Benchmarking.Script.Env
+                        Cardano.Benchmarking.Script.Ogmios
+                        Cardano.Benchmarking.Script.Selftest
+                        Cardano.Benchmarking.Script.Submission
+                        Cardano.Benchmarking.Script.Types
+                        Cardano.Benchmarking.TpsThrottle
+                        Cardano.Benchmarking.Tracer
+                        Cardano.Benchmarking.Types
+                        Cardano.Benchmarking.Version
+                        Cardano.Benchmarking.Wallet
+
+                        Cardano.TxGenerator.Fund
+                        Cardano.TxGenerator.FundQueue
+                        Cardano.TxGenerator.Genesis
+                        Cardano.TxGenerator.ProtocolParameters
+                        Cardano.TxGenerator.PureExample
+                        Cardano.TxGenerator.Script.Types
+                        Cardano.TxGenerator.Setup.NixService
+                        Cardano.TxGenerator.Setup.NodeConfig
+                        Cardano.TxGenerator.Setup.TestnetDiscovery
+                        Cardano.TxGenerator.Setup.Plutus
+                        Cardano.TxGenerator.PlutusContext
+                        Cardano.TxGenerator.Setup.SigningKey
+                        Cardano.TxGenerator.Types
+                        Cardano.TxGenerator.Tx
+                        Cardano.TxGenerator.Utils
+                        Cardano.TxGenerator.UTxO
+
+  other-modules:        Cardano.TxGenerator.Internal.Fifo
+                        Cardano.TxGenerator.Internal.Orphans
+                        Paths_tx_generator
+
+  autogen-modules:      Paths_tx_generator
+
+  build-depends:        base >=4.12 && <5
+                      , aeson
+                      , aeson-pretty
+                      , async
+                      , attoparsec
+                      , attoparsec-aeson
+                      , base16-bytestring
+                      , bytestring
+                      , cardano-api ^>= 11.7
+                      , cardano-binary
+                      , cardano-cli ^>= 11.2.2
+                      , cardano-crypto-class
+                      , cardano-crypto-wrapper
+                      , cardano-data
+                      , cardano-diffusion ^>= 1.3
+                      , cardano-git-rev ^>= 0.2.2
+                      , cardano-ledger-alonzo
+                      , cardano-ledger-api
+                      , cardano-ledger-byron
+                      , cardano-ledger-core
+                      , cardano-node
+                      , cardano-prelude
+                      , cardano-strict-containers >=0.1
+                      , contra-tracer
+                      , cborg >= 0.2.2 && < 0.3
+                      , containers
+                      , constraints-extras
+                      , directory
+                      , dlist
+                      , extra
+                      , filepath
+                      , formatting
+                      , generic-monoid
+                      , ghc-prim
+                      , io-classes:{io-classes, strict-stm}
+                      , microlens
+                      , mtl
+                      , network
+                      , network-mux
+                      , network-uri
+                      , optparse-applicative
+                      , ouroboros-consensus:{ouroboros-consensus, cardano, diffusion} >= 4.0
+                      , ouroboros-network:{api, framework, ouroboros-network, protocols, tracing} >= 1.2
+                      , plutus-ledger-api
+                      , plutus-tx
+                      , random
+                      , typed-protocols ^>= 1.2
+                      , serialise
+                      , streaming
+                      , cardano-ledger-shelley
+                      , prettyprinter
+                      , stm
+                      , text
+                      , time
+                      , trace-dispatcher
+                      , trace-forward
+                      , transformers
+                      , transformers-except
+                      , unordered-containers
+                      , websockets
+                      , yaml
+                      -- Needed by "Cardano.Api.Internal.ProtocolParameters" port.
+                      , either
+                      , scientific
+                      , cardano-ledger-babbage
+
+  default-extensions:   OverloadedStrings
+
+executable tx-generator
+  import:               project-config
+  hs-source-dirs:       app
+  main-is:              tx-generator.hs
+  ghc-options:          -threaded
+                        -Wall
+                        -rtsopts
+                        "-with-rtsopts=-T"
+
+  build-depends:        base
+                      , tx-generator
+
+executable calibrate-script
+  import:               project-config, with-library
+
+  hs-source-dirs:       app
+                        src-calibrate
+  main-is:              calibrate-script.hs
+
+  ghc-options:          -Wall
+                        -rtsopts
+                        "-with-rtsopts=-T"
+                        -Wno-deprecations
+
+  build-depends:        base
+                      , aeson
+                      , aeson-pretty
+                      , bytestring
+                      , containers
+                      , directory
+                      , extra
+                      , filepath
+                      , optparse-applicative
+                      , cardano-api
+                      , text
+                      , transformers
+                      , transformers-except
+                      , tx-generator
+
+  default-extensions:   ViewPatterns
+
+  other-modules:        Cardano.TxGenerator.Calibrate.Utils
+                        Paths_tx_generator
+  autogen-modules:      Paths_tx_generator
+
+test-suite tx-generator-apitest
+  import:               project-config, with-library
+
+  hs-source-dirs:       src-calibrate
+                        test
+  main-is:              ApiTest.hs
+  type:                 exitcode-stdio-1.0
+
+  ghc-options:          -Wall
+                        -rtsopts
+                        "-with-rtsopts=-T"
+                        -Wno-deprecations
+
+  build-depends:        base
+                      , aeson
+                      , aeson-pretty
+                      , bytestring
+                      , directory
+                      , extra
+                      , filepath
+                      , optparse-applicative
+                      , cardano-api
+                      , cardano-cli
+                      , cardano-node
+                      , plutus-tx
+                      , transformers
+                      , transformers-except
+                      , tx-generator
+
+  other-modules:        Cardano.TxGenerator.Calibrate.Utils
+                        Paths_tx_generator
+  autogen-modules:      Paths_tx_generator
+
+test-suite tx-generator-test
+  import:               project-config
+  hs-source-dirs:       test
+  main-is:              Main.hs
+  type:                 exitcode-stdio-1.0
+
+  build-depends:        base
+                      , aeson
+                      , bytestring
+                      , cardano-api
+                      , cardano-node
+                      , directory
+                      , extra
+                      , filepath
+                      , QuickCheck
+                      , tasty
+                      , tasty-hunit
+                      , tasty-quickcheck
+                      , temporary
+                      , tx-generator
+
+  other-modules:        TestnetDiscoveryTest
+
+  ghc-options:          -Weverything
+                        -fno-warn-missing-import-lists
+                        -fno-warn-safe
+                        -fno-warn-unsafe
+                        -threaded -rtsopts "-with-rtsopts=-N -T"
+
+benchmark tx-generator-bench
+  import:               project-config
+  hs-source-dirs:       test
+  main-is:              Bench.hs
+  type:                 exitcode-stdio-1.0
+
+  build-depends:        base
+                      , criterion
+                      , stm
+                      , tx-generator
+
+  ghc-options:          -Weverything
+                        -fno-warn-missing-import-lists
+                        -fno-warn-safe
+                        -fno-warn-unsafe
+                        -threaded -rtsopts "-with-rtsopts=-N -T"

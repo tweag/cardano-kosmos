@@ -1,0 +1,446 @@
+############################################################################
+# Builds Haskell packages with Haskell.nix
+############################################################################
+{ haskell-nix
+, incl
+, CHaP
+, macOS-security
+, windowsCompilerNixName
+, herald
+}:
+let
+
+  inherit (haskell-nix) haskellLib;
+
+  # This creates the Haskell package set.
+  # https://input-output-hk.github.io/haskell.nix/user-guide/projects/
+  project = haskell-nix.cabalProject' ({ pkgs
+                                       , lib
+                                       , config
+                                       , buildProject
+                                       , ...
+                                       }:
+    {
+      src = ../.;
+      name = "cardano-node";
+      compiler-nix-name = lib.mkDefault (if pkgs.stdenv.hostPlatform.isWindows then windowsCompilerNixName else "ghc967");
+      # Extra-compilers
+      # flake.variants = lib.genAttrs ["ghc$VERSION"] (x: {compiler-nix-name = x;});
+      cabalProjectLocal = ''
+        repository cardano-haskell-packages-local
+          url: file:${CHaP}
+          secure: True
+        active-repositories: hackage.haskell.org, cardano-haskell-packages-local
+        allow-newer: terminfo:base
+      '' + lib.optionalString pkgs.stdenv.hostPlatform.isWindows ''
+        -- When cross compiling we don't have a `ghc` package
+        package plutus-tx-plugin
+          flags: +use-ghc-stub
+      ''
+      # systemd can't be statically linked
+      + lib.optionalString pkgs.stdenv.hostPlatform.isMusl ''
+        package cardano-git-rev
+          flags: -systemd
+        package cardano-node
+          flags: -systemd
+        package cardano-tracer
+          flags: -systemd
+      '';
+      inputMap = {
+        "https://chap.intersectmbo.org/" = CHaP;
+      };
+      shell = {
+        name = lib.mkDefault "cabal-dev-shell";
+
+        # These programs will be available inside the nix-shell.
+        nativeBuildInputs = with pkgs.pkgsBuildBuild; [
+          alejandra
+          nix-prefetch-git
+          pkg-config
+          git
+          hlint
+          ghcid
+          haskell-language-server
+          cabal
+          actionlint
+          shellcheck
+          herald
+          stylish-haskell
+        ];
+
+        withHoogle = true;
+
+        # https://github.com/channable/alfred-margaret/pull/76
+        tools.hoogle = {
+          cabalProjectLocal = ''
+            constraints: any.alfred-margaret <2.1.1.0 || >2.1.1.0
+          '';
+        };
+      };
+
+
+      # Additional configuration for the project package set
+      # ----------------------------------------------------
+      #
+      # The following configuration influeces how the project package set
+      # is built by nix. The configuration uses the same modular system as
+      # NixOS.
+      #
+      # For additional background information see
+      #
+      # https://nixos.org/manual/nixos/stable/index.html#sec-writing-modules
+      #
+      # For a list of all configuration options supported by Haskell.nix see
+      #
+      # https://input-output-hk.github.io/haskell.nix/reference/modules.html
+      #
+      # Tips:
+      #
+      # 1. Nix is a lazy language and the resulting `project` is already
+      # in scope. Avoid referring to any of `project` attributes from
+      # within a configuration module. You can instead refer to the final
+      # package set configuration in `config`. If you run into infinite
+      # resursion issues, troubleshooting the latter will be much easier
+      # than troubleshooting the former.
+      #
+      # 2. The same configuration option can be set to different values
+      # from separate modules. How these values will be merged together
+      # dependes on the type of the option. The type of each option is
+      # listed in the haskell.nix modules reference pages.
+      #
+      # 3. The option `packages` is an attrset of submodules, i.e. each
+      # package has its own modular configuration. Similarly, `.components`
+      # is an attrset of submodules inside each package.
+      #
+      # 4. You can specify a configuration for every package by adding a
+      # module to the definition of `packages` itself, i.e:
+      #
+      # {
+      #   options.packages = lib.mkOption {
+      #     type = lib.types.attrsOf (lib.types.submodule (
+      #       { config, name, ... }:
+      #       #         ^-- package name passed as a extra argument
+      #       # ^-- this is now the final package configuration
+      #       {
+      #         # e.g.
+      #         configureFlags = [ "--ghc-option=-Werror"];
+      #       }
+      #     ));
+      # }
+      #
+      # The same applies to every component inside a package.
+      #
+      modules =
+        [
+          ({ lib, pkgs, ... }: {
+            packages.cardano-node-chairman.components.tests.chairman-tests.buildable = lib.mkForce pkgs.stdenv.hostPlatform.isUnix;
+            package-keys = ["plutus-tx-plugin"];
+            packages.plutus-tx-plugin.components.library.platforms = with lib.platforms; [ linux darwin ];
+          })
+          # The haddock of GHC < 9.12.3 panics on `type data` declarations, e.g. the
+          # TopTx type family or AllLedgerPeers ("tyConStupidTheta" panic, GHC issue
+          # #25739, fixed in GHC 9.12.3). Disable haddock of the affected dependencies
+          # for those compilers only, so that shells with a fixed compiler (e.g. the
+          # `.#haddock` one used by github-page.yml) still provide dependencies with
+          # documentation.
+          ({ config, lib, ... }: lib.mkIf (lib.versionOlder config.compiler.version "9.12.3") {
+            packages.cardano-api.components.library.doHaddock = false;
+            packages.fs-api.components.library.doHaddock = false;
+            packages.cardano-ledger-allegra.components.library.doHaddock = false;
+            packages.cardano-ledger-alonzo.components.library.doHaddock = false;
+            packages.cardano-ledger-api.components.library.doHaddock = false;
+            packages.cardano-ledger-babbage.components.library.doHaddock = false;
+            packages.cardano-ledger-core.components.library.doHaddock = false;
+            packages.cardano-ledger-conway.components.library.doHaddock = false;
+            packages.cardano-ledger-shelley.components.library.doHaddock = false;
+            packages.cardano-protocol-tpraos.components.library.doHaddock = false;
+            packages.ouroboros-consensus.components.library.doHaddock = false;
+            packages.ouroboros-network.components.library.doHaddock = false;
+            packages.cardano-diffusion.components.library.doHaddock = false;
+            packages.plutus-ledger-api.components.library.doHaddock = false;
+          })
+          ({ lib, pkgs, ...}: lib.mkIf (pkgs.stdenv.hostPlatform.isWindows) {
+            packages.basement.configureFlags = [ "--hsc2hs-option=--cflag=-Wno-int-conversion" ];
+            # This fix seems fairly fishy; but somehow it's required to make this work :confused_parrot:
+            packages.unix-compat.postPatch = ''
+              sed -i 's/msvcrt//g' unix-compat.cabal
+            '';
+            packages.unix-time.postPatch = ''
+              sed -i 's/mingwex//g' unix-time.cabal
+            '';
+            #packages.plutus-core.components.library.preBuild = ''
+            #  export ISERV_ARGS="-v +RTS -Dl"
+            #  export PROXY_ARGS=-v
+            #'';
+
+          })
+          ({ lib, pkgs, config, ... }: lib.mkIf (builtins.compareVersions config.compiler.version "9.4" >= 0) {
+            # lib:ghc is a bit annoying in that it comes with it's own build-type:Custom, and then tries
+            # to call out to all kinds of silly tools that GHC doesn't really provide.
+            # For this reason, we try to get away without re-installing lib:ghc for now.
+            reinstallableLibGhc = false;
+          })
+          ({ lib, pkgs, ... }: {
+            # Needed for the CLI tests.
+            # Coreutils because we need 'paste'.
+            packages.cardano-testnet.components.tests.cardano-testnet-tests.build-tools =
+              lib.mkForce (with pkgs.buildPackages; [ jq coreutils shellcheck lsof ]);
+          })
+          ({ lib, pkgs, ... }: {
+            # Use the VRF fork of libsodium
+            packages.cardano-crypto-praos.components.library.pkgconfig = lib.mkForce [ [ pkgs.libsodium-vrf ] ];
+            packages.cardano-crypto-class.components.library.pkgconfig = lib.mkForce [ [ pkgs.libsodium-vrf pkgs.secp256k1 pkgs.libblst ] ];
+          })
+          ({ lib, pkgs, ... }:
+          let postInstall = exeName: ''
+              BASH_COMPLETIONS=$out/share/bash-completion/completions
+              ZSH_COMPLETIONS=$out/share/zsh/site-functions
+              mkdir -p $BASH_COMPLETIONS $ZSH_COMPLETIONS
+              $out/bin/${exeName} --bash-completion-script ${exeName} > $BASH_COMPLETIONS/${exeName}
+              $out/bin/${exeName} --zsh-completion-script ${exeName} > $ZSH_COMPLETIONS/_${exeName}
+            '';
+          in lib.mkIf (!pkgs.stdenv.hostPlatform.isWindows)
+          {
+            # add shell completion:
+            packages.cardano-node.components.exes.cardano-node.postInstall = postInstall "cardano-node";
+            packages.cardano-cli.components.exes.cardano-cli.postInstall = postInstall "cardano-cli";
+            packages.cardano-submit-api.components.exes.cardano-submit-api.postInstall = postInstall "cardano-submit-api";
+            packages.cardano-tracer.components.exes.cardano-tracer.postInstall = postInstall "cardano-tracer";
+          })
+          ({ lib, pkgs, config, ... }:
+            let
+              exportCliPath = "export CARDANO_CLI=${config.hsPkgs.cardano-cli.components.exes.cardano-cli}/bin/cardano-cli${pkgs.stdenv.hostPlatform.extensions.executable}";
+              exportNodePath = "export CARDANO_NODE=${config.hsPkgs.cardano-node.components.exes.cardano-node}/bin/cardano-node${pkgs.stdenv.hostPlatform.extensions.executable}";
+              exportSubmitApiPath = "export CARDANO_SUBMIT_API=${config.hsPkgs.cardano-submit-api.components.exes.cardano-submit-api}/bin/cardano-submit-api${pkgs.stdenv.hostPlatform.extensions.executable}";
+              exportTracerPath = "export CARDANO_TRACER=${config.hsPkgs.cardano-tracer.components.exes.cardano-tracer}/bin/cardano-tracer${pkgs.stdenv.hostPlatform.extensions.executable}";
+              exportChairmanPath = "export CARDANO_NODE_CHAIRMAN=${config.hsPkgs.cardano-node-chairman.components.exes.cardano-node-chairman}/bin/cardano-node-chairman${pkgs.stdenv.hostPlatform.extensions.executable}";
+              mainnetConfigFiles = [
+                "configuration/cardano/mainnet-config.yaml"
+                "configuration/cardano/mainnet-config.json"
+                "configuration/cardano/mainnet-byron-genesis.json"
+                "configuration/cardano/mainnet-shelley-genesis.json"
+                "configuration/cardano/mainnet-alonzo-genesis.json"
+                "configuration/cardano/mainnet-conway-genesis.json"
+              ];
+              cardanoTestnetGoldenFiles = [
+                "configuration/defaults/byron-mainnet"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/node_default_config.json"
+                "cardano-testnet/test/cardano-testnet-test/files/golden/tx.failed.response.json.golden"
+                "cardano-testnet/test/cardano-testnet-test/files/input/sample-constitution.txt"
+                "cardano-testnet/files/data/alonzo/genesis.alonzo.spec.json"
+                "cardano-testnet/files/data/conway/genesis.conway.spec.json"
+              ];
+            in
+            {
+              # split data output for ekg to reduce closure size
+              package-keys = ["ekg"];
+              packages.ekg.components.library.enableSeparateDataOutput = true;
+              packages.cardano-node-chairman.components.tests.chairman-tests.build-tools =
+                lib.mkForce [
+                  pkgs.lsof
+                  config.hsPkgs.cardano-node.components.exes.cardano-node
+                  config.hsPkgs.cardano-cli.components.exes.cardano-cli
+                  config.hsPkgs.cardano-node-chairman.components.exes.cardano-node-chairman
+                ];
+              # cardano-node-chairman depends on cardano-node and cardano-cli, and some config files
+              packages.cardano-node-chairman.preCheck =
+                let
+                  # This define files included in the directory that will be passed to `H.getProjectBase` for this test:
+                  filteredProjectBase = incl ../. cardanoTestnetGoldenFiles;
+                in
+                # work around 104 chars socket path limit by using a different temporary directory
+                ''
+                  ${exportCliPath}
+                  ${exportNodePath}
+                  ${exportChairmanPath}
+                  export CARDANO_NODE_SRC=${filteredProjectBase}
+                  # unset TMPDIR, otherwise mktemp will use that as a base
+                  unset TMPDIR
+                  export TMPDIR=$(mktemp -d)
+                  export TMP=$TMPDIR
+                '';
+              # cardano-testnet depends on cardano-node, cardano-cli, cardano-submit-api and some config files
+              packages.cardano-node.components.tests.cardano-node-test.preCheck =
+                let
+                  # This define files included in the directory that will be passed to `H.getProjectBase` for this test:
+                  filteredProjectBase = incl ../. mainnetConfigFiles;
+                in
+                ''
+                  export CARDANO_NODE_SRC=${filteredProjectBase}
+                '';
+              packages.cardano-testnet.preCheck =
+                let
+                  # This define files included in the directory that will be passed to `H.getProjectBase` for this test:
+                  filteredProjectBase = incl ../. (mainnetConfigFiles ++ cardanoTestnetGoldenFiles ++ [
+                    "configuration/cardano/mainnet-topology.json"
+                    "configuration/cardano/mainnet-conway-genesis.json"
+                    "scripts/babbage/alonzo-babbage-test-genesis.json"
+                    "scripts/babbage/conway-babbage-test-genesis.json"
+                  ]);
+                in
+                ''
+                  ${exportCliPath}
+                  ${exportNodePath}
+                  ${exportSubmitApiPath}
+                  ${exportTracerPath}
+                  export CARDANO_NODE_SRC=${filteredProjectBase}
+                ''
+                # the cardano-testnet-tests and chairman-tests, use sockets stored in a temporary directory
+                # however on macOS the socket path's max is 104 chars. The package name
+                # is already long, and as such the constructed socket path
+                #
+                #   /private/tmp/nix-build-cardano-testnet-test-cardano-testnet-tests-1.36.0-check.drv-1/chairman-test-93c5d9288dd8e6bc/socket/node-bft1
+                #
+                # exceeds that limit easily. We therefore set a different tmp directory
+                # during the preBuild phase.
+                + ''
+                  # unset TMPDIR, otherwise mktemp will use that as a base
+                  unset TMPDIR
+                  export TMPDIR=$(mktemp -d)
+                  export TMP=$TMPDIR
+                '' + (if pkgs.stdenv.hostPlatform.isDarwin
+                     then ''
+                  export PATH=${macOS-security}/bin:$PATH
+                          ''
+                     else '''');
+              packages.cardano-testnet.components.tests.cardano-testnet-golden.preCheck =
+                let
+                  # This define files included in the directory that will be passed to `H.getProjectBase` for this test:
+                  filteredProjectBase = incl ../. cardanoTestnetGoldenFiles;
+                in
+                ''
+                  ${exportCliPath}
+                  export CARDANO_TESTNET=${config.hsPkgs.cardano-testnet.components.exes.cardano-testnet}/bin/cardano-testnet${pkgs.stdenv.hostPlatform.extensions.executable}
+                  export CARDANO_NODE_SRC=${filteredProjectBase}
+                '';
+              # cardano-tracer-test-ext, will default to /tmp/testTracerExt, which means
+              # if this test is run in parallel, things will just hang; or break.
+              packages.cardano-tracer.components.tests.cardano-tracer-test-ext.preCheck = ''
+                  # unset TMPDIR, otherwise mktemp will use that as a base
+                  unset TMPDIR
+                  export TMPDIR=$(mktemp -d)
+                  export TMP=$TMPDIR
+                  mkdir $TMP/testTracerExt
+                  # workaround the broken --workdir argument parser.
+                  # (it doesn't properly strip args before passing them to tasty;
+                  # also needs them to be quoted)
+                  export WORKDIR=$TMP/testTracerExt
+              '';
+          })
+          ({pkgs, ...}: {
+              packages.proto-lens-protobuf-types.components.library.build-tools = [ pkgs.buildPackages.protobuf ];
+              packages.cardano-rpc.components.library.build-tools = [ pkgs.buildPackages.protobuf ];
+          })
+          ({ lib, pkgs, ... }: lib.mkIf (!pkgs.stdenv.hostPlatform.isDarwin && !pkgs.stdenv.hostPlatform.isMusl) {
+            # Needed for profiled builds to fix an issue loading recursion-schemes part of makeBaseFunctor
+            # that is missing from the `_p` output.  See https://gitlab.haskell.org/ghc/ghc/-/issues/18320
+            # This work around currently breaks regular builds on macOS with:
+            # <no location info>: error: ghc: ghc-iserv terminated (-11)
+            # Excluded for musl: ghc-iserv (musl binary) crashes with SIGILL on musl targets.
+            # Musl builds are same-arch cross-compiles so GHC can run TH in-process (glibc) instead.
+            packages.plutus-core.components.library.ghcOptions = [ "-fexternal-interpreter" ];
+          })
+          ({ config, lib, ... }@args: {
+            options.packages = lib.genAttrs config.package-keys (_:
+              lib.mkOption {
+                type = lib.types.submodule (
+                  { config, lib, ... }:
+                  lib.mkIf config.package.isLocal
+                  {
+                    configureFlags = [ "--ghc-option=-Werror"]
+                      ++ lib.optional (args.config.compiler.version == "8.10.7") "--ghc-option=-Wwarn=unused-packages";
+                  }
+                );
+              });
+          })
+          # disable haddock
+          # Musl libc fully static build
+          ({ config, lib, ... }: {
+            options.packages = lib.genAttrs config.package-keys (_:
+              lib.mkOption {
+                type = lib.types.submodule (
+                  { config, lib, pkgs, ...}:
+                  lib.mkIf (pkgs.stdenv.hostPlatform.isMusl && config.package.isLocal)
+                  {
+                    # Module options which adds GHC flags and libraries for a fully static build
+                    enableShared = true; # TH code breaks if this is false.
+                    enableStatic = true;
+                  }
+                );
+              });
+            config =
+              lib.mkIf pkgs.stdenv.hostPlatform.isMusl
+              {
+                # Haddock not working and not needed for cross builds
+                doHaddock = false;
+              };
+          })
+          ({ lib, pkgs, ... }: lib.mkIf (pkgs.stdenv.hostPlatform != pkgs.stdenv.buildPlatform) {
+            # TODO: error: The option `packages.Win32' does not exist.
+            #   packages.Win32.components.library.build-tools = lib.mkForce [ ];
+            packages.terminal-size.components.library.build-tools = lib.mkForce [ ];
+            packages.network.components.library.build-tools = lib.mkForce [ ];
+          })
+          # TODO add flags to packages (like cs-ledger) so we can turn off tests that will
+          # not build for windows on a per package bases (rather than using --disable-tests).
+          # configureArgs = lib.optionalString stdenv.hostPlatform.isWindows "--disable-tests";
+        ];
+    });
+in
+project.appendOverlays (with haskellLib.projectOverlays; [
+  projectComponents
+  (final: prev:
+    let inherit (final.pkgs) lib; in {
+      profiled = final.appendModule {
+        modules = [{
+          enableLibraryProfiling = true;
+          packages.cardano-node.components.exes.cardano-node.enableProfiling = true;
+          packages.tx-generator.components.exes.tx-generator.enableProfiling = true;
+          packages.locli.components.exes.locli.enableProfiling = true;
+        }
+        {
+          packages = final.pkgs.lib.genAttrs
+            [ "cardano-node"
+              "cardano-tracer"
+              "trace-forward"
+              "trace-resources"
+            ]
+            (name: { configureFlags = [ "--ghc-option=-fprof-auto" ]; });
+        }];
+      };
+      asserted = final.appendModule {
+        modules = [{
+          packages = lib.genAttrs [
+            "ouroboros-consensus"
+            "ouroboros-network"
+            "network-mux"
+          ]
+            (name: { flags.asserts = true; });
+        }];
+      };
+      # Used by the "Haddock documentation" workflow through devShells.haddock
+      # (see flake.nix): a compiler recent enough to avoid the `type data`
+      # haddock panic worked around above. Hoogle is not needed there and would
+      # be built with the alternative compiler.
+      haddocked = final.appendModule {
+        compiler-nix-name = "ghc9124";
+        shell.withHoogle = lib.mkForce false;
+        shell.tools = lib.mkForce {};
+      };
+      # add passthru to hsPkgs:
+      hsPkgs = lib.mapAttrsRecursiveCond (v: !(lib.isDerivation v))
+        (path: value:
+          if (lib.isAttrs value) then
+            lib.recursiveUpdate
+              value
+              {
+                # Also add convenient passthru to some alternative compilation configurations:
+                passthru = {
+                  profiled = lib.getAttrFromPath path final.profiled.hsPkgs;
+                  asserted = lib.getAttrFromPath path final.asserted.hsPkgs;
+                };
+              }
+          else value)
+        prev.hsPkgs;
+    })
+])

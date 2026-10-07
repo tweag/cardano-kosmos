@@ -1,0 +1,36 @@
+# Cardano-submit-api tracing configuration.
+#
+# Read as either YAML or JSON.  This is equivalent to the per-network
+# share/<network>/submit-api-config.json shipped in the release tarball, and to
+# cardanoLib.defaultSubmitApiConfig in iohk-nix.
+
+# Prefix applied to submit-api prometheus metric names.  Remove this key for
+# unprefixed metric names.
+TraceOptionMetricsPrefix: "cardano.submit.api.metrics."
+
+TraceOptions:
+  # The namespace root.  Submit-api emits a small, fixed set of namespaces under
+  # `TxSubmitApi`, all with sensible built-in severities, so none are overridden
+  # here.
+  "":
+    backends:
+      # Forwarder and PrometheusSimple backends are not available for
+      # submit-api.
+      - EKGBackend
+
+      # Only one of the following can be enabled, which determines the format of
+      # submit-api logging to stdout.
+      - Stdout HumanFormatColoured
+      # - Stdout HumanFormatUncoloured
+      # - Stdout MachineFormat
+
+    # One of `DMinimal`, `DNormal`, `DDetailed` or `DMaximum`.
+    detail: DNormal
+
+    # Messages below this severity are dropped.  From least to most severe:
+    # `Debug`, `Info`, `Notice`, `Warning`, `Error`, `Critical`, `Alert` and
+    # `Emergency`, plus `Silence` to disable a tracer unconditionally.
+    #
+    # `Info` retains the per-transaction submit traces; `Notice` drops those and
+    # everything else emitted on a healthy run.
+    severity: Info

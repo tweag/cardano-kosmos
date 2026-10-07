@@ -1,0 +1,91 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Test.Golden.CreateStaked where
+
+import Cardano.Api
+import Cardano.Api.Ledger (StrictMaybe (..))
+
+import Cardano.Ledger.Shelley.Genesis (ShelleyExtraConfig (..))
+
+import Control.Monad (void)
+import Data.Aeson qualified as Aeson
+import Data.ByteString.Lazy qualified as LBS
+import Data.List (intercalate, sort)
+import System.Directory
+import System.FilePath
+
+import Test.Cardano.CLI.Util (execCardanoCLI, watchdogProp)
+
+import Hedgehog (Property)
+import Hedgehog qualified as H
+import Hedgehog.Extras (moduleWorkspace, propertyOnce)
+import Hedgehog.Extras qualified as H
+import Test.Golden.Genesis.Common (injectionToList, tree)
+
+hprop_golden_create_staked :: Property
+hprop_golden_create_staked =
+  watchdogProp . propertyOnce $ moduleWorkspace "tmp" $ \tempDir -> do
+    let alonzo = "genesis.alonzo.spec.json"
+        conway = "genesis.conway.spec.json"
+        networkMagic = 42
+        numPools = 4
+        numStake = 8
+
+    liftIO $ copyFile ("test/cardano-cli-golden/files/input/alonzo/" <> alonzo) (tempDir </> alonzo)
+    liftIO $ copyFile ("test/cardano-cli-golden/files/input/conway/" <> conway) (tempDir </> conway)
+
+    void $ H.note (tempDir </> alonzo)
+    void $ H.note (tempDir </> conway)
+
+    void $
+      execCardanoCLI
+        [ "conway"
+        , "genesis"
+        , "create-staked"
+        , "--gen-genesis-keys"
+        , "2"
+        , "--gen-pools"
+        , show numPools
+        , "--gen-utxo-keys"
+        , "3"
+        , "--gen-stake-delegs"
+        , show numStake
+        , "--supply"
+        , "1000000000000"
+        , "--supply-delegated"
+        , "1000000000000"
+        , "--testnet-magic"
+        , show networkMagic
+        , "--bulk-pool-cred-files"
+        , "2"
+        , "--bulk-pools-per-file"
+        , "2"
+        , "--num-stuffed-utxo"
+        , "7"
+        , "--genesis-dir"
+        , tempDir
+        ]
+
+    generated <- liftIO $ tree tempDir
+    -- Sort output for stability, and make relative to avoid storing
+    -- a path that changes everytime (/tmp/nix-shell.[0-9]+/tmp-Test...)
+    let generated' = intercalate "\n" $ sort $ map (makeRelative tempDir) generated
+        -- On Windows, the path separator is backslash. Normalize it to slash, like on Unix
+        -- so that this test can run on all platforms.
+        generated'' = map (\c -> if c == '\\' then '/' else c) generated'
+    void $ H.note generated''
+
+    H.diffVsGoldenFile generated'' "test/cardano-cli-golden/files/golden/conway/create-staked.out"
+
+    bs <- liftIO $ LBS.readFile $ tempDir </> "genesis.json"
+    genesis :: ShelleyGenesis <- Aeson.throwDecode bs
+
+    H.assert (sgNetworkMagic genesis == networkMagic)
+
+    extraConfig <- case sgExtraConfig genesis of
+      SJust ec -> pure ec
+      SNothing -> H.failure
+    stakePools <- injectionToList (secStakePools extraConfig)
+    H.assert (length stakePools == numPools)
+    stakeCredentials <- injectionToList (secStakeCredentials extraConfig)
+    H.assert (length stakeCredentials == numStake)

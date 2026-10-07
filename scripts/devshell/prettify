@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+
+# Function to display help message
+show_help() {
+    cat <<EOF
+Usage: $(basename "$0") <OPTION|FILES>
+Format Haskell source files using fourmolu.
+
+Files with 'no-prettify' git attribute are skipped, even when explicitly asked to prettify.
+
+Options:
+  -t, --tracked           Format all tracked Haskell (*.hs) files in the repository
+  -s, --staged            Format all staged Haskell (*.hs) files
+  -m, --modified          Format all modified Haskell (*.hs) files, including staged and unstaged
+  -n, --not-staged        Format all non-staged modified Haskell (*.hs) files
+  -p, --previous-commit   Format all Haskell (*.hs) files modified before the last commit (HEAD~1)
+  -h, --help              Show this help message
+EOF
+}
+
+# https://no-color.org/
+if [[ -z "$NO_COLOR" ]]; then
+  green_colour="\033[0;32m"
+  blue_colour="\033[0;34m"
+  orange_colour="\033[0;33m"
+  red_colour="\033[0;31m"
+  reset_colour="\033[0m"
+else
+  green_colour=""
+  blue_colour=""
+  orange_colour=""
+  red_colour=""
+  reset_colour=""
+fi
+
+# Function to run the formatting commands
+run_format() {
+    top_level=$(git rev-parse --show-toplevel)
+    for file in "$@"; do
+        if [[ $file == *.hs ]]; then
+            relative_path=$(realpath --relative-to="$top_level" "$file")
+            if grep -qE '^#' "$top_level/$relative_path"; then
+              echo -e "${orange_colour}${relative_path} contains CPP. Skipping.${reset_colour}"
+            else
+              echo -e "${green_colour}Formatting: ${blue_colour}${relative_path}${reset_colour}"
+              fourmolu -q -i "$top_level/$relative_path"
+              fourmolu -q -i "$top_level/$relative_path"
+            fi
+        fi
+    done
+}
+
+flag_passed="true"
+
+# Parse command line arguments
+case $1 in
+    -t|--tracked)
+        files=$(git ls-files '*.hs')
+        ;;
+    -s|--staged)
+        files=$(git diff --cached --name-only --diff-filter=ACM '*.hs')
+        ;;
+    -m|--modified)
+        files=$(git diff --name-only --diff-filter=ACM HEAD '*.hs')
+        ;;
+    -n|--not-staged)
+        files=$(git diff --name-only --diff-filter=ACM '*.hs')
+        ;;
+    -p|--previous-commit)
+        files=$(git diff --name-only --diff-filter=ACM HEAD~1 '*.hs')
+        ;;
+    -h|--help)
+        show_help
+        exit 0
+        ;;
+    *)
+        files="$@"
+        flag_passed="false"
+        ;;
+esac
+
+# skip files with no-prettify git attribute
+files=$(echo "$files" | while read -r file; do
+    git check-attr no-prettify "$file" | grep -q "no-prettify: set" && echo -e "${orange_colour}Skipping: ${file}${reset_colour}" >&2 || echo "$file"
+done)
+
+
+if [[ $flag_passed == "true" ]] && [[ $# -gt 1 ]]; then
+  echo -e "${red_colour}ERROR: only one flag is allowed! $reset_colour"
+  echo -e
+  show_help
+  exit 1
+fi
+
+for file in $files; do
+  if [[ ! -a $file ]]; then
+    echo -e "${red_colour}ERROR: $file does not exist $reset_colour"
+    exit 1
+  elif ! [[ -f $file ]]; then
+    echo "ERROR: $file is not a regular file"
+    exit
+  fi
+done
+
+for tool in fourmolu
+do
+  if ! (which $tool > /dev/null 2>&1); then
+    echo -e "${red_colour}ERROR: $tool is not available! $reset_colour"
+    echo -e
+    echo "Try entering the development shell with:"
+    echo "  nix develop"
+    exit 1
+  fi
+done
+
+if [[ -z $files ]]; then
+    echo -e "${red_colour}No files to format! $reset_colour"
+    if [[ -z $1 ]]; then
+      echo -e
+      show_help
+      exit 1
+    fi
+fi
+
+run_format $files
+

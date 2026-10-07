@@ -1,0 +1,9 @@
+project: cardano-cli
+
+pr: 1453
+
+kind:
+  - maintenance
+
+description: |
+  Pin cardano-api to master, which carries the merged sub-transaction support (cardano-api#1361) on top of the 11.2 dependency set, and adapt to the API changes it brings in: getKesPeriod now returns the KESPeriod newtype and textEnvelopeType is a standalone function rather than a HasTextEnvelope method.

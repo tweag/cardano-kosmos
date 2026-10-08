@@ -25,3 +25,14 @@ cabal.project.local~
 result
 result-*
 .direnv/
+
+#testnet
+devenv
+devnet-env
+local-config
+process-compose.log
+
+### Victoria Metrics ###
+victoria-metrics-data/
+victoria-logs-data/
+

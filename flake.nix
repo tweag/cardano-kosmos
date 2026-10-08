@@ -179,8 +179,22 @@
         shell = import ./shell.nix {inherit pkgs customConfig;};
       in
         {
-          inherit (shell) devops workbench-shell;
-          default = shell.dev;
+          default = shell.dev.overrideAttrs (attrs: {
+            nativeBuildInputs = (attrs.nativeBuildInputs or []) ++ [
+              pkgs.process-compose
+              pkgs.curl
+              pkgs.bash
+              pkgs.git
+              pkgs.which
+              pkgs.xxd
+              pkgs.jq
+              pkgs.toxiproxy
+              pkgs.gnused
+              pkgs.victoriametrics
+              pkgs.victorialogs
+              pkgs.vlagent
+            ];
+          });
           cluster = shell;
           profiled = project.profiled.shell;
         }

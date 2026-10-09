@@ -290,6 +290,22 @@
         "type": "github"
       }
     },
+    "freshNixpkgs": {
+      "locked": {
+        "lastModified": 1791456040,
+        "narHash": "sha256-H83yz/do+hjOO0uujHyH8RgtIQP2v7Mw+cLwcZK/xKc=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "e7439b6b14ad3cc35d05608ebca9bce01a25f5f8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "hackage": {
       "flake": false,
       "locked": {
@@ -1355,22 +1371,6 @@
         "type": "github"
       }
     },
-    "nixpkgsForTools": {
-      "locked": {
-        "lastModified": 1791456040,
-        "narHash": "sha256-H83yz/do+hjOO0uujHyH8RgtIQP2v7Mw+cLwcZK/xKc=",
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "e7439b6b14ad3cc35d05608ebca9bce01a25f5f8",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nixos",
-        "ref": "nixos-unstable",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "old-ghc-nix": {
       "flake": false,
       "locked": {
@@ -1412,6 +1412,7 @@
         "customConfig": "customConfig",
         "empty-flake": "empty-flake",
         "flake-compat": "flake-compat_2",
+        "freshNixpkgs": "freshNixpkgs",
         "hackageNix": "hackageNix",
         "haskellNix": "haskellNix_2",
         "incl": "incl",
@@ -1420,7 +1421,6 @@
           "haskellNix",
           "nixpkgs-unstable"
         ],
-        "nixpkgsForTools": "nixpkgsForTools",
         "utils": "utils_2"
       }
     },

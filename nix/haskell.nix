@@ -68,7 +68,7 @@ let
           stylish-haskell
         ];
 
-        withHoogle = true;
+        withHoogle = false;
 
         # https://github.com/channable/alfred-margaret/pull/76
         tools.hoogle = {

@@ -55,6 +55,28 @@ packages:
   packages/cardano-node/bench/trace-schemas/scripts/schema-gen
   packages/cardano-node/trace-forward
 
+  packages/cardano-ledger/eras/allegra/impl
+  packages/cardano-ledger/eras/alonzo/impl
+  packages/cardano-ledger/eras/babbage/impl
+  packages/cardano-ledger/eras/conway/impl
+  packages/cardano-ledger/eras/dijkstra/impl
+  packages/cardano-ledger/eras/mary/impl
+  packages/cardano-ledger/eras/shelley/impl
+  packages/cardano-ledger/libs/cardano-ledger-api
+  packages/cardano-ledger/libs/cardano-ledger-binary
+  -- Breaks nix develop at the moment
+  -- packages/cardano-ledger/libs/cardano-ledger-canonical-state
+  packages/cardano-ledger/libs/cardano-ledger-core
+  packages/cardano-ledger/libs/cardano-protocol
+  packages/cardano-ledger/libs/cardano-protocol-tpraos
+  packages/cardano-ledger/libs/non-integral
+  packages/cardano-ledger/libs/small-steps
+  packages/cardano-ledger/libs/cardano-data
+  packages/cardano-ledger/libs/vector-map
+  packages/cardano-ledger/eras/byron/ledger/impl
+  packages/cardano-ledger/eras/byron/crypto
+  packages/cardano-ledger/libs/ledger-state
+
   packages/cardano-cli/cardano-cli
 
   packages/cardano-api/cardano-api
@@ -62,7 +84,6 @@ packages:
 
   packages/ouroboros-consensus
   packages/ouroboros-network/ouroboros-network
-
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node

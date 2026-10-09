@@ -35,4 +35,5 @@ process-compose.log
 ### Victoria Metrics ###
 victoria-metrics-data/
 victoria-logs-data/
-
+vlagent-remotewrite-data/
+vlagent-file-checkpoints.json

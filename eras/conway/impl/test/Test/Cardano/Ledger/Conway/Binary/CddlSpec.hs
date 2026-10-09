@@ -1,0 +1,155 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Test.Cardano.Ledger.Conway.Binary.CddlSpec (spec) where
+
+import Cardano.Ledger.Allegra.Scripts
+import Cardano.Ledger.Alonzo.Scripts (CostModels)
+import Cardano.Ledger.Alonzo.TxWits (Redeemers)
+import Cardano.Ledger.Block (Block (Block))
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Governance (GovAction, ProposalProcedure, VotingProcedure)
+import Cardano.Ledger.Conway.HuddleSpec (conwayCDDL)
+import Cardano.Ledger.Core
+import Cardano.Ledger.Plutus.Data (Data, Datum)
+import Cardano.Protocol.Crypto (StandardCrypto)
+import qualified Cardano.Protocol.Praos.BlockHeader as Praos
+import Test.Cardano.Ledger.Alonzo.Arbitrary (genNonEmptyRedeemers)
+import Test.Cardano.Ledger.Binary.Cuddle (
+  huddleAntiCborSpec,
+  huddleDecoderEquivalenceSpec,
+  huddleRoundTripAnnCborSpec,
+  huddleRoundTripArbitraryValidate,
+  huddleRoundTripCborSpec,
+  huddleRoundTripGenValidate,
+  noTwiddle,
+  specWithHuddle,
+ )
+import Test.Cardano.Ledger.Common
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Conway.Binary.Annotator ()
+import Test.Cardano.Ledger.Core.Arbitrary (genEraProtVer)
+import Test.Cardano.Protocol.Praos.BlockHeader.Arbitrary ()
+
+genPraosHeader :: Gen (Praos.Header StandardCrypto)
+genPraosHeader = do
+  h <- arbitrary
+  pv <- genEraProtVer @ConwayEra
+  pure $ Praos.Header ((Praos.headerBody h) {Praos.hbProtVer = pv}) (Praos.headerSig h)
+
+genPraosHeaderBody :: Gen (Praos.HeaderBody StandardCrypto)
+genPraosHeaderBody = do
+  hb <- arbitrary
+  pv <- genEraProtVer @ConwayEra
+  pure hb {Praos.hbProtVer = pv}
+
+genPraosBlock :: Gen (Block (Praos.Header StandardCrypto) ConwayEra)
+genPraosBlock = Block <$> genPraosHeader <*> scale (`div` 2) arbitrary
+
+spec :: Spec
+spec = do
+  describe "CDDL" $ do
+    let v = eraProtVerHigh @ConwayEra
+    describe "Huddle" $ specWithHuddle conwayCDDL . noTwiddle $ do
+      -- Value
+      huddleRoundTripCborSpec @(Value ConwayEra) v "positive_coin"
+      huddleRoundTripArbitraryValidate @(Value ConwayEra) v "value"
+      huddleRoundTripCborSpec @(Value ConwayEra) v "value"
+      huddleAntiCborSpec @(Value ConwayEra) v "value"
+      -- TxBody
+      huddleRoundTripAnnCborSpec @(TxBody TopTx ConwayEra) v "transaction_body"
+      huddleRoundTripCborSpec @(TxBody TopTx ConwayEra) v "transaction_body"
+      xdescribe "fix problems with fields" $ do
+        huddleRoundTripArbitraryValidate @(TxBody TopTx ConwayEra) v "transaction_body"
+        huddleAntiCborSpec @(TxBody TopTx ConwayEra) v "transaction_body"
+      -- AuxData
+      huddleRoundTripAnnCborSpec @(TxAuxData ConwayEra) v "auxiliary_data"
+      huddleRoundTripCborSpec @(TxAuxData ConwayEra) v "auxiliary_data"
+      huddleRoundTripArbitraryValidate @(TxAuxData ConwayEra) v "auxiliary_data"
+      huddleAntiCborSpec @(TxAuxData ConwayEra) v "auxiliary_data"
+      -- NativeScript
+      huddleRoundTripAnnCborSpec @(Timelock ConwayEra) v "native_script"
+      huddleRoundTripArbitraryValidate @(Timelock ConwayEra) v "native_script"
+      huddleRoundTripCborSpec @(Timelock ConwayEra) v "native_script"
+      huddleAntiCborSpec @(Timelock ConwayEra) v "native_script"
+      -- Data
+      huddleRoundTripAnnCborSpec @(Data ConwayEra) v "plutus_data"
+      huddleRoundTripArbitraryValidate @(Data ConwayEra) v "plutus_data"
+      huddleRoundTripCborSpec @(Data ConwayEra) v "plutus_data"
+      huddleAntiCborSpec @(Data ConwayEra) v "plutus_data"
+      -- TxOut
+      huddleRoundTripCborSpec @(TxOut ConwayEra) v "transaction_output"
+      huddleRoundTripArbitraryValidate @(TxOut ConwayEra) v "transaction_output"
+      huddleAntiCborSpec @(TxOut ConwayEra) v "transaction_output"
+      -- Script
+      huddleRoundTripAnnCborSpec @(Script ConwayEra) v "script"
+      huddleRoundTripArbitraryValidate @(Script ConwayEra) v "script"
+      huddleRoundTripCborSpec @(Script ConwayEra) v "script"
+      huddleAntiCborSpec @(Script ConwayEra) v "script"
+      -- Datum
+      huddleRoundTripCborSpec @(Datum ConwayEra) v "datum_option"
+      huddleAntiCborSpec @(Datum ConwayEra) v "datum_option"
+      -- TODO NoDatum is encoded as an empty bytestring
+      xdescribe "fix NoDatum" $ huddleRoundTripArbitraryValidate @(Datum ConwayEra) v "datum_option"
+      -- TxWits
+      huddleRoundTripAnnCborSpec @(TxWits ConwayEra) v "transaction_witness_set"
+      huddleAntiCborSpec @(TxWits ConwayEra) v "transaction_witness_set"
+      huddleRoundTripArbitraryValidate @(TxWits ConwayEra) v "transaction_witness_set"
+      huddleRoundTripCborSpec @(TxWits ConwayEra) v "transaction_witness_set"
+      -- PParamsUpdate
+      huddleRoundTripCborSpec @(PParamsUpdate ConwayEra) v "protocol_param_update"
+      huddleRoundTripArbitraryValidate @(PParamsUpdate ConwayEra) v "protocol_param_update"
+      xdescribe "fix protocol_param_update" $
+        huddleAntiCborSpec @(PParamsUpdate ConwayEra) v "protocol_param_update"
+      -- CostModels
+      huddleRoundTripCborSpec @CostModels v "cost_models"
+      huddleRoundTripArbitraryValidate @CostModels v "cost_models"
+      -- Redeemers
+      huddleRoundTripAnnCborSpec @(Redeemers ConwayEra) v "redeemers"
+      huddleRoundTripGenValidate @(Redeemers ConwayEra) genNonEmptyRedeemers v "redeemers"
+      huddleRoundTripCborSpec @(Redeemers ConwayEra) v "redeemers"
+      huddleAntiCborSpec @(Redeemers ConwayEra) v "redeemers"
+      -- Tx
+      huddleRoundTripAnnCborSpec @(Tx TopTx ConwayEra) v "transaction"
+      huddleRoundTripCborSpec @(Tx TopTx ConwayEra) v "transaction"
+      xdescribe "fix txbody" $ do
+        huddleRoundTripArbitraryValidate @(Tx TopTx ConwayEra) v "transaction"
+        huddleAntiCborSpec @(Tx TopTx ConwayEra) v "transaction"
+      -- VotingProcedure
+      huddleRoundTripCborSpec @(VotingProcedure ConwayEra) v "voting_procedure"
+      huddleRoundTripArbitraryValidate @(VotingProcedure ConwayEra) v "voting_procedure"
+      huddleAntiCborSpec @(VotingProcedure ConwayEra) v "voting_procedure"
+      -- ProposalProcedure
+      huddleRoundTripCborSpec @(ProposalProcedure ConwayEra) v "proposal_procedure"
+      huddleRoundTripArbitraryValidate @(ProposalProcedure ConwayEra) v "proposal_procedure"
+      xdescribe "fix protver decoder" $
+        huddleAntiCborSpec @(ProposalProcedure ConwayEra) v "proposal_procedure"
+      -- GovAction
+      huddleRoundTripCborSpec @(GovAction ConwayEra) v "gov_action"
+      huddleRoundTripArbitraryValidate @(GovAction ConwayEra) v "gov_action"
+      xdescribe "fix protver decoder" $
+        huddleAntiCborSpec @(GovAction ConwayEra) v "gov_action"
+      -- TxCert
+      huddleRoundTripCborSpec @(TxCert ConwayEra) v "certificate"
+      huddleRoundTripArbitraryValidate @(TxCert ConwayEra) v "certificate"
+      -- Praos block header
+      huddleRoundTripAnnCborSpec @(Praos.Header StandardCrypto) v "header"
+      huddleRoundTripCborSpec @(Praos.Header StandardCrypto) v "header"
+      huddleRoundTripGenValidate @(Praos.Header StandardCrypto) genPraosHeader v "header"
+      huddleRoundTripCborSpec @(Praos.HeaderBody StandardCrypto) v "header_body"
+      huddleRoundTripGenValidate @(Praos.HeaderBody StandardCrypto) genPraosHeaderBody v "header_body"
+      huddleRoundTripGenValidate @(Block (Praos.Header StandardCrypto) ConwayEra) genPraosBlock v "block"
+      describe "DecCBOR instances equivalence via CDDL" $ do
+        huddleDecoderEquivalenceSpec @(Praos.Header StandardCrypto) v "header"
+        huddleDecoderEquivalenceSpec @(TxBody TopTx ConwayEra) v "transaction_body"
+        huddleDecoderEquivalenceSpec @(TxAuxData ConwayEra) v "auxiliary_data"
+        huddleDecoderEquivalenceSpec @(Timelock ConwayEra) v "native_script"
+        huddleDecoderEquivalenceSpec @(Data ConwayEra) v "plutus_data"
+        huddleDecoderEquivalenceSpec @(Script ConwayEra) v "script"
+        huddleDecoderEquivalenceSpec @(TxWits ConwayEra) v "transaction_witness_set"
+        huddleDecoderEquivalenceSpec @(Redeemers ConwayEra) v "redeemers"
+        huddleDecoderEquivalenceSpec @(Tx TopTx ConwayEra) v "transaction"

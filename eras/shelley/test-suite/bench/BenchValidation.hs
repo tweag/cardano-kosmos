@@ -1,0 +1,202 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module BenchValidation (
+  ValidateInput (..),
+  validateInput,
+  benchValidate,
+  benchreValidate,
+  applyBlock,
+  sizes,
+  UpdateInputs,
+  updateChain,
+  updateAndTickChain,
+  genUpdateInputs,
+) where
+
+import Cardano.Ledger.BaseTypes (Globals (..), unBlocksMade)
+import Cardano.Ledger.Block (Block (..), EraBlockHeader)
+import qualified Cardano.Ledger.Shelley.API as API
+import Cardano.Ledger.Shelley.Bench.Gen (genBlock, genChainState)
+import Cardano.Ledger.Shelley.BlockBody (slotToNonce)
+import Cardano.Ledger.Shelley.Core
+import Cardano.Ledger.Shelley.LedgerState (
+  NewEpochState,
+  StashedAVVMAddresses,
+  nesBcur,
+ )
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Shelley.State
+import Cardano.Protocol.Crypto
+import Cardano.Protocol.TPraos.API (
+  ChainDepState (..),
+  ChainTransitionError,
+  TPraosLedgerView,
+  forecastToTPraosLedgerView,
+  tickChainDepState,
+  updateChainDepState,
+ )
+import Cardano.Protocol.TPraos.BlockHeader (
+  BHeader (..),
+  LastAppliedBlock (..),
+ )
+import Cardano.Protocol.TPraos.Rules.Prtcl (PrtclState (..))
+import Cardano.Protocol.TPraos.Rules.Tickn (TicknState (..))
+import Cardano.Slotting.Slot (withOriginToMaybe)
+import Control.DeepSeq (NFData (rnf))
+import Control.Monad.Except ()
+import Control.State.Transition
+import qualified Data.Map.Strict as Map
+import Data.Proxy
+import Test.Cardano.Ledger.BlockHeader (TestBlockHeader (..), mkTestBlockHeaderNoNonce)
+import Test.Cardano.Ledger.Shelley.ConcreteCryptoTypes (MockCrypto)
+import Test.Cardano.Ledger.Shelley.Constants (defaultConstants)
+import Test.Cardano.Ledger.Shelley.Generator.Core (GenEnv)
+import Test.Cardano.Ledger.Shelley.Generator.EraGen (EraGen, MinLEDGER_STS)
+import Test.Cardano.Ledger.Shelley.Generator.Presets (genEnv)
+import Test.Cardano.Ledger.Shelley.Rules.Chain (ChainState (..))
+import Test.Cardano.Ledger.Shelley.Serialisation.Generators ()
+import Test.Cardano.Ledger.Shelley.Utils (testGlobals)
+import qualified Test.Control.State.Transition.Trace.Generator.QuickCheck as QC
+
+data ValidateInput era = ValidateInput Globals (NewEpochState era) (Block (BHeader MockCrypto) era)
+
+sizes :: ValidateInput era -> String
+sizes (ValidateInput _gs ss _blk) = "blockMap size=" ++ show (Map.size (unBlocksMade (nesBcur ss)))
+
+instance NFData (ValidateInput era) where
+  rnf (ValidateInput a b c) = seq a (seq b (seq c ()))
+
+validateInput ::
+  ( EraGen era
+  , EraStake era
+  , EraRule "LEDGERS" era ~ Shelley.LEDGERS era
+  , QC.HasTrace (Shelley.LEDGERS era) (GenEnv MockCrypto era)
+  , API.ApplyBlock TestBlockHeader era
+  , API.ShelleyEraForecast era
+  , MinLEDGER_STS era
+  , EraBlockHeader (BHeader MockCrypto) era
+  ) =>
+  Int ->
+  IO (ValidateInput era)
+validateInput n = do
+  let ge = genEnv (Proxy :: Proxy era) defaultConstants
+  chainstate <- genChainState n ge
+  block <- genBlock ge chainstate
+  pure (ValidateInput testGlobals (chainNes chainstate) block)
+
+benchValidate ::
+  ( API.ApplyBlock TestBlockHeader era
+  , Show (PredicateFailure (EraRule "BBODY" era))
+  , EraBlockHeader (BHeader MockCrypto) era
+  ) =>
+  ValidateInput era ->
+  IO (NewEpochState era)
+benchValidate (ValidateInput globals state blk@(Block _ txs)) =
+  case API.applyBlockEitherNoEvents ValidateAll globals state (Block (mkTestBlockHeaderNoNonce blk) txs) of
+    Right x -> pure x
+    Left x -> error (show x)
+
+applyBlock ::
+  forall era.
+  ( API.ApplyBlock TestBlockHeader era
+  , NFData (StashedAVVMAddresses era)
+  , NFData (InstantStake era)
+  , GovState era ~ ShelleyGovState era
+  , EraCertState era
+  , Show (PredicateFailure (EraRule "BBODY" era))
+  , EraBlockHeader (BHeader MockCrypto) era
+  ) =>
+  ValidateInput era ->
+  Int ->
+  Int
+applyBlock (ValidateInput globals state blk@(Block _ txs)) n =
+  case API.applyBlockEitherNoEvents ValidateAll globals state (Block (mkTestBlockHeaderNoNonce blk) txs) of
+    Right x -> seq (rnf x) (n + 1)
+    Left x -> error (show x)
+
+benchreValidate ::
+  (API.ApplyBlock TestBlockHeader era, EraBlockHeader (BHeader MockCrypto) era) =>
+  ValidateInput era ->
+  NewEpochState era
+benchreValidate (ValidateInput globals state blk@(Block _ txs)) =
+  API.applyBlockNoValidaton globals state (Block (mkTestBlockHeaderNoNonce blk) txs)
+
+data UpdateInputs
+  = UpdateInputs
+      !Globals
+      !TPraosLedgerView
+      !(BHeader MockCrypto)
+      !ChainDepState
+
+instance Show UpdateInputs where
+  show (UpdateInputs _globals vl bh st) =
+    show vl ++ "\n" ++ show bh ++ "\n" ++ show st
+
+-- TODO: move upstream
+instance Crypto c => NFData (BHeader c) where
+  rnf (BHeader _ _) = ()
+
+instance NFData ChainDepState where
+  rnf (ChainDepState _ _ _) = ()
+
+instance NFData (ChainTransitionError c) where
+  rnf _ = ()
+
+instance NFData UpdateInputs where
+  rnf (UpdateInputs g lv bh st) =
+    seq (rnf g) (seq (rnf lv) (seq (rnf bh) (rnf st)))
+
+genUpdateInputs ::
+  forall era.
+  ( EraGen era
+  , EraStake era
+  , MinLEDGER_STS era
+  , API.ShelleyEraForecast era
+  , EraRule "LEDGERS" era ~ Shelley.LEDGERS era
+  , QC.HasTrace (Shelley.LEDGERS era) (GenEnv MockCrypto era)
+  , API.ApplyBlock TestBlockHeader era
+  , EraBlockHeader (BHeader MockCrypto) era
+  ) =>
+  Int ->
+  IO UpdateInputs
+genUpdateInputs utxoSize = do
+  let ge = genEnv (Proxy :: Proxy era) defaultConstants
+  chainstate <- genChainState utxoSize ge
+  (Block blockheader _) <- genBlock ge chainstate
+  let forecast = API.currentForecast (chainNes chainstate)
+  let (ChainState _newepochState keys eta0 etaV etaC etaH slot) = chainstate
+  let prtclState = PrtclState keys eta0 etaV
+  let ticknState = TicknState etaC etaH
+  let nonce = case withOriginToMaybe slot of
+        Just (LastAppliedBlock _blknum slotnum _hash) -> slotToNonce slotnum
+        Nothing -> error "Empty Slot"
+  pure
+    ( UpdateInputs
+        testGlobals
+        (forecastToTPraosLedgerView forecast)
+        blockheader
+        (ChainDepState prtclState ticknState nonce)
+    )
+
+updateChain ::
+  UpdateInputs ->
+  Either (ChainTransitionError MockCrypto) ChainDepState
+updateChain (UpdateInputs gl lv bh st) = updateChainDepState gl lv bh st
+
+updateAndTickChain ::
+  UpdateInputs ->
+  Either (ChainTransitionError MockCrypto) ChainDepState
+updateAndTickChain (UpdateInputs gl lv bh st) =
+  updateChainDepState gl lv bh $
+    tickChainDepState gl lv True st

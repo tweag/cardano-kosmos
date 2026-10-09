@@ -1,0 +1,74 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Babbage (
+  BabbageEra,
+  BabbageTxOut,
+  TxBody (BabbageTxBody),
+  Tx (..),
+  ApplyTxError (..),
+  AlonzoScript,
+  AlonzoTxAuxData,
+
+  -- * Forecast
+  BabbageForecast (..),
+  mkBabbageForecast,
+  bfPoolDistrL,
+  bfMaxBlockHeaderSizeL,
+  bfMaxBlockBodySizeL,
+  bfProtocolVersionL,
+) where
+
+import Cardano.Ledger.Alonzo (mkAlonzoStAnnTx)
+import Cardano.Ledger.Alonzo.Scripts (AlonzoScript (..))
+import Cardano.Ledger.Alonzo.TxAuxData (AlonzoTxAuxData (..))
+import Cardano.Ledger.Babbage.BlockBody ()
+import Cardano.Ledger.Babbage.Era (BabbageEra)
+import Cardano.Ledger.Babbage.Forecast (
+  BabbageForecast (..),
+  bfMaxBlockBodySizeL,
+  bfMaxBlockHeaderSizeL,
+  bfPoolDistrL,
+  bfProtocolVersionL,
+  mkBabbageForecast,
+ )
+import Cardano.Ledger.Babbage.Rules ()
+import Cardano.Ledger.Babbage.State ()
+import Cardano.Ledger.Babbage.Transition ()
+import Cardano.Ledger.Babbage.Translation ()
+import Cardano.Ledger.Babbage.Tx (Tx (..))
+import Cardano.Ledger.Babbage.TxBody (BabbageTxOut, TxBody (BabbageTxBody))
+import Cardano.Ledger.Babbage.TxInfo ()
+import Cardano.Ledger.Babbage.UTxO ()
+import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
+import Cardano.Ledger.Block (EraBlockHeader, PraosBbodySignal (..), PraosEraBlockHeader)
+import Cardano.Ledger.Shelley.API
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Data.List.NonEmpty (NonEmpty)
+import GHC.Generics (Generic)
+
+instance ApplyTx BabbageEra where
+  newtype ApplyTxError BabbageEra
+    = BabbageApplyTxError (NonEmpty (Shelley.ShelleyLedgerPredFailure BabbageEra))
+    deriving (Eq, Show)
+    deriving newtype (EncCBOR, DecCBOR, Semigroup, Generic)
+
+  mkStAnnTx = mkAlonzoStAnnTx
+
+  internalApplyTxWithValidation = defaultApplyTxWithValidation @"LEDGER" BabbageApplyTxError
+
+  internalReapplyValidatedTx = defaultReapplyValidatedTx @"LEDGER" BabbageApplyTxError
+
+instance ApplyTick BabbageEra
+
+instance (EraBlockHeader h BabbageEra, PraosEraBlockHeader h BabbageEra) => ApplyBlock h BabbageEra where
+  wrapBlockSignal = PraosBbodySignal

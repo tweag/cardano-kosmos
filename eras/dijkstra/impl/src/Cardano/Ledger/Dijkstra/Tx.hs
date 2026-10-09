@@ -1,0 +1,589 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Dijkstra.Tx (
+  DijkstraTx (..),
+  Tx (..),
+  DijkstraEraTx (..),
+  DijkstraStAnnTx (..),
+  validateDijkstraNativeScript,
+  decodeDijkstraTopTx,
+  decodeDijkstraTopTxInBlock,
+  toCBORForBlockInclusion,
+) where
+
+import qualified Cardano.Crypto.Hash as Hash
+import Cardano.Ledger.Allegra.TxBody (AllegraEraTxBody (..), StrictMaybe)
+import Cardano.Ledger.Alonzo.Plutus.Context (
+  CollectError,
+  SupportedPlutusRunnable,
+  TxInfoResult,
+ )
+import Cardano.Ledger.Alonzo.Tx (
+  AlonzoEraTx,
+  IsPhase2Valid (..),
+ )
+import Cardano.Ledger.Alonzo.TxWits (AlonzoEraTxWits (..), unRedeemersL)
+import Cardano.Ledger.BaseTypes (StrictMaybe (..), ToKeyValuePairs (..), integralToBounded)
+import Cardano.Ledger.Binary (
+  Annotator,
+  DecCBOR (..),
+  Decoder,
+  EncCBOR (..),
+  Encoding,
+  ToCBOR (..),
+  TokenType (..),
+  decodeNullStrictMaybe,
+  decodeRecordNamed,
+  encodeListLen,
+  encodeNullStrictMaybe,
+  peekTokenType,
+  serialize,
+ )
+import Cardano.Ledger.Binary.Coders (Encode (..), encode, (!>))
+import Cardano.Ledger.Conway.Tx (AlonzoEraTx (..), Tx (..), getConwayMinFeeTx)
+import Cardano.Ledger.Core
+import Cardano.Ledger.Dijkstra.Era (DijkstraEra)
+import Cardano.Ledger.Dijkstra.Scripts (
+  DijkstraEraScript,
+  DijkstraNativeScript,
+  evalDijkstraNativeScript,
+ )
+import Cardano.Ledger.Dijkstra.TxAuxData ()
+import Cardano.Ledger.Dijkstra.TxBody (DijkstraEraTxBody (..), dijkstraAllInputsTxBodyF)
+import Cardano.Ledger.Dijkstra.TxWits ()
+import Cardano.Ledger.Hashes (unsafeMakeSafeHash)
+import Cardano.Ledger.Keys.WitVKey (witVKeyHash)
+import Cardano.Ledger.MemoBytes (EqRaw (..))
+import Cardano.Ledger.Plutus (Language, PlutusWithContext)
+import Cardano.Ledger.Shelley.Tx (shelleyTxEqRaw)
+import Cardano.Ledger.State
+import Control.DeepSeq (NFData (..), deepseq)
+import Control.Monad.Trans.Fail.String (errorFail)
+import Data.Aeson (FromJSON (..), ToJSON (..), withObject, (.:), (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
+import Data.Coerce (coerce)
+import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Typeable (Typeable)
+import Data.Word (Word32)
+import GHC.Generics (Generic)
+import Lens.Micro (Lens', SimpleGetter, lens, to, (^.))
+import NoThunks.Class (InspectHeap (..), NoThunks)
+
+data DijkstraTx l era where
+  DijkstraTx ::
+    { dtBody :: !(TxBody TopTx era)
+    , dtWits :: !(TxWits era)
+    , dtIsPhase2Valid :: !IsPhase2Valid
+    , dtAuxData :: !(StrictMaybe (TxAuxData era))
+    } ->
+    DijkstraTx TopTx era
+  DijkstraSubTx ::
+    { dstBody :: !(TxBody SubTx era)
+    , dstWits :: !(TxWits era)
+    , dstAuxData :: !(StrictMaybe (TxAuxData era))
+    } ->
+    DijkstraTx SubTx era
+
+deriving instance EraTx era => Eq (DijkstraTx l era)
+
+deriving instance EraTx era => Show (DijkstraTx l era)
+
+instance
+  ( EraTx era
+  , NFData (TxWits era)
+  , NFData (TxAuxData era)
+  ) =>
+  NFData (DijkstraTx l era)
+  where
+  rnf DijkstraTx {..} =
+    dtBody `deepseq`
+      dtWits `deepseq`
+        dtIsPhase2Valid `deepseq`
+          rnf dtAuxData
+  rnf DijkstraSubTx {..} =
+    dstBody `deepseq`
+      dstWits `deepseq`
+        rnf dstAuxData
+
+deriving via
+  InspectHeap (DijkstraTx l era)
+  instance
+    ( Era era
+    , Typeable l
+    ) =>
+    NoThunks (DijkstraTx l era)
+
+instance (EraTx era, Typeable l) => ToCBOR (DijkstraTx l era) where
+  toCBOR = toEraCBOR @era
+
+instance EraTx era => EncCBOR (DijkstraTx l era) where
+  encCBOR = toCBORForMempoolSubmission
+
+-- | Decode a top-level transaction in the mempool format:
+-- @[transaction_body, transaction_witness_set, auxiliary_data\/ nil]@. For
+-- backwards compatibility the legacy
+-- @[transaction_body, transaction_witness_set, true, auxiliary_data\/ nil]@
+-- format is also accepted, but only with the `IsPhase2Valid` flag set to `True`.
+decodeDijkstraTopTx :: EraTx era => Decoder s (Annotator (DijkstraTx TopTx era))
+decodeDijkstraTopTx =
+  fmap snd $ decodeRecordNamed "DijkstraTx" fst $ do
+    bodyAnn <- decCBOR
+    witsAnn <- decCBOR
+    isValidFlagSupplied <-
+      peekTokenType >>= \case
+        TypeBool ->
+          decCBOR >>= \case
+            True -> pure True
+            False -> fail "Value `false` not allowed for `isPhase2Valid`"
+        _ -> pure False
+    auxAnn <- decodeNullStrictMaybe decCBOR
+    let
+      -- `isValid == False` can no longer be supplied in an encoded transaction.
+      dijkstraTopTx =
+        DijkstraTx <$> bodyAnn <*> witsAnn <*> pure Phase2Valid <*> sequence auxAnn
+    pure (if isValidFlagSupplied then 4 else 3, dijkstraTopTx)
+
+-- | Decode a top-level transaction in the format used inside a block body:
+-- @[transaction_body, transaction_witness_set, auxiliary_data\/ nil, is_valid]@.
+-- Unlike in the mempool format, the trailing `IsPhase2Valid` flag is mandatory
+-- and can be `False`, since it is set by the block producer.
+decodeDijkstraTopTxInBlock :: EraTx era => Decoder s (Annotator (DijkstraTx TopTx era))
+decodeDijkstraTopTxInBlock =
+  decodeRecordNamed "DijkstraTx" (const 4) $ do
+    bodyAnn <- decCBOR
+    witsAnn <- decCBOR
+    auxAnn <- decodeNullStrictMaybe decCBOR
+    isPhase2Valid <- decCBOR
+    pure $ DijkstraTx <$> bodyAnn <*> witsAnn <*> pure isPhase2Valid <*> sequence auxAnn
+
+instance (EraTx era, Typeable l) => DecCBOR (Annotator (DijkstraTx l era)) where
+  decCBOR = withSTxBothLevels @l $ \case
+    STopTx -> decodeDijkstraTopTx
+    SSubTx ->
+      decodeRecordNamed "DijkstraSubTx" (const 3) $ do
+        body <- decCBOR
+        wits <- decCBOR
+        aux <- sequence <$> decodeNullStrictMaybe decCBOR
+        pure $ DijkstraSubTx <$> body <*> wits <*> aux
+
+instance HasEraTxLevel DijkstraTx DijkstraEra where
+  toSTxLevel DijkstraTx {} = STopTx
+  toSTxLevel DijkstraSubTx {} = SSubTx
+
+instance HasEraTxLevel Tx DijkstraEra where
+  toSTxLevel = toSTxLevel . unDijkstraTx
+
+mkBasicDijkstraTx :: TxBody l DijkstraEra -> DijkstraTx l DijkstraEra
+mkBasicDijkstraTx txBody =
+  case toSTxLevel txBody of
+    STopTx ->
+      DijkstraTx
+        txBody
+        mempty
+        Phase2Valid
+        SNothing
+    SSubTx ->
+      DijkstraSubTx
+        txBody
+        mempty
+        SNothing
+
+instance EraTx DijkstraEra where
+  newtype Tx l DijkstraEra = MkDijkstraTx {unDijkstraTx :: DijkstraTx l DijkstraEra}
+    deriving newtype (Eq, Show, NFData, NoThunks, ToCBOR, EncCBOR)
+    deriving (Generic)
+
+  type StAnnTx l DijkstraEra = DijkstraStAnnTx l DijkstraEra
+
+  type StAnnTxCache DijkstraEra = Map.Map ScriptHash (SupportedPlutusRunnable DijkstraEra)
+
+  txStAnnTxG = to $ \case
+    DijkstraStAnnTopTx {dsattTx} -> dsattTx
+    DijkstraStAnnSubTx {dsastTx} -> dsastTx
+
+  cacheStAnnTxG = to $ \case
+    DijkstraStAnnTopTx {dsattPlutusRunnableCache} -> dsattPlutusRunnableCache
+    DijkstraStAnnSubTx {dsastPlutusRunnableCache} -> dsastPlutusRunnableCache
+
+  mkBasicTx = MkDijkstraTx . mkBasicDijkstraTx
+
+  bodyTxL = dijkstraTxL . bodyDijkstraTxL
+  {-# INLINE bodyTxL #-}
+
+  witsTxL = dijkstraTxL . witsDijkstraTxL
+  {-# INLINE witsTxL #-}
+
+  auxDataTxL = dijkstraTxL . auxDataDijkstraTxL
+  {-# INLINE auxDataTxL #-}
+
+  sizeTxF = dijkstraTxL . sizeDijkstraTxF
+  {-# INLINE sizeTxF #-}
+
+  validateNativeScript = validateDijkstraNativeScript
+  {-# INLINE validateNativeScript #-}
+
+  getMinFeeTx = getConwayMinFeeTx
+
+  allInputsTxBodyF = dijkstraAllInputsTxBodyF
+  {-# INLINE allInputsTxBodyF #-}
+
+bodyDijkstraTxL :: Lens' (DijkstraTx l era) (TxBody l era)
+bodyDijkstraTxL =
+  lens
+    ( \case
+        DijkstraTx {dtBody} -> dtBody
+        DijkstraSubTx {dstBody} -> dstBody
+    )
+    ( \case
+        tx@DijkstraTx {} -> \x -> tx {dtBody = x}
+        tx@DijkstraSubTx {} -> \x -> tx {dstBody = x}
+    )
+
+witsDijkstraTxL :: Lens' (DijkstraTx l era) (TxWits era)
+witsDijkstraTxL =
+  lens
+    ( \case
+        DijkstraTx {dtWits} -> dtWits
+        DijkstraSubTx {dstWits} -> dstWits
+    )
+    ( \case
+        tx@DijkstraTx {} -> \x -> tx {dtWits = x}
+        tx@DijkstraSubTx {} -> \x -> tx {dstWits = x}
+    )
+
+isPhase2ValidDijkstraTxL :: Lens' (DijkstraTx TopTx era) IsPhase2Valid
+isPhase2ValidDijkstraTxL =
+  lens (\DijkstraTx {dtIsPhase2Valid} -> dtIsPhase2Valid) $ \tx txIsPhase2Valid ->
+    case tx of
+      DijkstraTx {} -> tx {dtIsPhase2Valid = txIsPhase2Valid}
+
+auxDataDijkstraTxL :: Lens' (DijkstraTx l era) (StrictMaybe (TxAuxData era))
+auxDataDijkstraTxL =
+  lens
+    ( \case
+        DijkstraTx {dtAuxData} -> dtAuxData
+        DijkstraSubTx {dstAuxData} -> dstAuxData
+    )
+    ( \case
+        tx@DijkstraTx {} -> \x -> tx {dtAuxData = x}
+        tx@DijkstraSubTx {} -> \x -> tx {dstAuxData = x}
+    )
+
+toCBORForSizeComputation ::
+  ( EncCBOR (TxBody l era)
+  , EncCBOR (TxWits era)
+  , EncCBOR (TxAuxData era)
+  ) =>
+  DijkstraTx l era ->
+  Encoding
+toCBORForSizeComputation tx =
+  encodeListLen 3
+    <> encCBOR (tx ^. bodyDijkstraTxL)
+    <> encCBOR (tx ^. witsDijkstraTxL)
+    <> encodeNullStrictMaybe encCBOR (tx ^. auxDataDijkstraTxL)
+
+sizeDijkstraTxF ::
+  forall era l.
+  EraTx era =>
+  SimpleGetter (DijkstraTx l era) Word32
+sizeDijkstraTxF =
+  to $
+    errorFail
+      . integralToBounded @Int64 @Word32
+      . LBS.length
+      . serialize (eraProtVerLow @era)
+      . toCBORForSizeComputation
+
+dijkstraTxEqRaw ::
+  ( STxLevel l era ~ STxBothLevels l era
+  , AlonzoEraTx era
+  ) =>
+  Tx l era ->
+  Tx l era ->
+  Bool
+dijkstraTxEqRaw tx1 tx2 =
+  shelleyTxEqRaw tx1 tx2
+    && withBothTxLevels
+      tx1
+      ( \tx1' ->
+          withBothTxLevels
+            tx2
+            (\tx2' -> tx1' ^. isPhase2ValidTxL == tx2' ^. isPhase2ValidTxL)
+            (const True)
+      )
+      (const True)
+
+instance EqRaw (Tx l DijkstraEra) where
+  eqRaw = dijkstraTxEqRaw
+
+instance
+  ( ToJSON (TxBody TopTx DijkstraEra)
+  , ToJSON (TxWits DijkstraEra)
+  , ToJSON (TxAuxData DijkstraEra)
+  ) =>
+  ToKeyValuePairs (DijkstraTx TopTx DijkstraEra)
+  where
+  toKeyValuePairs DijkstraTx {dtBody, dtWits, dtIsPhase2Valid, dtAuxData} =
+    [ "body" .= dtBody
+    , "wits" .= dtWits
+    , "isPhase2Valid" .= dtIsPhase2Valid
+    , "auxData" .= dtAuxData
+    ]
+
+instance
+  ( ToJSON (TxBody TopTx DijkstraEra)
+  , ToJSON (TxWits DijkstraEra)
+  , ToJSON (TxAuxData DijkstraEra)
+  ) =>
+  ToJSON (Tx TopTx DijkstraEra)
+  where
+  toJSON (MkDijkstraTx tx) = Aeson.object (toKeyValuePairs tx)
+
+instance
+  ( FromJSON (TxBody TopTx DijkstraEra)
+  , FromJSON (TxWits DijkstraEra)
+  , FromJSON (TxAuxData DijkstraEra)
+  ) =>
+  FromJSON (Tx TopTx DijkstraEra)
+  where
+  parseJSON = withObject "Tx TopTx DijkstraEra" $ \o ->
+    fmap MkDijkstraTx $
+      DijkstraTx
+        <$> o .: "body"
+        <*> o .: "wits"
+        <*> o .: "isPhase2Valid"
+        <*> o .: "auxData"
+
+instance
+  ( ToJSON (TxBody SubTx DijkstraEra)
+  , ToJSON (TxWits DijkstraEra)
+  , ToJSON (TxAuxData DijkstraEra)
+  ) =>
+  ToJSON (Tx SubTx DijkstraEra)
+  where
+  toJSON (MkDijkstraTx (DijkstraSubTx {dstBody, dstWits, dstAuxData})) =
+    Aeson.object
+      [ "dstBody" .= dstBody
+      , "dstWits" .= dstWits
+      , "dstAuxData" .= dstAuxData
+      ]
+
+instance
+  ( FromJSON (TxBody SubTx DijkstraEra)
+  , FromJSON (TxWits DijkstraEra)
+  , FromJSON (TxAuxData DijkstraEra)
+  ) =>
+  FromJSON (Tx SubTx DijkstraEra)
+  where
+  parseJSON = withObject "Tx SubTx DijkstraEra" $ \o ->
+    fmap MkDijkstraTx $
+      DijkstraSubTx
+        <$> o .: "dstBody"
+        <*> o .: "dstWits"
+        <*> o .: "dstAuxData"
+
+dijkstraTxL :: Lens' (Tx l DijkstraEra) (DijkstraTx l DijkstraEra)
+dijkstraTxL = lens unDijkstraTx (\x y -> x {unDijkstraTx = y})
+
+instance AlonzoEraTx DijkstraEra where
+  isPhase2ValidTxL = dijkstraTxL . isPhase2ValidDijkstraTxL
+  {-# INLINE isPhase2ValidTxL #-}
+
+  getTotalExUnits tx =
+    foldMap snd (tx ^. witsTxL . rdmrsTxWitsL . unRedeemersL)
+      <> withBothTxLevels
+        tx
+        (\topTx -> foldMap getTotalExUnits (topTx ^. bodyTxL . subTransactionsTxBodyL))
+        (const mempty)
+
+instance Typeable l => DecCBOR (Annotator (Tx l DijkstraEra)) where
+  decCBOR = fmap MkDijkstraTx <$> decCBOR
+
+validateDijkstraNativeScript ::
+  ( EraTx era
+  , DijkstraEraTxBody era
+  , DijkstraEraScript era
+  , NativeScript era ~ DijkstraNativeScript era
+  ) =>
+  Tx l era -> NativeScript era -> Bool
+validateDijkstraNativeScript tx =
+  evalDijkstraNativeScript vhks (tx ^. bodyTxL . vldtTxBodyL) (tx ^. bodyTxL . guardsTxBodyL)
+  where
+    vhks = Set.map witVKeyHash (tx ^. witsTxL . addrTxWitsL)
+{-# INLINEABLE validateDijkstraNativeScript #-}
+
+-- | Typeclass for Dijkstra era transactions that require a deterministic,
+-- encoding-independent transaction hash — i.e. a hash that is stable regardless
+-- of how the transaction was serialized. This is needed, for example, by the
+-- Leios protocol to unambiguously identify transactions across nodes.
+class AlonzoEraTx era => DijkstraEraTx era where
+  -- | Compute a stable hash that covers the full transaction content: body,
+  -- witnesses, auxiliary data, and phase-2 validity flag. Unlike 'txId', which
+  -- only hashes the bytes of the transaction body, this hash should uniquely
+  -- identify the complete transaction.
+  hashTx :: Tx TopTx era -> SafeHash EraIndependentTx
+
+-- | Hash all four Dijkstra transaction components deterministically.
+--
+-- The hash is @Blake2b-256(body_hash || wits_hash || aux_hash ||
+-- isValid_bytes)@, where each component hash is the 'hashAnnotated' of the
+-- corresponding 'MemoBytes' field (a pre-computed, memoized 32-byte value).
+-- Concatenating these fixed-length hashes rather than re-serializing the
+-- assembled transaction avoids susceptibility to non-canonical CBOR: the same
+-- logical transaction can be CBOR-encoded in multiple ways, but its component
+-- hashes are always identical.
+instance DijkstraEraTx DijkstraEra where
+  hashTx tx =
+    unsafeMakeSafeHash $
+      coerce $
+        Hash.hashWith id $
+          Hash.hashToBytes (extractHash (hashAnnotated (tx ^. bodyTxL)))
+            <> Hash.hashToBytes (extractHash (hashAnnotated (tx ^. witsTxL)))
+            <> case tx ^. auxDataTxL of
+              SNothing -> mempty
+              SJust auxData -> Hash.hashToBytes (extractHash (hashAnnotated auxData))
+            <> LBS.toStrict (serialize (eraProtVerLow @DijkstraEra) (tx ^. isPhase2ValidTxL))
+
+--------------------------------------------------------------------------------
+-- Serialisation
+--
+-- A top-level transaction has two wire formats:
+-- - the mempool format @[body, wits, aux_data/ nil]@, used for transmission
+--   from node to node or from wallet to node, which omits the `IsPhase2Valid`
+--   flag ('toCBORForMempoolSubmission'), and
+-- - the block format @[body, wits, aux_data/ nil, is_valid]@, used for
+--   transactions inside a block body, where the trailing `IsPhase2Valid` flag
+--   is set by the block producer ('toCBORForBlockInclusion').
+--
+-- We do not store the Tx bytes for the following reasons:
+-- - A Tx serialised in this way never forms part of any hashed structure, hence
+--   we do not worry about the serialisation changing and thus seeing a new
+--   hash.
+-- - The three principal components of this Tx already store their own bytes;
+--   here we simply concatenate them. The final component, `IsPhase2Valid`, is
+--   just a flag and very cheap to serialise.
+--------------------------------------------------------------------------------
+
+-- | Encode to CBOR for the purposes of transmission from node to node, or from
+-- wallet to node.
+--
+-- Note that this serialisation is neither the serialisation used on-chain
+-- (which includes the `IsPhase2Valid` flag as the last element - see
+-- 'toCBORForBlockInclusion'), nor the serialisation used for computing the
+-- transaction size (which omits the `IsPhase2Valid` field for compatibility
+-- with Mary - see 'toCBORForSizeComputation').
+toCBORForMempoolSubmission ::
+  ( EncCBOR (TxBody l era)
+  , EncCBOR (TxWits era)
+  , EncCBOR (TxAuxData era)
+  ) =>
+  DijkstraTx l era ->
+  Encoding
+toCBORForMempoolSubmission = \case
+  DijkstraTx {dtBody, dtWits, dtAuxData, dtIsPhase2Valid} ->
+    encode $
+      Rec DijkstraTx
+        !> To dtBody
+        !> To dtWits
+        !> OmitC dtIsPhase2Valid
+        !> E (encodeNullStrictMaybe encCBOR) dtAuxData
+  DijkstraSubTx {dstBody, dstWits, dstAuxData} ->
+    encode $
+      Rec DijkstraSubTx
+        !> To dstBody
+        !> To dstWits
+        !> E (encodeNullStrictMaybe encCBOR) dstAuxData
+
+-- | Encode to CBOR in the format used inside a block body:
+-- @[transaction_body, transaction_witness_set, auxiliary_data\/ nil, is_valid]@.
+--
+-- The `IsPhase2Valid` flag is placed after the fields supplied by the
+-- transaction author, since it is set by the block producer.
+toCBORForBlockInclusion :: AlonzoEraTx era => Tx TopTx era -> Encoding
+toCBORForBlockInclusion tx =
+  encodeListLen 4
+    <> encCBOR (tx ^. bodyTxL)
+    <> encCBOR (tx ^. witsTxL)
+    <> encodeNullStrictMaybe encCBOR (tx ^. auxDataTxL)
+    <> encCBOR (tx ^. isPhase2ValidTxL)
+
+data DijkstraStAnnTx l era where
+  DijkstraStAnnTopTx ::
+    { dsattTx :: !(Tx TopTx era)
+    , dsattScriptsNeeded :: ScriptsNeeded era
+    , dsattScriptsProvided :: ScriptsProvided era
+    , dsattPlutusLegacyMode :: Bool
+    , dsattPlutusLanguagesUsed :: Set Language
+    , dsattPlutusRunnableCache :: Map.Map ScriptHash (SupportedPlutusRunnable era)
+    , dsattPlutusScriptsWithContext :: Either (NonEmpty (CollectError era)) [PlutusWithContext]
+    , dsattSubTransactions :: [DijkstraStAnnTx SubTx era]
+    } ->
+    DijkstraStAnnTx TopTx era
+  DijkstraStAnnSubTx ::
+    { dsastTx :: !(Tx SubTx era)
+    , dsastScriptsNeeded :: ScriptsNeeded era
+    , dsastScriptsHashesNeeded :: Set ScriptHash
+    , dsastScriptsProvided :: ScriptsProvided era
+    , dsastTxInfoResult :: TxInfoResult era
+    , dsastPlutusLanguagesUsed :: Set Language
+    , dsastPlutusRunnableCache :: Map.Map ScriptHash (SupportedPlutusRunnable era)
+    , dsastPlutusScriptsWithContext :: Either (NonEmpty (CollectError era)) [PlutusWithContext]
+    } ->
+    DijkstraStAnnTx SubTx era
+
+deriving instance
+  ( DijkstraEraScript era
+  , Eq (Tx TopTx era)
+  , Eq (Tx SubTx era)
+  , Eq (ScriptsNeeded era)
+  , Eq (ScriptsProvided era)
+  , Eq (CollectError era)
+  , Eq (TxInfoResult era)
+  ) =>
+  Eq (DijkstraStAnnTx l era)
+
+deriving instance
+  ( DijkstraEraScript era
+  , Show (Tx TopTx era)
+  , Show (Tx SubTx era)
+  , Show (ScriptsNeeded era)
+  , Show (ScriptsProvided era)
+  , Show (CollectError era)
+  , Show (TxInfoResult era)
+  ) =>
+  Show (DijkstraStAnnTx l era)
+
+instance
+  ( EraTxLevel era
+  , STxLevel SubTx era ~ STxBothLevels SubTx era
+  , STxLevel TopTx era ~ STxBothLevels TopTx era
+  ) =>
+  HasEraTxLevel DijkstraStAnnTx era
+  where
+  toSTxLevel DijkstraStAnnTopTx {} = STopTx @era
+  toSTxLevel DijkstraStAnnSubTx {} = SSubTx @era

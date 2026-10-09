@@ -1,0 +1,216 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Test.Cardano.Ledger.CanonicalState.Spec (spec) where
+
+import Cardano.Ledger.BaseTypes (EpochInterval, NonNegativeInterval, NonZero, UnitInterval)
+import Cardano.Ledger.CanonicalState.BasicTypes (CanonicalExUnits (..))
+import Cardano.Ledger.CanonicalState.CDDL.Validate (invalidSpecs, validSpecs)
+import Cardano.Ledger.CanonicalState.Conway (CanonicalGovActionState)
+import qualified Cardano.Ledger.CanonicalState.Namespace.Blocks.V0 as Blocks.V0
+import Cardano.Ledger.CanonicalState.Namespace.CDDL (namespaceSymbolFromText)
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesAccounts.V0 as EntitiesAccounts.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesCommittee.V0 as Committee.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesDReps.V0 as EntitiesDReps.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.V0 as EntitiesStakePools.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.VRFKeyHashes.V0 as EntitiesStakePoolsVRFKeyHashes.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovCommittee.V0 as GovCommittee.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovConstitution.V0 as GovConstitution.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovPParams.V0 as GovPParams.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovProposals.Roots.V0 as GovProposals.Roots.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovProposals.V0 as GovProposals.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.UTxO.V0 as UTxO.V0
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Core (
+  AccountAddress,
+  AccountId,
+  KeyHash,
+  PParams,
+  StakePool,
+  StakePoolVRF,
+  Staking,
+  VRFVerKeyHash,
+ )
+import Cardano.Ledger.Credential (Credential)
+import Cardano.Ledger.DRep (DRep)
+import Cardano.Ledger.State (PoolMetadata, StakePoolRelay)
+import Cardano.Ledger.TxIn (TxId)
+import Cardano.SCLS.CBOR.Canonical.Encoder (ToCanonicalCBOR (..))
+import Codec.CBOR.Cuddle.CDDL.CTree (CTreeRoot)
+import Codec.CBOR.Cuddle.CDDL.Resolve (MonoReferenced)
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
+import Data.Typeable
+import Data.Word (Word64)
+import Test.Cardano.Ledger.CanonicalState.Arbitrary ()
+import Test.Cardano.Ledger.CanonicalState.Conformance (Direction (..), propReferenceAcceptsCBOR)
+import Test.Cardano.Ledger.CanonicalState.Reference (LoadError)
+import Test.Cardano.Ledger.CanonicalState.Testlib
+import Test.Cardano.Ledger.Common
+import Test.Cardano.Ledger.Conway.CanonicalState.Arbitrary ()
+
+spec ::
+  Maybe [(T.Text, Either LoadError (CTreeRoot MonoReferenced))] -> Integer -> Spec
+spec mReferenceCDDLs sampleCount = do
+  describe "Basic checks" $ do
+    it "has no invalid namespaces" $
+      invalidSpecs `shouldSatisfy` Map.null
+
+  describe "Conformance test" $ do
+    case mReferenceCDDLs of
+      Nothing ->
+        it "loads reference CDDL specs" $
+          pendingWith "REFERENCE_CDDL_DIR environment variable is not set"
+      Just referenceCDDLs ->
+        forM_ referenceCDDLs runConformanceTest
+
+  describe "types" $ do
+    describe "blocks/v0" $ do
+      isCanonical @"blocks/v0" @Blocks.V0.BlockOut
+      validateType @"blocks/v0" @Blocks.V0.BlockOut "record_entry"
+    describe "utxo/v0" $ do
+      isCanonical @"utxo/v0" @(UTxO.V0.UtxoOut ConwayEra)
+      validateType @"utxo/v0" @(UTxO.V0.UtxoOut ConwayEra) "record_entry"
+    describe "entities/committee/v0" $ do
+      isCanonical @"entities/committee/v0" @Committee.V0.CanonicalCommitteeState
+      validateType @"entities/committee/v0" @Committee.V0.CanonicalCommitteeState "committee_state"
+      isCanonical @"entities/committee/v0" @Committee.V0.CanonicalCommitteeAuthorization
+      validateType @"entities/committee/v0" @Committee.V0.CanonicalCommitteeAuthorization
+        "committee_authorization"
+    describe "entities/stake_pools/v0" $ do
+      isCanonical @"entities/stake_pools/v0" @(VRFVerKeyHash StakePoolVRF)
+      validateType @"entities/stake_pools/v0" @(VRFVerKeyHash StakePoolVRF) "vrf_keyhash"
+      isCanonical @"entities/stake_pools/v0" @UnitInterval
+      validateType @"entities/stake_pools/v0" @UnitInterval "unit_interval"
+      isCanonical @"entities/stake_pools/v0" @(KeyHash Staking)
+      validateType @"entities/stake_pools/v0" @(KeyHash Staking) "staking_keyhash"
+      isCanonical @"entities/stake_pools/v0" @StakePoolRelay
+      validateType @"entities/stake_pools/v0" @StakePoolRelay "relay"
+      isCanonical @"entities/stake_pools/v0" @PoolMetadata
+      validateType @"entities/stake_pools/v0" @PoolMetadata "pool_metadata"
+      isCanonical @"entities/stake_pools/v0" @AccountId
+      validateType @"entities/stake_pools/v0" @AccountId "account_id"
+      isCanonical @"entities/stake_pools/v0" @(Credential Staking)
+      validateType @"entities/stake_pools/v0" @(Credential Staking) "credential"
+      isCanonical @"entities/stake_pools/v0" @(KeyHash StakePool)
+      validateType @"entities/stake_pools/v0" @(KeyHash StakePool) "pool_keyhash"
+      isCanonical @"entities/stake_pools/v0" @(VRFVerKeyHash StakePoolVRF)
+      validateType @"entities/stake_pools/v0" @(VRFVerKeyHash StakePoolVRF) "vrf_keyhash"
+      isCanonical @"entities/stake_pools/v0" @UnitInterval
+      validateType @"entities/stake_pools/v0" @UnitInterval "unit_interval"
+      isCanonical @"entities/stake_pools/v0" @(KeyHash Staking)
+      validateType @"entities/stake_pools/v0" @(KeyHash Staking) "staking_keyhash"
+      isCanonical @"entities/stake_pools/v0" @StakePoolRelay
+      validateType @"entities/stake_pools/v0" @StakePoolRelay "relay"
+      isCanonical @"entities/stake_pools/v0" @PoolMetadata
+      validateType @"entities/stake_pools/v0" @PoolMetadata "pool_metadata"
+      isCanonical @"entities/stake_pools/v0" @AccountAddress
+      validateType @"entities/stake_pools/v0" @AccountAddress "address"
+      isCanonical @"entities/stake_pools/v0"
+        @EntitiesStakePools.V0.CanonicalStakePoolParams
+      validateType @"entities/stake_pools/v0"
+        @EntitiesStakePools.V0.CanonicalStakePoolParams
+        "stake_pool_params"
+      isCanonical @"entities/stake_pools/v0" @EntitiesStakePools.V0.CanonicalStakePoolState
+      validateType @"entities/stake_pools/v0" @EntitiesStakePools.V0.CanonicalStakePoolState
+        "stake_pool_state"
+      isCanonical @"entities/stake_pools/v0" @EntitiesStakePools.V0.CanonicalStakePool
+      validateType @"entities/stake_pools/v0" @EntitiesStakePools.V0.CanonicalStakePool
+        "stake_pool"
+    describe "entities/dreps/v0" $ do
+      isCanonical @"entities/dreps/v0" @EntitiesDReps.V0.CanonicalDRepState
+      validateType @"entities/dreps/v0" @EntitiesDReps.V0.CanonicalDRepState "drep_state"
+    describe "entities/stake_pools/vrf_key_hashes/v0" $ do
+      isCanonical @"entities/stake_pools/vrf_key_hashes/v0" @(NonZero Word64)
+      validateType @"entities/stake_pools/vrf_key_hashes/v0" @(NonZero Word64) "positive_int"
+      isCanonical @"entities/stake_pools/vrf_key_hashes/v0"
+        @EntitiesStakePoolsVRFKeyHashes.V0.EntitiesStakePoolsVRFKeyHashesOut
+      validateType @"entities/stake_pools/vrf_key_hashes/v0"
+        @EntitiesStakePoolsVRFKeyHashes.V0.EntitiesStakePoolsVRFKeyHashesOut
+        "record_entry"
+    describe "entities/accounts/v0" $ do
+      isCanonical @"entities/accounts/v0" @DRep
+      validateType @"entities/accounts/v0" @DRep "drep"
+      isCanonical @"entities/accounts/v0" @EntitiesAccounts.V0.CanonicalAccountState
+      validateType @"entities/accounts/v0" @EntitiesAccounts.V0.CanonicalAccountState
+        "account_state"
+      isCanonical @"entities/accounts/v0" @EntitiesAccounts.V0.EntitiesAccountsOut
+      validateType @"entities/accounts/v0" @EntitiesAccounts.V0.EntitiesAccountsOut
+        "record_entry"
+    describe "gov/committee/v0" $ do
+      isCanonical @"gov/committee/v0" @GovCommittee.V0.CanonicalCommittee
+      validateType @"gov/committee/v0" @GovCommittee.V0.CanonicalCommittee "committee"
+      isCanonical @"gov/committee/v0" @GovCommittee.V0.GovCommitteeOut
+      validateType @"gov/committee/v0" @GovCommittee.V0.GovCommitteeOut "record_entry"
+    describe "gov/constitution/v0" $ do
+      isCanonical @"gov/constitution/v0" @GovConstitution.V0.CanonicalConstitution
+      validateType @"gov/constitution/v0" @GovConstitution.V0.CanonicalConstitution "record_entry"
+    describe "gov/pparams/v0" $ do
+      isCanonical @"gov/pparams/v0" @EpochInterval
+      validateType @"gov/pparams/v0" @EpochInterval "epoch_interval"
+      isCanonical @"gov/pparams/v0" @NonNegativeInterval
+      validateType @"gov/pparams/v0" @NonNegativeInterval "nonnegative_interval"
+      isCanonical @"gov/pparams/v0" @UnitInterval
+      validateType @"gov/pparams/v0" @UnitInterval "unit_interval"
+      isCanonical @"gov/pparams/v0" @CanonicalExUnits
+      validateType @"gov/pparams/v0" @CanonicalExUnits "ex_units"
+      isCanonical @"gov/pparams/v0" @(PParams ConwayEra)
+      validateType @"gov/pparams/v0" @(GovPParams.V0.GovPParamsOut ConwayEra) "gov_pparams_out"
+    describe "gov/proposals/roots/v0" $ do
+      isCanonical @"gov/proposals/roots/v0" @TxId
+      isCanonical @"gov/proposals/roots/v0" @GovProposals.V0.CanonicalGovActionIx
+      isCanonical @"gov/proposals/roots/v0" @GovProposals.V0.CanonicalGovActionId
+      validateType @"gov/proposals/roots/v0" @GovProposals.V0.CanonicalGovActionId "gov_action_id"
+      isCanonical @"gov/proposals/roots/v0" @GovProposals.Roots.V0.GovProposalsRootsOut
+      validateType @"gov/proposals/roots/v0" @GovProposals.Roots.V0.GovProposalsRootsOut "record_entry"
+    describe "gov/proposals/v0" $ do
+      isCanonical @"gov/proposals/v0" @(GovProposals.V0.GovProposalOut CanonicalGovActionState)
+      validateType @"gov/proposals/v0" @(GovProposals.V0.GovProposalOut CanonicalGovActionState)
+        "record_entry"
+  describe "namespaces" $ do
+    testNS @"blocks/v0"
+    testNS @"utxo/v0"
+    testNS @"entities/committee/v0"
+    testNS @"entities/stake_pools/v0"
+    testNS @"entities/dreps/v0"
+    testNS @"entities/stake_pools/vrf_key_hashes/v0"
+    testNS @"entities/accounts/v0"
+    testNS @"gov/constitution/v0"
+    testNS @"gov/committee/v0"
+    testNS @"gov/pparams/v0"
+    testNS @"gov/proposals/v0"
+    testNS @"gov/proposals/roots/v0"
+  where
+    runConformanceTest (nsText, mRef) =
+      context (T.unpack nsText) $ it "passes bidirectional conformance tests" $ do
+        case mRef of
+          Left err ->
+            expectationFailure $
+              "Failed to load reference CDDL: " ++ show err
+          Right refCDDL -> do
+            case namespaceSymbolFromText nsText >>= flip Map.lookup validSpecs of
+              Nothing ->
+                expectationFailure $
+                  "No valid Huddle CDDL spec found for namespace: " ++ T.unpack nsText
+              Just huddleSpec -> do
+                mapM_
+                  (\_ -> propReferenceAcceptsCBOR refCDDL huddleSpec HuddleValidating `shouldReturn` Right ())
+                  [1 .. sampleCount]
+
+                mapM_
+                  (\_ -> propReferenceAcceptsCBOR huddleSpec refCDDL ReferenceValidating `shouldReturn` Right ())
+                  [1 .. sampleCount]
+
+isCanonical ::
+  forall ns a. (ToCanonicalCBOR ns a, Typeable a, Arbitrary a, Show a) => Spec
+isCanonical = prop propName $ propTypeIsCanonical @ns @a
+  where
+    propName = showsTypeRep (typeRep (Proxy @a)) " is canonical"

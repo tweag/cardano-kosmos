@@ -1,0 +1,507 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.Dijkstra.ImpTest (
+  module Test.Cardano.Ledger.Conway.ImpTest,
+  DijkstraEraImp,
+  impDijkstraSatisfyNativeScript,
+  fixupSubTransactions,
+  balanceSubTransactions,
+  switchTxToLegacyMode,
+  switchTxToPhase2InvalidLegacyMode,
+  mkTopTxWithSubTxs,
+  traverseSubTxs,
+  withPostFixupSubTxs,
+  submitFailingSubTx,
+  submitFailingMempoolTx,
+  expectMempoolRejection,
+  voteSubTx,
+  declareTreasurySubTx,
+) where
+
+import Cardano.Ledger.Allegra.Scripts (
+  pattern RequireTimeExpire,
+  pattern RequireTimeStart,
+ )
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Coin
+import Cardano.Ledger.Compactible
+import Cardano.Ledger.Conway.Governance (
+  ConwayEraGov (..),
+  GovActionId,
+  Vote,
+  Voter,
+  VotingProcedure (..),
+  VotingProcedures (..),
+  committeeMembersL,
+ )
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.Conway.TxCert
+import Cardano.Ledger.Credential
+import Cardano.Ledger.Dijkstra (ApplyTxError, DijkstraEra)
+import Cardano.Ledger.Dijkstra.BlockBody (DijkstraEraBlockBody)
+import Cardano.Ledger.Dijkstra.Core
+import Cardano.Ledger.Dijkstra.Rules
+import Cardano.Ledger.Dijkstra.Scripts (
+  DijkstraNativeScript,
+  evalDijkstraNativeScript,
+  pattern RequireGuard,
+ )
+import Cardano.Ledger.Dijkstra.UTxO
+import Cardano.Ledger.Plutus
+import Cardano.Ledger.Shelley.API (mkStAnnTx)
+import Cardano.Ledger.Shelley.LedgerState
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Shelley.Scripts (
+  pattern RequireAllOf,
+  pattern RequireAnyOf,
+  pattern RequireMOf,
+  pattern RequireSignature,
+ )
+import Cardano.Ledger.State
+import Cardano.Ledger.Tools (ensureMinCoinTxOut)
+import Cardano.Ledger.Val
+import Control.Monad.State (gets)
+import Data.Foldable
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
+import qualified Data.OMap.Strict as OMap
+import qualified Data.Set as Set
+import Lens.Micro
+import Test.Cardano.Ledger.Conway.ImpTest
+import Test.Cardano.Ledger.Dijkstra.Era
+import Test.Cardano.Ledger.Dijkstra.Examples (exampleDijkstraGenesis)
+import Test.Cardano.Ledger.Imp.Common
+import Test.Cardano.Ledger.Plutus.Examples (alwaysFailsWithDatum, alwaysSucceedsWithDatum)
+
+instance ShelleyEraImp DijkstraEra where
+  initGenesis = pure exampleDijkstraGenesis
+
+  initNewEpochState = defaultInitNewEpochState $ \nes ->
+    nes
+      & nesEsL . epochStateGovStateL . committeeGovStateL %~ fmap updateCommitteeExpiry
+    where
+      updateCommitteeExpiry =
+        committeeMembersL
+          %~ fmap (const $ addEpochInterval (impEraStartEpochNo @DijkstraEra) (EpochInterval 15))
+
+  impSatisfyNativeScript = impDijkstraSatisfyNativeScript
+
+  modifyPParams = conwayModifyPParams
+
+  fixupTx = dijkstraFixupTx
+  expectTxSuccess = impBabbageExpectTxSuccess
+  modifyImpInitProtVer = conwayModifyImpInitProtVer
+  genRegTxCert = dijkstraGenRegTxCert
+  genUnRegTxCert = dijkstraGenUnRegTxCert
+  delegStakeTxCert = conwayDelegStakeTxCert
+
+instance AllegraEraImp DijkstraEra
+
+instance MaryEraImp DijkstraEra
+
+instance AlonzoEraImp DijkstraEra where
+  scriptTestContexts =
+    plutusTestScripts SPlutusV1
+      <> plutusTestScripts SPlutusV2
+      <> plutusTestScripts SPlutusV3
+      <> plutusTestScripts SPlutusV4
+
+instance BabbageEraImp DijkstraEra
+
+instance ConwayEraImp DijkstraEra
+
+class
+  ( ConwayEraImp era
+  , DijkstraEraTest era
+  , DijkstraEraBlockBody era
+  , InjectRuleFailure "BBODY" DijkstraBbodyPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraLedgerPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraPoolPredFailure era
+  , InjectRuleFailure "LEDGER" EntitiesPredFailure era
+  , InjectRuleFailure "LEDGER" SubEntitiesPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraUtxoPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraUtxowPredFailure era
+  , InjectRuleFailure "MEMPOOL" DijkstraMempoolPredFailure era
+  , InjectRuleFailure "MEMPOOL" DijkstraUtxoPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubUtxoPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraGovPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubGovPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubUtxowPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubDelegPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubLedgerPredFailure era
+  , Inject (NonEmpty (Conway.PredicateFailure (EraRule "MEMPOOL" era))) (ApplyTxError era)
+  ) =>
+  DijkstraEraImp era
+
+instance DijkstraEraImp DijkstraEra
+
+-- Partial implementation used for checking predicate failures
+instance InjectRuleFailure "LEDGER" Shelley.ShelleyDelegPredFailure DijkstraEra where
+  injectFailure = DijkstraEntitiesFailure . injectFailure @"ENTITIES"
+
+instance InjectRuleFailure "ENTITIES" Shelley.ShelleyDelegPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "CERTS" Shelley.ShelleyDelegPredFailure DijkstraEra where
+  injectFailure = Conway.CertFailure . injectFailure
+
+instance InjectRuleFailure "CERT" Shelley.ShelleyDelegPredFailure DijkstraEra where
+  injectFailure = Conway.DelegFailure . injectFailure
+
+instance InjectRuleFailure "DELEG" Shelley.ShelleyDelegPredFailure DijkstraEra where
+  injectFailure (Shelley.DelegAccountAlreadyRegistered c) = Conway.DelegAccountAlreadyRegistered c
+  injectFailure (Shelley.StakeKeyNotRegisteredDELEG c) = Conway.StakeKeyNotRegisteredDELEG c
+  injectFailure (Shelley.StakeKeyNonZeroAccountBalanceDELEG c) = Conway.StakeKeyHasNonZeroAccountBalanceDELEG c
+  injectFailure _ = error "Cannot inject ShelleyDelegPredFailure into DijkstraEra"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubUtxowPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+instance InjectRuleFailure "SUBLEDGERS" DijkstraSubUtxowPredFailure DijkstraEra where
+  injectFailure = SubLedgerFailure . injectFailure @"SUBLEDGER"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubUtxoPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+instance InjectRuleFailure "SUBLEDGERS" DijkstraSubUtxoPredFailure DijkstraEra where
+  injectFailure = SubLedgerFailure . injectFailure @"SUBLEDGER"
+
+instance InjectRuleFailure "SUBLEDGER" DijkstraSubUtxoPredFailure DijkstraEra where
+  injectFailure = SubUtxowFailure . injectFailure @"SUBUTXOW"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubGovPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+instance InjectRuleFailure "SUBLEDGERS" DijkstraSubGovPredFailure DijkstraEra where
+  injectFailure = SubLedgerFailure . injectFailure @"SUBLEDGER"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubDelegPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+instance InjectRuleFailure "SUBLEDGERS" DijkstraSubDelegPredFailure DijkstraEra where
+  injectFailure = SubLedgerFailure . injectFailure @"SUBLEDGER"
+
+instance InjectRuleFailure "SUBLEDGER" DijkstraSubDelegPredFailure DijkstraEra where
+  injectFailure = SubEntitiesFailure . injectFailure @"SUBENTITIES"
+
+instance InjectRuleFailure "SUBENTITIES" DijkstraSubDelegPredFailure DijkstraEra where
+  injectFailure = SubCertsFailure . injectFailure @"SUBCERTS"
+
+instance InjectRuleFailure "SUBCERTS" DijkstraSubDelegPredFailure DijkstraEra where
+  injectFailure = SubCertFailure . injectFailure @"SUBCERT"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubLedgerPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+-- | A top level transaction that nests the given sub-transactions and
+-- is otherwise empty.
+mkTopTxWithSubTxs :: DijkstraEraImp era => [Tx SubTx era] -> Tx TopTx era
+mkTopTxWithSubTxs subTxs =
+  mkBasicTx mkBasicTxBody & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable subTxs
+
+-- | Apply an effectful modification to every sub-transaction of a top
+-- level transaction.
+--
+-- Sub-transactions are keyed by their transaction id, so a modification
+-- that makes two of them equal keeps only the first.
+traverseSubTxs ::
+  ( Applicative m
+  , EraTx era
+  , DijkstraEraTxBody era
+  ) =>
+  (Tx SubTx era -> m (Tx SubTx era)) ->
+  Tx TopTx era ->
+  m (Tx TopTx era)
+traverseSubTxs f tx =
+  replaceSubTxs <$> traverse f (OMap.elems (tx ^. bodyTxL . subTransactionsTxBodyL))
+  where
+    replaceSubTxs subTxs =
+      tx & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable subTxs
+
+-- | Apply a modification to every sub-transaction, after the given
+-- fixup `f` has run, in order to provoke a failure that `f` otherwise
+-- repairs.
+--
+-- The top level transaction is signed again afterwards, since
+-- sub-transactions are part of its body and modifying one invalidates
+-- its witnesses.
+withPostFixupSubTxs ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  (Tx SubTx era -> ImpTestM era (Tx SubTx era)) ->
+  ImpTestM era a ->
+  ImpTestM era a
+withPostFixupSubTxs f = withPostFixup $ traverseSubTxs f >=> rederiveAddrTxWits
+
+-- | Submit a sub-transaction, nested in an otherwise empty top level
+-- transaction, that is expected to be rejected with exactly the given
+-- predicate failures.
+submitFailingSubTx ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  Tx SubTx era ->
+  NonEmpty (PredicateFailure (EraRule "LEDGER" era)) ->
+  ImpTestM era ()
+submitFailingSubTx subTx = submitFailingTx $ mkTopTxWithSubTxs [subTx]
+
+-- | Submit a transaction through the mempool that is expected to be rejected
+-- with exactly the given predicate failures.
+submitFailingMempoolTx ::
+  (HasCallStack, DijkstraEraImp era) =>
+  Tx TopTx era ->
+  NonEmpty (DijkstraMempoolPredFailure era) ->
+  ImpTestM era ()
+submitFailingMempoolTx tx expectedFailures = do
+  result <- trySubmitMempoolTx tx
+  expectMempoolRejection result expectedFailures
+
+-- | Expect the result of a mempool submission to be a rejection with exactly
+-- the given predicate failures.
+expectMempoolRejection ::
+  (HasCallStack, DijkstraEraImp era) =>
+  Either (ApplyTxError era) a ->
+  NonEmpty (DijkstraMempoolPredFailure era) ->
+  ImpTestM era ()
+expectMempoolRejection result expectedFailures = case result of
+  Left applyTxError ->
+    applyTxError `shouldBeExpr` inject (injectFailure @"MEMPOOL" <$> expectedFailures)
+  Right _ ->
+    assertFailure $ "Expected a mempool rejection with: " <> show expectedFailures
+
+-- | A sub-transaction that casts a single vote.
+voteSubTx :: DijkstraEraImp era => Vote -> Voter -> GovActionId -> Tx SubTx era
+voteSubTx vote voter govActionId =
+  mkBasicTx $
+    mkBasicTxBody
+      & votingProceduresTxBodyL
+        .~ VotingProcedures
+          ( Map.singleton voter . Map.singleton govActionId $
+              VotingProcedure {vProcVote = vote, vProcAnchor = SNothing}
+          )
+
+-- | A sub-transaction that declares the given value as the current treasury value.
+declareTreasurySubTx :: DijkstraEraImp era => Coin -> Tx SubTx era
+declareTreasurySubTx declaredTreasury =
+  mkBasicTx $ mkBasicTxBody & currentTreasuryValueTxBodyL .~ SJust declaredTreasury
+
+impDijkstraSatisfyNativeScript ::
+  ( DijkstraEraImp era
+  , NativeScript era ~ DijkstraNativeScript era
+  ) =>
+  Set.Set (KeyHash Witness) ->
+  TxBody l era ->
+  NativeScript era ->
+  ImpTestM era (Maybe (Map.Map (KeyHash Witness) (KeyPair Witness)))
+impDijkstraSatisfyNativeScript providedVKeyHashes txBody script = do
+  let vi = txBody ^. vldtTxBodyL
+  let guards = txBody ^. guardsTxBodyL
+  case script of
+    RequireSignature keyHash -> impSatisfySignature keyHash providedVKeyHashes
+    RequireAllOf ss -> impSatisfyMNativeScripts providedVKeyHashes txBody (length ss) ss
+    RequireAnyOf ss -> do
+      m <- frequency [(9, pure 1), (1, choose (1, length ss))]
+      impSatisfyMNativeScripts providedVKeyHashes txBody m ss
+    RequireMOf m ss -> impSatisfyMNativeScripts providedVKeyHashes txBody m ss
+    lock@(RequireTimeStart _)
+      | evalDijkstraNativeScript mempty vi guards lock -> pure $ Just mempty
+      | otherwise -> pure Nothing
+    lock@(RequireTimeExpire _)
+      | evalDijkstraNativeScript mempty vi guards lock -> pure $ Just mempty
+      | otherwise -> pure Nothing
+    -- TODO: actual satisfy the native scripts by updating the transaction's guards
+    ns@(RequireGuard _)
+      | evalDijkstraNativeScript mempty vi guards ns -> pure $ Just mempty
+      | otherwise -> pure Nothing
+    _ -> error "Impossible: All NativeScripts should have been accounted for"
+
+dijkstraGenRegTxCert ::
+  forall era.
+  ( ShelleyEraImp era
+  , ConwayEraTxCert era
+  ) =>
+  Credential Staking ->
+  ImpTestM era (TxCert era)
+dijkstraGenRegTxCert stakingCredential =
+  RegDepositTxCert stakingCredential
+    <$> getsNES (nesEsL . curPParamsEpochStateL . ppKeyDepositL)
+
+dijkstraGenUnRegTxCert ::
+  forall era.
+  ( ShelleyEraImp era
+  , ConwayEraTxCert era
+  ) =>
+  Credential Staking ->
+  ImpTestM era (TxCert era)
+dijkstraGenUnRegTxCert stakingCredential = do
+  accounts <- getsNES $ nesEsL . esLStateL . lsCertStateL . certDStateL . accountsL
+  deposit <- case lookupAccountState stakingCredential accounts of
+    Nothing -> getsNES $ nesEsL . curPParamsEpochStateL . ppKeyDepositL
+    Just accountState -> pure (fromCompact (accountState ^. depositAccountStateL))
+  pure $ UnRegDepositTxCert stakingCredential deposit
+
+switchTxToLegacyMode ::
+  DijkstraEraImp era =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+switchTxToLegacyMode tx = do
+  txIn <- produceScript . hashPlutusScript $ alwaysSucceedsWithDatum SPlutusV3
+  pure $ tx & bodyTxL . inputsTxBodyL <>~ [txIn]
+
+switchTxToPhase2InvalidLegacyMode ::
+  DijkstraEraImp era =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+switchTxToPhase2InvalidLegacyMode tx = do
+  txIn <- produceScript . hashPlutusScript $ alwaysFailsWithDatum SPlutusV3
+  pure $ tx & bodyTxL . inputsTxBodyL <>~ [txIn]
+
+dijkstraFixupTx ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+dijkstraFixupTx tx = do
+  -- add top-level Plutus script witnesses so legacy detection sees them
+  fixedUp <- fixupScriptWits =<< addCollateralInputForSubTxs =<< fixupSubTransactions tx
+  isLegacy <- detectLegacyMode fixedUp
+  balancedInLegacy <- if isLegacy then balanceSubTransactions fixedUp else pure fixedUp
+  babbageFixupTx balancedInLegacy
+
+detectLegacyMode ::
+  DijkstraEraImp era =>
+  Tx TopTx era ->
+  ImpTestM era Bool
+detectLegacyMode tx = do
+  Globals {systemStart, epochInfo} <- gets (^. impGlobalsL)
+  pp <- getsNES $ nesEsL . curPParamsEpochStateL
+  utxo <- getUTxO
+  let stAnnTx = mkStAnnTx epochInfo systemStart pp utxo mempty tx
+  pure $ stAnnTx ^. plutusLegacyModeStAnnTxG
+
+-- | Add a collateral input to the top-level transaction when a
+-- sub-transaction needs a Plutus script.
+--
+-- Collateral is validated across the whole batch but the inherited
+-- `addCollateralInput` step only inspects the top-level transaction's
+-- own script needs. This step covers the sub-transactions. Both skip
+-- when a collateral input is already present, so at most one collateral
+-- input is added for the whole batch, and neither step overrides
+-- collateral that a test set itself.
+addCollateralInputForSubTxs ::
+  DijkstraEraImp era =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+addCollateralInputForSubTxs tx
+  | not (null (tx ^. bodyTxL . collateralInputsTxBodyL)) = pure tx
+  | otherwise = do
+      subTxContexts <-
+        traverse impGetPlutusContexts . OMap.elems $ tx ^. bodyTxL . subTransactionsTxBodyL
+      if all null subTxContexts
+        then pure tx
+        else impAnn "addCollateralInputForSubTxs" $ do
+          collateralInput <- makeCollateralInput
+          pure $ tx & bodyTxL . collateralInputsTxBodyL %~ Set.insert collateralInput
+
+fixupSubTransactions ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+fixupSubTransactions tx = impAnn "fixupSubTransactions" $ do
+  fixedup <-
+    traverse
+      fixupSubTransaction
+      (OMap.elems (tx ^. bodyTxL . subTransactionsTxBodyL))
+  pure $ tx & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable fixedup
+  where
+    fixupSubTransaction =
+      addSubTxIn
+        >=> addNativeScriptTxWits
+        >=> fixupAuxDataHash
+        >=> fixupScriptWits
+        >=> fixupOutputDatums
+        >=> fixupDatums
+        >=> fixupTxOuts
+        >=> addMissingRedeemers
+        >=> fixupPPHash
+        >=> updateAddrTxWits
+    addMissingRedeemers subTx = do
+      let originalRedeemers = subTx ^. witsTxL . rdmrsTxWitsL
+      withMaxRedeemers <- txWithMaxRedeemers subTx
+      pure $ withMaxRedeemers & witsTxL . rdmrsTxWitsL %~ (originalRedeemers <>)
+    addSubTxIn subTx
+      | not (Set.null (subTx ^. bodyTxL . inputsTxBodyL)) = pure subTx
+      | otherwise = do
+          addr <- freshKeyAddrNoPtr_
+          -- restore default fixup behaviour temporarily,
+          -- to make sure it isn't affected by any higher-level fixup modifications
+          newTxIn <- withFixup fixupTx $ sendCoinTo addr (Coin 1_000_000)
+          pure $ subTx & bodyTxL . inputsTxBodyL .~ Set.singleton newTxIn
+
+balanceSubTransactions ::
+  DijkstraEraImp era =>
+  Tx TopTx era ->
+  ImpTestM era (Tx TopTx era)
+balanceSubTransactions topTx = do
+  pp <- getsNES $ nesEsL . curPParamsEpochStateL
+  pools <- Map.keysSet <$> getsNES (nesEsL . esLStateL . lsCertStateL . certPStateL . psStakePoolsL)
+  utxo <- getUTxO
+  let
+    subTransactions = topTx ^. bodyTxL . subTransactionsTxBodyL
+    subsCerts = foldMap' (^. bodyTxL . certsTxBodyL) subTransactions
+    subsConsumed = coin $ foldMap' (dijkstraConsumed pp utxo . (^. bodyTxL)) subTransactions
+    subsProduced =
+      foldMap' (coin . localProducedValue pp . (^. bodyTxL)) subTransactions
+        <> getTotalDepositsTxCerts pp (`Set.member` pools) subsCerts
+  balancer <- mkBalancerSubTx subsConsumed subsProduced
+  case balancer of
+    Nothing -> pure topTx
+    Just b -> pure $ topTx & bodyTxL . subTransactionsTxBodyL %~ (OMap.|> b)
+
+mkBalancerSubTx ::
+  DijkstraEraImp era =>
+  -- | Cumulated consumed value by all sub-transactions
+  Coin ->
+  -- | Cumulated produced value by all sub-transactions
+  Coin ->
+  ImpTestM era (Maybe (Tx SubTx era))
+mkBalancerSubTx consumed produced = do
+  pp <- getsNES $ nesEsL . curPParamsEpochStateL
+  case consumed `compare` produced of
+    EQ -> pure Nothing
+    ord -> do
+      addr <- freshKeyAddrNoPtr_
+      let
+        (surplus, shortfall) = case ord of
+          GT -> (consumed <-> produced, mempty)
+          LT -> (mempty, produced <-> consumed)
+        -- a buffer to make both the input UTxO and the change output satisfy minCoin. It's added on both sides, so it cancels out.
+        minChangeCoin = ensureMinCoinTxOut pp (mkBasicTxOut addr mempty) ^. coinTxOutL
+        inputCoin = minChangeCoin <> shortfall
+        changeCoin = minChangeCoin <> surplus
+        changeOut = mkBasicTxOut addr (inject changeCoin)
+      newTxIn <- withFixup fixupTx $ sendCoinTo addr inputCoin
+      let subTx =
+            mkBasicTx mkBasicTxBody
+              & bodyTxL . inputsTxBodyL .~ [newTxIn]
+              & bodyTxL . outputsTxBodyL .~ [changeOut]
+      Just <$> updateAddrTxWits subTx

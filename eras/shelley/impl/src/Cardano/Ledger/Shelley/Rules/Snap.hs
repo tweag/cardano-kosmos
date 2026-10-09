@@ -1,0 +1,104 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE EmptyDataDeriving #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Shelley.Rules.Snap (
+  SNAP,
+  SnapEvent (..),
+  SnapEnv (..),
+) where
+
+import Cardano.Ledger.BaseTypes (EpochInterval (..), EpochNo, ShelleyBase, unNonZero)
+import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Core
+import Cardano.Ledger.Credential (Credential)
+import Cardano.Ledger.Shelley.Era (SNAP)
+import Cardano.Ledger.Shelley.LedgerState (
+  LedgerState (..),
+  UTxOState (..),
+ )
+import Cardano.Ledger.State
+import Control.DeepSeq (NFData)
+import Control.State.Transition (
+  STS (..),
+  TRC (..),
+  TransitionRule,
+  judgmentContext,
+  tellEvent,
+ )
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import qualified Data.VMap as VMap
+import Data.Void (Void)
+import GHC.Generics (Generic)
+import Lens.Micro
+
+-- ======================================================
+
+newtype SnapEvent era
+  = StakeDistEvent
+      (Map (Credential Staking) (Coin, KeyHash StakePool))
+  deriving (Generic)
+
+deriving instance Eq (SnapEvent era)
+
+instance NFData (SnapEvent era)
+
+data SnapEnv era = SnapEnv (LedgerState era) (PParams era)
+
+instance (EraTxOut era, EraStake era, EraCertState era) => STS (SNAP era) where
+  type State (SNAP era) = SnapShots era
+  type Signal (SNAP era) = EpochNo
+  type Environment (SNAP era) = SnapEnv era
+  type BaseM (SNAP era) = ShelleyBase
+  type PredicateFailure (SNAP era) = Void
+  type Event (SNAP era) = SnapEvent era
+  initialRules = [pure emptySnapShots]
+  transitionRules = [snapTransition]
+
+-- | The stake distribution was previously computed as in the spec:
+--
+-- @
+--  stakeDistr @era utxo dstate pstate
+-- @
+--
+-- but is now computed incrementally. We leave the comment as a historical note about
+-- where important changes were made to the source code.
+snapTransition ::
+  (EraStake era, EraCertState era) => TransitionRule (SNAP era)
+snapTransition = do
+  TRC (snapEnv, s, eNo) <- judgmentContext
+
+  let SnapEnv ls@(LedgerState (UTxOState _utxo _ fees _ _ _) certState) _pp = snapEnv
+      instantStake = ls ^. instantStakeG
+      -- per the spec: stakeSnap = stakeDistr @era utxo dstate pstate
+      istakeSnap =
+        snapShotFromInstantStake instantStake (certState ^. certDStateL) (certState ^. certPStateL)
+
+  tellEvent $
+    let stakeMap :: Map (Credential Staking) (Coin, KeyHash StakePool)
+        stakeMap =
+          Map.map
+            (\swd -> (fromCompact $ unNonZero $ swdStake swd, swdDelegation swd))
+            (VMap.toMap $ unActiveStake $ ssActiveStake istakeSnap)
+     in StakeDistEvent stakeMap
+
+  pure $
+    SnapShots
+      { -- Pre-Dijkstra eras have no Leios committee, so its size is zero and it
+        -- rotates into the set position empty.
+        ssStakeMark = MarkSnapShot istakeSnap eNo 0
+      , -- ssStakeMarkPoolDistr exists for performance reasons, see ADR-7
+        ssStakeMarkPoolDistr = calculatePoolDistr istakeSnap
+      , ssStakeSet = mkSetSnapShot (ssStakeMark s) (EpochInterval 0)
+      , ssStakeGo = mkGoSnapShot (ssStakeSet s)
+      , ssFee = fees
+      }

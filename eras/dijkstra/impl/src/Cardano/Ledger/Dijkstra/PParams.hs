@@ -1,0 +1,1528 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Dijkstra.PParams (
+  DijkstraPParams (..),
+  DijkstraEraPParams (..),
+  UpgradeDijkstraPParams (..),
+  -- Lenses
+  ppRefScriptCostMultiplierL,
+  ppRefScriptCostStrideL,
+  ppMaxRefScriptSizePerTxL,
+  ppMaxRefScriptSizePerBlockL,
+  ppMaxPledgeLeverageL,
+  ppMinPoolMarginL,
+  ppLeiosAnnouncementPeriodLengthL,
+  ppLeiosVotePeriodLengthL,
+  ppLeiosDiffusionPeriodLengthL,
+  ppLeiosCommitteeSizeL,
+  ppLeiosQuorumStakeThresholdL,
+  ppPerasMinCandidateBlockAgeL,
+  ppPerasHealingFactorL,
+  ppPerasCertBoostL,
+  ppPerasTargetCommitteeSizeL,
+  ppPerasBootstrapRoundL,
+  ppPerasQuorumThresholdSafetyMarginL,
+  ppMaxEndorserBlockReferencesSizeL,
+  ppMaxEndorserBlockTxsSizeL,
+  ppMaxEndorserBlockExUnitsL,
+  ppMaxRefScriptSizePerEndorserBlockL,
+  ppRefInputsCostPerMultiAssetPolicyL,
+  ppRefInputsCostPerDatumByteL,
+  ppuRefScriptCostMultiplierL,
+  ppuRefScriptCostStrideL,
+  ppuMaxRefScriptSizePerTxL,
+  ppuMaxRefScriptSizePerBlockL,
+  ppuMaxPledgeLeverageL,
+  ppuMinPoolMarginL,
+  ppuLeiosAnnouncementPeriodLengthL,
+  ppuLeiosVotePeriodLengthL,
+  ppuLeiosDiffusionPeriodLengthL,
+  ppuLeiosCommitteeSizeL,
+  ppuLeiosQuorumStakeThresholdL,
+  ppuPerasMinCandidateBlockAgeL,
+  ppuPerasHealingFactorL,
+  ppuPerasCertBoostL,
+  ppuPerasTargetCommitteeSizeL,
+  ppuPerasBootstrapRoundL,
+  ppuPerasQuorumThresholdSafetyMarginL,
+  ppuMaxEndorserBlockReferencesSizeL,
+  ppuMaxEndorserBlockTxsSizeL,
+  ppuMaxEndorserBlockExUnitsL,
+  ppuMaxRefScriptSizePerEndorserBlockL,
+  ppuRefInputsCostPerMultiAssetPolicyL,
+  ppuRefInputsCostPerDatumByteL,
+
+  -- * Deprecated
+  dppMinFeeA,
+  dppMinFeeB,
+) where
+
+import Cardano.Ledger.Alonzo.PParams
+import Cardano.Ledger.Babbage.PParams
+import Cardano.Ledger.BaseTypes (
+  EpochInterval (..),
+  KeyValuePairs (..),
+  Milliseconds32 (..),
+  NonNegativeInterval,
+  NonZero,
+  PositiveInterval,
+  ProtVer (..),
+  StrictMaybe (..),
+  ToKeyValuePairs (..),
+  UnitInterval,
+  knownNonZeroBounded,
+ )
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+  decodeNullStrictMaybe,
+  encodeNullStrictMaybe,
+ )
+import Cardano.Ledger.Binary.Coders (Decode (..), Encode (..), decode, encode, (!>), (<!))
+import Cardano.Ledger.Coin
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.PParams
+import Cardano.Ledger.Core
+import Cardano.Ledger.Dijkstra.Era (DijkstraEra)
+import Cardano.Ledger.HKD (
+  HKDFunctor (..),
+  HKDNoUpdate,
+  HKDSemialign (..),
+  NoUpdate (..),
+ )
+import Cardano.Ledger.Plutus (
+  CostModel,
+  CostModels,
+  CostModelsUpdate (..),
+  ExUnits (..),
+  Language (..),
+  OrdExUnits (..),
+  Prices (..),
+  decodeCostModel,
+  emptyCostModels,
+  encodeCostModel,
+  mkCostModels,
+  parseCostModelAsArray,
+  updateCostModels,
+ )
+import Cardano.Ledger.Shelley.PParams
+import Cardano.Ledger.Val (Val (..))
+import Cardano.Slotting.Slot (SlotInterval (..))
+import Control.DeepSeq (NFData)
+import Data.Aeson (FromJSON, ToJSON (..), withObject, (.!=), (.:), (.:?), (.=))
+import qualified Data.Aeson as Aeson
+import Data.Data (Proxy (..))
+import Data.Default (Default (..))
+import Data.Functor.Identity (Identity)
+import qualified Data.Map.Strict as Map
+import Data.Word (Word16, Word32)
+import GHC.Generics (Generic)
+import Lens.Micro (Lens', lens, to, (^.))
+import NoThunks.Class (NoThunks)
+
+-- | Dijkstra Protocol parameters. The following parameters have been added since Dijkstra:
+-- * @maxRefScriptSizePerBlock@
+-- * @maxRefScriptSizePerTx@
+-- * @refScriptCostStride@
+-- * @refScriptCostMultiplier@
+-- * @maxPledgeLeverage@
+-- * @minPoolMargin@
+-- * @leiosAnnouncementPeriodLength@
+-- * @leiosVotePeriodLength@
+-- * @leiosDiffusionPeriodLength@
+-- * @leiosCommitteeSize@
+-- * @leiosQuorumStakeThreshold@
+-- * @maxEndorserBlockReferencesSize@
+-- * @maxEndorserBlockTxsSize@
+-- * @maxEndorserBlockExecutionUnits@
+-- * @maxRefScriptSizePerEndorserBlock@
+-- * @perasMinCandidateBlockAge@
+-- * @perasHealingFactor@
+-- * @perasCertBoost@
+-- * @perasTargetCommitteeSize@
+-- * @perasBootstrapRound@
+-- * @perasQuorumThresholdSafetyMargin@
+-- * @refInputsCostPerMultiAssetPolicy@
+-- * @refInputsCostPerDatumByte@
+data DijkstraPParams f era = DijkstraPParams
+  { dppTxFeePerByte :: !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f CoinPerByte)
+  -- ^ The linear factor for the minimum fee calculation
+  , dppTxFeeFixed :: !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f (CompactForm Coin))
+  -- ^ The constant factor for the minimum fee calculation
+  , dppMaxBBSize :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Maximal block body size
+  , dppMaxTxSize :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Maximal transaction size
+  , dppMaxBHSize :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word16)
+  -- ^ Maximal block header size
+  , dppKeyDeposit :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f (CompactForm Coin))
+  -- ^ The amount of a key registration deposit
+  , dppPoolDeposit :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f (CompactForm Coin))
+  -- ^ The amount of a pool registration deposit
+  , dppEMax :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f EpochInterval)
+  -- ^ Maximum number of epochs in the future a pool retirement is allowed to
+  -- be scheduled for.
+  , dppNOpt :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f Word16)
+  -- ^ Desired number of pools
+  , dppA0 :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f NonNegativeInterval)
+  -- ^ Pool influence
+  , dppRho :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f UnitInterval)
+  -- ^ Monetary expansion
+  , dppTau :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f UnitInterval)
+  -- ^ Treasury expansion
+  , dppProtocolVersion :: !(HKDNoUpdate f ProtVer)
+  -- ^ Protocol version
+  , dppMinPoolCost :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f (CompactForm Coin))
+  -- ^ Minimum Stake Pool Cost
+  , dppCoinsPerUTxOByte :: !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f CoinPerByte)
+  -- ^ Cost in lovelace per byte of UTxO storage
+  , dppCostModels :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f CostModels)
+  -- ^ Cost models for non-native script languages
+  , dppPrices :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f Prices)
+  -- ^ Prices of execution units (for non-native script languages)
+  , dppMaxTxExUnits :: !(THKD ('PPGroups 'NetworkGroup 'NoStakePoolGroup) f OrdExUnits)
+  -- ^ Max total script execution resources units allowed per tx
+  , dppMaxBlockExUnits :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f OrdExUnits)
+  -- ^ Max total script execution resources units allowed per block
+  , dppMaxValSize :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Max size of a Value in an output
+  , dppCollateralPercentage :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f Word16)
+  -- ^ Percentage of the txfee which must be provided as collateral when
+  -- including non-native scripts.
+  , dppMaxCollateralInputs :: !(THKD ('PPGroups 'NetworkGroup 'NoStakePoolGroup) f Word16)
+  -- ^ Maximum number of collateral inputs allowed in a transaction
+  , dppPoolVotingThresholds :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f PoolVotingThresholds)
+  -- ^ Thresholds for SPO votes
+  , dppDRepVotingThresholds :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f DRepVotingThresholds)
+  -- ^ Thresholds for DRep votes
+  , dppCommitteeMinSize :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f Word16)
+  -- ^ Minimum size of the Constitutional Committee
+  , dppCommitteeMaxTermLength :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f EpochInterval)
+  -- ^ The Constitutional Committee Term limit in number of Slots
+  , dppGovActionLifetime :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f EpochInterval)
+  -- ^ Gov action lifetime in number of Epochs
+  , dppGovActionDeposit :: !(THKD ('PPGroups 'GovGroup 'SecurityGroup) f (CompactForm Coin))
+  -- ^ The amount of the Gov Action deposit
+  , dppDRepDeposit :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f (CompactForm Coin))
+  -- ^ The amount of a DRep registration deposit
+  , dppDRepActivity :: !(THKD ('PPGroups 'GovGroup 'NoStakePoolGroup) f EpochInterval)
+  -- ^ The number of Epochs that a DRep can perform no activity without losing their @Active@ status.
+  , dppMinFeeRefScriptCostPerByte ::
+      !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f NonNegativeInterval)
+  -- ^ Reference scripts fee for the minimum fee calculation
+  -- TODO ensure that the groups here make sense
+  , -- New ones for Dijkstra:
+    dppMaxRefScriptSizePerBlock :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Limit on the total number of bytes of all reference scripts combined from
+  -- all transactions within a block.
+  , dppMaxRefScriptSizePerTx :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Limit on the total number of bytes of reference scripts that a transaction can use.
+  , dppRefScriptCostStride :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f (NonZero Word32))
+  , dppRefScriptCostMultiplier :: !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f PositiveInterval)
+  , dppMaxPledgeLeverage :: !(THKD ('PPGroups 'TechnicalGroup 'NoStakePoolGroup) f MaxPledgeLeverage)
+  , dppMinPoolMargin :: !(THKD ('PPGroups 'EconomicGroup 'NoStakePoolGroup) f UnitInterval)
+  , dppLeiosAnnouncementPeriodLength ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Milliseconds32)
+  -- ^ Duration for announcement headers (extended praos headers) to propagate
+  -- through the network, @L_hdr@ in CIP-164.
+  , dppLeiosVotePeriodLength ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Milliseconds32)
+  -- ^ Duration during which committee members can vote on endorser blocks,
+  -- @L_vote@ in CIP-164.
+  , dppLeiosDiffusionPeriodLength ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Milliseconds32)
+  -- ^ Duration after voting that ensures network-wide availability of a
+  -- certified endorser block, @L_diff@ in CIP-164.
+  , dppLeiosCommitteeSize ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word16)
+  -- ^ Number of top-stake pools seated on the epoch's voting committee, @N_c@
+  -- in CIP-164.
+  , dppLeiosQuorumStakeThreshold ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f UnitInterval)
+  -- ^ Minimum fraction of total active stake that the votes in a certificate
+  -- must represent, @tau@ in CIP-164.
+  , dppMaxEndorserBlockReferencesSize ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Limit on the size of the endorsement itself, i.e. size of all transaction
+  -- references and sizes contained.
+  , dppMaxEndorserBlockTxsSize ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Limit on the total size of all endorsed transactions in endorser block.
+  , dppMaxEndorserBlockExUnits ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f OrdExUnits)
+  -- ^ Max total script execution resources units allowed per endorser block.
+  , dppMaxRefScriptSizePerEndorserBlock ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word32)
+  -- ^ Limit on the total number of bytes of all reference scripts combined from
+  -- all transactions within an endorser block.
+  , dppPerasMinCandidateBlockAge ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f SlotInterval)
+  -- ^ Minimum age for a block to be eligible for voting in a Peras round.
+  , dppPerasHealingFactor ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f PositiveInterval)
+  -- ^ Healing time coefficient used to derive the length of a cooldown period.
+  , dppPerasCertBoost ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word16)
+  -- ^ Extra chain weight that a Peras Certificate gives to a boosted block.
+  , dppPerasTargetCommitteeSize ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f Word16)
+  -- ^ Target size of the voting committee.
+  , dppPerasBootstrapRound ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f (StrictMaybe Word32))
+  -- ^ Round number used to manually bootstrap voting at a specific time.
+  , dppPerasQuorumThresholdSafetyMargin ::
+      !(THKD ('PPGroups 'NetworkGroup 'SecurityGroup) f UnitInterval)
+  -- ^ Extra safety margin added on top of the 75% quorum threshold baseline.
+  -- Must be between 0 and 0.25, inclusive.
+  , dppRefInputsCostPerMultiAssetPolicy :: !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f Coin)
+  -- ^ Fee charged for every multi-asset policy present in the values of a
+  -- transaction's reference inputs. Extracting large amounts of data from disk
+  -- is a bottleneck once ledger state is stored on disk, so this acts as a
+  -- monetary deterrent against it.
+  , dppRefInputsCostPerDatumByte :: !(THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f CoinPerByte)
+  -- ^ Fee charged per byte of datum attached to a transaction's reference
+  -- inputs. Same rationale as
+  -- 'dppRefInputsCostPerMultiAssetPolicy'.
+  }
+  deriving (Generic)
+
+dppMinFeeA ::
+  forall era f.
+  HKDFunctor f =>
+  DijkstraPParams f era -> THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f Coin
+dppMinFeeA p = THKD $ unTHKD (dppTxFeePerByte p) ^. hkdCoinPerByteL @f . hkdPartialCompactCoinL @f
+{-# DEPRECATED dppMinFeeA "In favor of `dppTxFeePerByte`" #-}
+
+dppMinFeeB ::
+  forall era f.
+  HKDFunctor f =>
+  DijkstraPParams f era -> THKD ('PPGroups 'EconomicGroup 'SecurityGroup) f Coin
+dppMinFeeB p = THKD $ unTHKD (dppTxFeeFixed p) ^. hkdPartialCompactCoinL @f
+{-# DEPRECATED dppMinFeeB "In favor of `dppTxFeeFixed`" #-}
+
+dijkstraApplyPPUpdates ::
+  forall era.
+  DijkstraPParams Identity era ->
+  DijkstraPParams StrictMaybe era ->
+  DijkstraPParams Identity era
+dijkstraApplyPPUpdates pp ppu = do
+  DijkstraPParams
+    { dppTxFeePerByte = ppApplyUpdate dppTxFeePerByte
+    , dppTxFeeFixed = ppApplyUpdate dppTxFeeFixed
+    , dppMaxBBSize = ppApplyUpdate dppMaxBBSize
+    , dppMaxTxSize = ppApplyUpdate dppMaxTxSize
+    , dppMaxBHSize = ppApplyUpdate dppMaxBHSize
+    , dppKeyDeposit = ppApplyUpdate dppKeyDeposit
+    , dppPoolDeposit = ppApplyUpdate dppPoolDeposit
+    , dppEMax = ppApplyUpdate dppEMax
+    , dppNOpt = ppApplyUpdate dppNOpt
+    , dppA0 = ppApplyUpdate dppA0
+    , dppRho = ppApplyUpdate dppRho
+    , dppTau = ppApplyUpdate dppTau
+    , dppProtocolVersion = dppProtocolVersion pp
+    , dppMinPoolCost = ppApplyUpdate dppMinPoolCost
+    , dppCoinsPerUTxOByte = ppApplyUpdate dppCoinsPerUTxOByte
+    , dppCostModels =
+        case dppCostModels ppu of
+          THKD SNothing -> dppCostModels pp
+          THKD (SJust costModelUpdate) ->
+            THKD $ updateCostModels (unTHKD (dppCostModels pp)) (CostModelsUpdate costModelUpdate)
+    , dppPrices = ppApplyUpdate dppPrices
+    , dppMaxTxExUnits = ppApplyUpdate dppMaxTxExUnits
+    , dppMaxBlockExUnits = ppApplyUpdate dppMaxBlockExUnits
+    , dppMaxValSize = ppApplyUpdate dppMaxValSize
+    , dppCollateralPercentage = ppApplyUpdate dppCollateralPercentage
+    , dppMaxCollateralInputs = ppApplyUpdate dppMaxCollateralInputs
+    , dppPoolVotingThresholds = ppApplyUpdate dppPoolVotingThresholds
+    , dppDRepVotingThresholds = ppApplyUpdate dppDRepVotingThresholds
+    , dppCommitteeMinSize = ppApplyUpdate dppCommitteeMinSize
+    , dppCommitteeMaxTermLength = ppApplyUpdate dppCommitteeMaxTermLength
+    , dppGovActionLifetime = ppApplyUpdate dppGovActionLifetime
+    , dppGovActionDeposit = ppApplyUpdate dppGovActionDeposit
+    , dppDRepDeposit = ppApplyUpdate dppDRepDeposit
+    , dppDRepActivity = ppApplyUpdate dppDRepActivity
+    , dppMinFeeRefScriptCostPerByte = ppApplyUpdate dppMinFeeRefScriptCostPerByte
+    , dppMaxRefScriptSizePerBlock = ppApplyUpdate dppMaxRefScriptSizePerBlock
+    , dppMaxRefScriptSizePerTx = ppApplyUpdate dppMaxRefScriptSizePerTx
+    , dppRefScriptCostStride = ppApplyUpdate dppRefScriptCostStride
+    , dppRefScriptCostMultiplier = ppApplyUpdate dppRefScriptCostMultiplier
+    , dppMaxPledgeLeverage = ppApplyUpdate dppMaxPledgeLeverage
+    , dppMinPoolMargin = ppApplyUpdate dppMinPoolMargin
+    , dppLeiosAnnouncementPeriodLength = ppApplyUpdate dppLeiosAnnouncementPeriodLength
+    , dppLeiosVotePeriodLength = ppApplyUpdate dppLeiosVotePeriodLength
+    , dppLeiosDiffusionPeriodLength = ppApplyUpdate dppLeiosDiffusionPeriodLength
+    , dppLeiosCommitteeSize = ppApplyUpdate dppLeiosCommitteeSize
+    , dppLeiosQuorumStakeThreshold = ppApplyUpdate dppLeiosQuorumStakeThreshold
+    , dppMaxEndorserBlockReferencesSize = ppApplyUpdate dppMaxEndorserBlockReferencesSize
+    , dppMaxEndorserBlockTxsSize = ppApplyUpdate dppMaxEndorserBlockTxsSize
+    , dppMaxEndorserBlockExUnits = ppApplyUpdate dppMaxEndorserBlockExUnits
+    , dppMaxRefScriptSizePerEndorserBlock = ppApplyUpdate dppMaxRefScriptSizePerEndorserBlock
+    , dppPerasMinCandidateBlockAge = ppApplyUpdate dppPerasMinCandidateBlockAge
+    , dppPerasHealingFactor = ppApplyUpdate dppPerasHealingFactor
+    , dppPerasCertBoost = ppApplyUpdate dppPerasCertBoost
+    , dppPerasTargetCommitteeSize = ppApplyUpdate dppPerasTargetCommitteeSize
+    , dppPerasBootstrapRound = ppApplyUpdate dppPerasBootstrapRound
+    , dppPerasQuorumThresholdSafetyMargin = ppApplyUpdate dppPerasQuorumThresholdSafetyMargin
+    , dppRefInputsCostPerMultiAssetPolicy = ppApplyUpdate dppRefInputsCostPerMultiAssetPolicy
+    , dppRefInputsCostPerDatumByte = ppApplyUpdate dppRefInputsCostPerDatumByte
+    }
+  where
+    ppApplyUpdate :: (forall f. DijkstraPParams f era -> THKD g f a) -> THKD g Identity a
+    ppApplyUpdate dppGet =
+      case dppGet ppu of
+        THKD SNothing -> dppGet pp
+        THKD (SJust ppNewValue) -> THKD ppNewValue
+
+deriving instance Eq (DijkstraPParams Identity era)
+
+deriving instance Ord (DijkstraPParams Identity era)
+
+deriving instance Show (DijkstraPParams Identity era)
+
+instance NoThunks (DijkstraPParams Identity era)
+
+instance NFData (DijkstraPParams Identity era)
+
+deriving instance Eq (DijkstraPParams StrictMaybe era)
+
+deriving instance Ord (DijkstraPParams StrictMaybe era)
+
+deriving instance Show (DijkstraPParams StrictMaybe era)
+
+instance NoThunks (DijkstraPParams StrictMaybe era)
+
+instance NFData (DijkstraPParams StrictMaybe era)
+
+data UpgradeDijkstraPParams f era = UpgradeDijkstraPParams
+  { udppMaxRefScriptSizePerBlock :: !(HKD f Word32)
+  , udppMaxRefScriptSizePerTx :: !(HKD f Word32)
+  , udppRefScriptCostStride :: !(HKD f (NonZero Word32))
+  , udppRefScriptCostMultiplier :: !(HKD f PositiveInterval)
+  , udppMaxPledgeLeverage :: !(HKD f MaxPledgeLeverage)
+  , udppMinPoolMargin :: !(HKD f UnitInterval)
+  , udppPlutusV4CostModel :: !(HKD f CostModel)
+  , udppLeiosAnnouncementPeriodLength :: !(HKD f Milliseconds32)
+  , udppLeiosVotePeriodLength :: !(HKD f Milliseconds32)
+  , udppLeiosDiffusionPeriodLength :: !(HKD f Milliseconds32)
+  , udppLeiosCommitteeSize :: !(HKD f Word16)
+  , udppLeiosQuorumStakeThreshold :: !(HKD f UnitInterval)
+  , udppMaxEndorserBlockReferencesSize :: !(HKD f Word32)
+  , udppMaxEndorserBlockTxsSize :: !(HKD f Word32)
+  , udppMaxEndorserBlockExUnits :: !(HKD f OrdExUnits)
+  , udppMaxRefScriptSizePerEndorserBlock :: !(HKD f Word32)
+  , udppPerasMinCandidateBlockAge :: !(HKD f SlotInterval)
+  , udppPerasHealingFactor :: !(HKD f PositiveInterval)
+  , udppPerasCertBoost :: !(HKD f Word16)
+  , udppPerasTargetCommitteeSize :: !(HKD f Word16)
+  , udppPerasBootstrapRound :: !(HKD f (StrictMaybe Word32))
+  , udppPerasQuorumThresholdSafetyMargin :: !(HKD f UnitInterval)
+  , udppRefInputsCostPerMultiAssetPolicy :: !(HKD f Coin)
+  , udppRefInputsCostPerDatumByte :: !(HKD f CoinPerByte)
+  }
+  deriving (Generic)
+
+deriving instance Eq (UpgradeDijkstraPParams Identity era)
+
+deriving instance Show (UpgradeDijkstraPParams Identity era)
+
+instance FromJSON (UpgradeDijkstraPParams Identity era) where
+  parseJSON = withObject "UpgradeDijkstraPParams" $ \o -> do
+    udppMaxRefScriptSizePerBlock <- o .: "maxRefScriptSizePerBlock"
+    udppMaxRefScriptSizePerTx <- o .: "maxRefScriptSizePerTx"
+    udppRefScriptCostStride <- o .: "refScriptCostStride"
+    udppRefScriptCostMultiplier <- o .: "refScriptCostMultiplier"
+    udppMaxPledgeLeverage <- o .:? "maxPledgeLeverage" .!= MaxPledgeLeverage SNothing
+    udppMinPoolMargin <- o .: "minPoolMargin"
+    udppPlutusV4CostModel <- parseCostModelAsArray False PlutusV4 =<< o .: "plutusV4CostModel"
+    udppLeiosAnnouncementPeriodLength <- o .: "leiosAnnouncementPeriodLength"
+    udppLeiosVotePeriodLength <- o .: "leiosVotePeriodLength"
+    udppLeiosDiffusionPeriodLength <- o .: "leiosDiffusionPeriodLength"
+    udppLeiosCommitteeSize <- o .: "leiosCommitteeSize"
+    udppLeiosQuorumStakeThreshold <- o .: "leiosQuorumStakeThreshold"
+    udppMaxEndorserBlockReferencesSize <- o .: "maxEndorserBlockReferencesSize"
+    udppMaxEndorserBlockTxsSize <- o .: "maxEndorserBlockTxsSize"
+    udppMaxEndorserBlockExUnits <- o .: "maxEndorserBlockExecutionUnits"
+    udppMaxRefScriptSizePerEndorserBlock <- o .: "maxRefScriptSizePerEndorserBlock"
+    udppPerasMinCandidateBlockAge <- o .: "perasMinCandidateBlockAge"
+    udppPerasHealingFactor <- o .: "perasHealingFactor"
+    udppPerasCertBoost <- o .: "perasCertBoost"
+    udppPerasTargetCommitteeSize <- o .: "perasTargetCommitteeSize"
+    udppPerasBootstrapRound <- o .: "perasBootstrapRound"
+    udppPerasQuorumThresholdSafetyMargin <- o .: "perasQuorumThresholdSafetyMargin"
+    udppRefInputsCostPerMultiAssetPolicy <- o .: "refInputsCostPerMultiAssetPolicy"
+    udppRefInputsCostPerDatumByte <- o .: "refInputsCostPerDatumByte"
+    pure UpgradeDijkstraPParams {..}
+
+instance ToKeyValuePairs (UpgradeDijkstraPParams Identity era) where
+  toKeyValuePairs udpp =
+    [ "maxRefScriptSizePerBlock" .= udppMaxRefScriptSizePerBlock udpp
+    , "maxRefScriptSizePerTx" .= udppMaxRefScriptSizePerTx udpp
+    , "refScriptCostStride" .= udppRefScriptCostStride udpp
+    , "refScriptCostMultiplier" .= udppRefScriptCostMultiplier udpp
+    , "maxPledgeLeverage" .= udppMaxPledgeLeverage udpp
+    , "minPoolMargin" .= udppMinPoolMargin udpp
+    , "plutusV4CostModel" .= toJSON @CostModel (udppPlutusV4CostModel udpp)
+    , "leiosAnnouncementPeriodLength" .= udppLeiosAnnouncementPeriodLength udpp
+    , "leiosVotePeriodLength" .= udppLeiosVotePeriodLength udpp
+    , "leiosDiffusionPeriodLength" .= udppLeiosDiffusionPeriodLength udpp
+    , "leiosCommitteeSize" .= udppLeiosCommitteeSize udpp
+    , "leiosQuorumStakeThreshold" .= udppLeiosQuorumStakeThreshold udpp
+    , "maxEndorserBlockReferencesSize" .= udppMaxEndorserBlockReferencesSize udpp
+    , "maxEndorserBlockTxsSize" .= udppMaxEndorserBlockTxsSize udpp
+    , "maxEndorserBlockExecutionUnits" .= udppMaxEndorserBlockExUnits udpp
+    , "maxRefScriptSizePerEndorserBlock" .= udppMaxRefScriptSizePerEndorserBlock udpp
+    , "perasMinCandidateBlockAge" .= udppPerasMinCandidateBlockAge udpp
+    , "perasHealingFactor" .= udppPerasHealingFactor udpp
+    , "perasCertBoost" .= udppPerasCertBoost udpp
+    , "perasTargetCommitteeSize" .= udppPerasTargetCommitteeSize udpp
+    , "perasBootstrapRound" .= udppPerasBootstrapRound udpp
+    , "perasQuorumThresholdSafetyMargin" .= udppPerasQuorumThresholdSafetyMargin udpp
+    , "refInputsCostPerMultiAssetPolicy" .= udppRefInputsCostPerMultiAssetPolicy udpp
+    , "refInputsCostPerDatumByte" .= udppRefInputsCostPerDatumByte udpp
+    ]
+
+deriving via
+  KeyValuePairs (UpgradeDijkstraPParams Identity era)
+  instance
+    ToJSON (UpgradeDijkstraPParams Identity era)
+
+instance NFData (UpgradeDijkstraPParams Identity era)
+
+instance NoThunks (UpgradeDijkstraPParams Identity era)
+
+instance Era era => DecCBOR (UpgradeDijkstraPParams Identity era) where
+  decCBOR =
+    decode $
+      RecD (UpgradeDijkstraPParams @Identity)
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! D (decodeCostModel PlutusV4)
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+        <! From
+
+instance Era era => EncCBOR (UpgradeDijkstraPParams Identity era) where
+  encCBOR UpgradeDijkstraPParams {..} =
+    encode $
+      Rec (UpgradeDijkstraPParams @Identity)
+        !> To udppMaxRefScriptSizePerBlock
+        !> To udppMaxRefScriptSizePerTx
+        !> To udppRefScriptCostStride
+        !> To udppRefScriptCostMultiplier
+        !> To udppMaxPledgeLeverage
+        !> To udppMinPoolMargin
+        !> E encodeCostModel udppPlutusV4CostModel
+        !> To udppLeiosAnnouncementPeriodLength
+        !> To udppLeiosVotePeriodLength
+        !> To udppLeiosDiffusionPeriodLength
+        !> To udppLeiosCommitteeSize
+        !> To udppLeiosQuorumStakeThreshold
+        !> To udppMaxEndorserBlockReferencesSize
+        !> To udppMaxEndorserBlockTxsSize
+        !> To udppMaxEndorserBlockExUnits
+        !> To udppMaxRefScriptSizePerEndorserBlock
+        !> To udppPerasMinCandidateBlockAge
+        !> To udppPerasHealingFactor
+        !> To udppPerasCertBoost
+        !> To udppPerasTargetCommitteeSize
+        !> To udppPerasBootstrapRound
+        !> To udppPerasQuorumThresholdSafetyMargin
+        !> To udppRefInputsCostPerMultiAssetPolicy
+        !> To udppRefInputsCostPerDatumByte
+
+emptyDijkstraUpgradePParamsUpdate :: UpgradeDijkstraPParams StrictMaybe era
+emptyDijkstraUpgradePParamsUpdate =
+  UpgradeDijkstraPParams
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+    SNothing
+
+upgradeDijkstraPParams ::
+  forall f.
+  HKDSemialign f =>
+  UpgradeDijkstraPParams f DijkstraEra ->
+  ConwayPParams f ConwayEra ->
+  DijkstraPParams f DijkstraEra
+upgradeDijkstraPParams UpgradeDijkstraPParams {..} ConwayPParams {..} =
+  DijkstraPParams
+    { dppTxFeePerByte = cppTxFeePerByte
+    , dppTxFeeFixed = cppTxFeeFixed
+    , dppMaxBBSize = cppMaxBBSize
+    , dppMaxTxSize = cppMaxTxSize
+    , dppMaxBHSize = cppMaxBHSize
+    , dppKeyDeposit = cppKeyDeposit
+    , dppPoolDeposit = cppPoolDeposit
+    , dppEMax = cppEMax
+    , dppNOpt = cppNOpt
+    , dppA0 = cppA0
+    , dppRho = cppRho
+    , dppTau = cppTau
+    , dppProtocolVersion = cppProtocolVersion
+    , dppMinPoolCost = cppMinPoolCost
+    , dppCoinsPerUTxOByte = cppCoinsPerUTxOByte
+    , dppCostModels =
+        THKD $
+          hkdAlignWith
+            (Proxy @f)
+            (mkCostModels . Map.singleton PlutusV4)
+            id
+            ( \new old ->
+                updateCostModels old (CostModelsUpdate . mkCostModels $ Map.singleton PlutusV4 new)
+            )
+            udppPlutusV4CostModel
+            (unTHKD cppCostModels)
+    , dppPrices = cppPrices
+    , dppMaxTxExUnits = cppMaxTxExUnits
+    , dppMaxBlockExUnits = cppMaxBlockExUnits
+    , dppMaxValSize = cppMaxValSize
+    , dppCollateralPercentage = cppCollateralPercentage
+    , dppMaxCollateralInputs = cppMaxCollateralInputs
+    , dppPoolVotingThresholds = cppPoolVotingThresholds
+    , dppDRepVotingThresholds = cppDRepVotingThresholds
+    , dppCommitteeMinSize = cppCommitteeMinSize
+    , dppCommitteeMaxTermLength = cppCommitteeMaxTermLength
+    , dppGovActionLifetime = cppGovActionLifetime
+    , dppGovActionDeposit = cppGovActionDeposit
+    , dppDRepDeposit = cppDRepDeposit
+    , dppDRepActivity = cppDRepActivity
+    , dppMinFeeRefScriptCostPerByte = cppMinFeeRefScriptCostPerByte
+    , dppMaxRefScriptSizePerBlock = THKD udppMaxRefScriptSizePerBlock
+    , dppMaxRefScriptSizePerTx = THKD udppMaxRefScriptSizePerTx
+    , dppRefScriptCostStride = THKD udppRefScriptCostStride
+    , dppRefScriptCostMultiplier = THKD udppRefScriptCostMultiplier
+    , dppMaxPledgeLeverage = THKD udppMaxPledgeLeverage
+    , dppMinPoolMargin = THKD udppMinPoolMargin
+    , dppLeiosAnnouncementPeriodLength = THKD udppLeiosAnnouncementPeriodLength
+    , dppLeiosVotePeriodLength = THKD udppLeiosVotePeriodLength
+    , dppLeiosDiffusionPeriodLength = THKD udppLeiosDiffusionPeriodLength
+    , dppLeiosCommitteeSize = THKD udppLeiosCommitteeSize
+    , dppLeiosQuorumStakeThreshold = THKD udppLeiosQuorumStakeThreshold
+    , dppMaxEndorserBlockReferencesSize = THKD udppMaxEndorserBlockReferencesSize
+    , dppMaxEndorserBlockTxsSize = THKD udppMaxEndorserBlockTxsSize
+    , dppMaxEndorserBlockExUnits = THKD udppMaxEndorserBlockExUnits
+    , dppMaxRefScriptSizePerEndorserBlock = THKD udppMaxRefScriptSizePerEndorserBlock
+    , dppPerasMinCandidateBlockAge = THKD udppPerasMinCandidateBlockAge
+    , dppPerasHealingFactor = THKD udppPerasHealingFactor
+    , dppPerasCertBoost = THKD udppPerasCertBoost
+    , dppPerasTargetCommitteeSize = THKD udppPerasTargetCommitteeSize
+    , dppPerasBootstrapRound = THKD udppPerasBootstrapRound
+    , dppPerasQuorumThresholdSafetyMargin = THKD udppPerasQuorumThresholdSafetyMargin
+    , dppRefInputsCostPerMultiAssetPolicy = THKD udppRefInputsCostPerMultiAssetPolicy
+    , dppRefInputsCostPerDatumByte = THKD udppRefInputsCostPerDatumByte
+    }
+
+downgradeDijkstraPParams :: DijkstraPParams f DijkstraEra -> ConwayPParams f ConwayEra
+downgradeDijkstraPParams DijkstraPParams {..} =
+  ConwayPParams
+    { cppTxFeePerByte = dppTxFeePerByte
+    , cppTxFeeFixed = dppTxFeeFixed
+    , cppMaxBBSize = dppMaxBBSize
+    , cppMaxTxSize = dppMaxTxSize
+    , cppMaxBHSize = dppMaxBHSize
+    , cppKeyDeposit = dppKeyDeposit
+    , cppPoolDeposit = dppPoolDeposit
+    , cppEMax = dppEMax
+    , cppNOpt = dppNOpt
+    , cppA0 = dppA0
+    , cppRho = dppRho
+    , cppTau = dppTau
+    , cppProtocolVersion = dppProtocolVersion
+    , cppMinPoolCost = dppMinPoolCost
+    , cppCoinsPerUTxOByte = dppCoinsPerUTxOByte
+    , cppCostModels = dppCostModels
+    , cppPrices = dppPrices
+    , cppMaxTxExUnits = dppMaxTxExUnits
+    , cppMaxBlockExUnits = dppMaxBlockExUnits
+    , cppMaxValSize = dppMaxValSize
+    , cppCollateralPercentage = dppCollateralPercentage
+    , cppMaxCollateralInputs = dppMaxCollateralInputs
+    , cppPoolVotingThresholds = dppPoolVotingThresholds
+    , cppDRepVotingThresholds = dppDRepVotingThresholds
+    , cppCommitteeMinSize = dppCommitteeMinSize
+    , cppCommitteeMaxTermLength = dppCommitteeMaxTermLength
+    , cppGovActionLifetime = dppGovActionLifetime
+    , cppGovActionDeposit = dppGovActionDeposit
+    , cppDRepDeposit = dppDRepDeposit
+    , cppDRepActivity = dppDRepActivity
+    , cppMinFeeRefScriptCostPerByte = dppMinFeeRefScriptCostPerByte
+    }
+
+instance EraPParams DijkstraEra where
+  type PParamsHKD f DijkstraEra = DijkstraPParams f DijkstraEra
+  type UpgradePParams f DijkstraEra = UpgradeDijkstraPParams f DijkstraEra
+  type DowngradePParams f DijkstraEra = ()
+
+  emptyPParamsIdentity = emptyDijkstraPParams
+  emptyPParamsStrictMaybe = emptyDijkstraPParamsUpdate
+
+  applyPPUpdates (PParams pp) (PParamsUpdate ppu) =
+    PParams $ dijkstraApplyPPUpdates pp ppu
+
+  upgradePParamsHKD = upgradeDijkstraPParams
+  downgradePParamsHKD _ = downgradeDijkstraPParams
+  emptyUpgradePParamsUpdate = emptyDijkstraUpgradePParamsUpdate
+
+  hkdTxFeePerByteL = lens (unTHKD . dppTxFeePerByte) $ \pp x -> pp {dppTxFeePerByte = THKD x}
+  hkdTxFeeFixedCompactL = lens (unTHKD . dppTxFeeFixed) $ \pp x -> pp {dppTxFeeFixed = THKD x}
+  hkdMaxBBSizeL = lens (unTHKD . dppMaxBBSize) $ \pp x -> pp {dppMaxBBSize = THKD x}
+  hkdMaxTxSizeL = lens (unTHKD . dppMaxTxSize) $ \pp x -> pp {dppMaxTxSize = THKD x}
+  hkdMaxBHSizeL = lens (unTHKD . dppMaxBHSize) $ \pp x -> pp {dppMaxBHSize = THKD x}
+  hkdKeyDepositCompactL = lens (unTHKD . dppKeyDeposit) $ \pp x -> pp {dppKeyDeposit = THKD x}
+  hkdPoolDepositCompactL = lens (unTHKD . dppPoolDeposit) $ \pp x -> pp {dppPoolDeposit = THKD x}
+  hkdEMaxL = lens (unTHKD . dppEMax) $ \pp x -> pp {dppEMax = THKD x}
+  hkdNOptL = lens (unTHKD . dppNOpt) $ \pp x -> pp {dppNOpt = THKD x}
+  hkdA0L = lens (unTHKD . dppA0) $ \pp x -> pp {dppA0 = THKD x}
+  hkdRhoL = lens (unTHKD . dppRho) $ \pp x -> pp {dppRho = THKD x}
+  hkdTauL = lens (unTHKD . dppTau) $ \pp x -> pp {dppTau = THKD x}
+  hkdProtocolVersionL = notSupportedInThisEraL
+  hkdMinPoolCostCompactL = lens (unTHKD . dppMinPoolCost) $ \pp x -> pp {dppMinPoolCost = THKD x}
+  ppProtocolVersionL = ppLensHKD . lens dppProtocolVersion (\pp x -> pp {dppProtocolVersion = x})
+  ppMaxPledgeLeverageG = ppMaxPledgeLeverageL
+
+  ppDG = to (const minBound)
+  ppuProtocolVersionL = notSupportedInThisEraL
+  hkdDL = notSupportedInThisEraL
+  hkdExtraEntropyL = notSupportedInThisEraL
+  hkdMinUTxOValueCompactL = notSupportedInThisEraL
+  ppMinPoolMarginG = ppLensHKD . hkdMinPoolMarginL
+  eraPParams =
+    [ ppTxFeePerByte
+    , ppTxFeeFixed
+    , ppMaxBBSize
+    , ppMaxTxSize
+    , ppMaxBHSize
+    , ppKeyDeposit
+    , ppPoolDeposit
+    , ppEMax
+    , ppNOpt
+    , ppA0
+    , ppRho
+    , ppTau
+    , ppGovProtocolVersion
+    , ppMinPoolCost
+    , ppCoinsPerUTxOByte
+    , ppCostModels
+    , ppPrices
+    , ppMaxTxExUnits
+    , ppMaxBlockExUnits
+    , ppMaxValSize
+    , ppCollateralPercentage
+    , ppMaxCollateralInputs
+    , ppPoolVotingThresholds
+    , ppDRepVotingThresholds
+    , ppCommitteeMinSize
+    , ppCommitteeMaxTermLength
+    , ppGovActionLifetime
+    , ppGovActionDeposit
+    , ppDRepDeposit
+    , ppDRepActivity
+    , ppMinFeeRefScriptCostPerByte
+    , ppMaxRefScriptSizePerBlock
+    , ppMaxRefScriptSizePerTx
+    , ppRefScriptCostStride
+    , ppRefScriptCostMultiplier
+    , ppMaxPledgeLeverage
+    , ppMinPoolMargin
+    , ppLeiosAnnouncementPeriodLength
+    , ppLeiosVotePeriodLength
+    , ppLeiosDiffusionPeriodLength
+    , ppLeiosCommitteeSize
+    , ppLeiosQuorumStakeThreshold
+    , ppMaxEndorserBlockReferencesSize
+    , ppMaxEndorserBlockTxsSize
+    , ppMaxEndorserBlockExUnits
+    , ppMaxRefScriptSizePerEndorserBlock
+    , ppPerasMinCandidateBlockAge
+    , ppPerasHealingFactor
+    , ppPerasCertBoost
+    , ppPerasTargetCommitteeSize
+    , ppPerasBootstrapRound
+    , ppPerasQuorumThresholdSafetyMargin
+    , ppRefInputsCostPerMultiAssetPolicy
+    , ppRefInputsCostPerDatumByte
+    ]
+
+ppMaxRefScriptSizePerBlock :: PParam DijkstraEra
+ppMaxRefScriptSizePerBlock =
+  PParam
+    { ppName = "maxRefScriptSizePerBlock"
+    , ppLens = ppMaxRefScriptSizePerBlockL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 34
+            , ppuLens = ppuMaxRefScriptSizePerBlockL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxRefScriptSizePerTx :: PParam DijkstraEra
+ppMaxRefScriptSizePerTx =
+  PParam
+    { ppName = "maxRefScriptSizePerTx"
+    , ppLens = ppMaxRefScriptSizePerTxL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 35
+            , ppuLens = ppuMaxRefScriptSizePerTxL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppRefScriptCostStride :: PParam DijkstraEra
+ppRefScriptCostStride =
+  PParam
+    { ppName = "refScriptCostStride"
+    , ppLens = ppRefScriptCostStrideL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 36
+            , ppuLens = ppuRefScriptCostStrideL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppRefScriptCostMultiplier :: PParam DijkstraEra
+ppRefScriptCostMultiplier =
+  PParam
+    { ppName = "refScriptCostMultiplier"
+    , ppLens = ppRefScriptCostMultiplierL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 37
+            , ppuLens = ppuRefScriptCostMultiplierL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxPledgeLeverage :: PParam DijkstraEra
+ppMaxPledgeLeverage =
+  PParam
+    { ppName = "maxPledgeLeverage"
+    , ppLens = ppMaxPledgeLeverageL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 38
+            , ppuLens = ppuMaxPledgeLeverageL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMinPoolMargin :: PParam DijkstraEra
+ppMinPoolMargin =
+  PParam
+    { ppName = "minPoolMargin"
+    , ppLens = ppMinPoolMarginL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 39
+            , ppuLens = ppuMinPoolMarginL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppLeiosAnnouncementPeriodLength :: PParam DijkstraEra
+ppLeiosAnnouncementPeriodLength =
+  PParam
+    { ppName = "leiosAnnouncementPeriodLength"
+    , ppLens = ppLeiosAnnouncementPeriodLengthL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 40
+            , ppuLens = ppuLeiosAnnouncementPeriodLengthL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppLeiosVotePeriodLength :: PParam DijkstraEra
+ppLeiosVotePeriodLength =
+  PParam
+    { ppName = "leiosVotePeriodLength"
+    , ppLens = ppLeiosVotePeriodLengthL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 41
+            , ppuLens = ppuLeiosVotePeriodLengthL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppLeiosDiffusionPeriodLength :: PParam DijkstraEra
+ppLeiosDiffusionPeriodLength =
+  PParam
+    { ppName = "leiosDiffusionPeriodLength"
+    , ppLens = ppLeiosDiffusionPeriodLengthL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 42
+            , ppuLens = ppuLeiosDiffusionPeriodLengthL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppLeiosCommitteeSize :: PParam DijkstraEra
+ppLeiosCommitteeSize =
+  PParam
+    { ppName = "leiosCommitteeSize"
+    , ppLens = ppLeiosCommitteeSizeL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 43
+            , ppuLens = ppuLeiosCommitteeSizeL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppLeiosQuorumStakeThreshold :: PParam DijkstraEra
+ppLeiosQuorumStakeThreshold =
+  PParam
+    { ppName = "leiosQuorumStakeThreshold"
+    , ppLens = ppLeiosQuorumStakeThresholdL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 44
+            , ppuLens = ppuLeiosQuorumStakeThresholdL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxEndorserBlockReferencesSize :: PParam DijkstraEra
+ppMaxEndorserBlockReferencesSize =
+  PParam
+    { ppName = "maxEndorserBlockReferencesSize"
+    , ppLens = ppMaxEndorserBlockReferencesSizeL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 45
+            , ppuLens = ppuMaxEndorserBlockReferencesSizeL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxEndorserBlockTxsSize :: PParam DijkstraEra
+ppMaxEndorserBlockTxsSize =
+  PParam
+    { ppName = "maxEndorserBlockTxsSize"
+    , ppLens = ppMaxEndorserBlockTxsSizeL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 46
+            , ppuLens = ppuMaxEndorserBlockTxsSizeL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxEndorserBlockExUnits :: PParam DijkstraEra
+ppMaxEndorserBlockExUnits =
+  PParam
+    { ppName = "maxEndorserBlockExecutionUnits"
+    , ppLens = ppMaxEndorserBlockExUnitsL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 47
+            , ppuLens = ppuMaxEndorserBlockExUnitsL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppMaxRefScriptSizePerEndorserBlock :: PParam DijkstraEra
+ppMaxRefScriptSizePerEndorserBlock =
+  PParam
+    { ppName = "maxRefScriptSizePerEndorserBlock"
+    , ppLens = ppMaxRefScriptSizePerEndorserBlockL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 48
+            , ppuLens = ppuMaxRefScriptSizePerEndorserBlockL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppPerasMinCandidateBlockAge :: PParam DijkstraEra
+ppPerasMinCandidateBlockAge =
+  PParam
+    { ppName = "perasMinCandidateBlockAge"
+    , ppLens = ppPerasMinCandidateBlockAgeL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 49
+            , ppuLens = ppuPerasMinCandidateBlockAgeL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppPerasHealingFactor :: PParam DijkstraEra
+ppPerasHealingFactor =
+  PParam
+    { ppName = "perasHealingFactor"
+    , ppLens = ppPerasHealingFactorL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 50
+            , ppuLens = ppuPerasHealingFactorL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppPerasCertBoost :: PParam DijkstraEra
+ppPerasCertBoost =
+  PParam
+    { ppName = "perasCertBoost"
+    , ppLens = ppPerasCertBoostL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 51
+            , ppuLens = ppuPerasCertBoostL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppPerasTargetCommitteeSize :: PParam DijkstraEra
+ppPerasTargetCommitteeSize =
+  PParam
+    { ppName = "perasTargetCommitteeSize"
+    , ppLens = ppPerasTargetCommitteeSizeL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 52
+            , ppuLens = ppuPerasTargetCommitteeSizeL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppPerasBootstrapRound :: PParam DijkstraEra
+ppPerasBootstrapRound =
+  PParam
+    { ppName = "perasBootstrapRound"
+    , ppLens = ppPerasBootstrapRoundL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 53
+            , ppuLens = ppuPerasBootstrapRoundL
+            , ppuEraCodec =
+                Just $
+                  EraCodec
+                    { eraCodecEncoder = encodeNullStrictMaybe encCBOR
+                    , eraCodecDecoder = decodeNullStrictMaybe decCBOR
+                    }
+            }
+    }
+
+ppPerasQuorumThresholdSafetyMargin :: PParam DijkstraEra
+ppPerasQuorumThresholdSafetyMargin =
+  PParam
+    { ppName = "perasQuorumThresholdSafetyMargin"
+    , ppLens = ppPerasQuorumThresholdSafetyMarginL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 54
+            , ppuLens = ppuPerasQuorumThresholdSafetyMarginL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppRefInputsCostPerMultiAssetPolicy :: PParam DijkstraEra
+ppRefInputsCostPerMultiAssetPolicy =
+  PParam
+    { ppName = "refInputsCostPerMultiAssetPolicy"
+    , ppLens = ppRefInputsCostPerMultiAssetPolicyL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 55
+            , ppuLens = ppuRefInputsCostPerMultiAssetPolicyL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+ppRefInputsCostPerDatumByte :: PParam DijkstraEra
+ppRefInputsCostPerDatumByte =
+  PParam
+    { ppName = "refInputsCostPerDatumByte"
+    , ppLens = ppRefInputsCostPerDatumByteL
+    , ppUpdate =
+        Just
+          PParamUpdate
+            { ppuTag = 56
+            , ppuLens = ppuRefInputsCostPerDatumByteL
+            , ppuEraCodec = Nothing
+            }
+    }
+
+instance AlonzoEraPParams DijkstraEra where
+  hkdCoinsPerUTxOWordL = notSupportedInThisEraL
+  hkdCostModelsL = lens (unTHKD . dppCostModels) $ \pp x -> pp {dppCostModels = THKD x}
+  hkdPricesL = lens (unTHKD . dppPrices) $ \pp x -> pp {dppPrices = THKD x}
+
+  hkdMaxTxExUnitsL :: forall f. HKDFunctor f => Lens' (PParamsHKD f DijkstraEra) (HKD f ExUnits)
+  hkdMaxTxExUnitsL =
+    lens (hkdMap (Proxy @f) unOrdExUnits . unTHKD . dppMaxTxExUnits) $ \pp x ->
+      pp {dppMaxTxExUnits = THKD $ hkdMap (Proxy @f) OrdExUnits x}
+  hkdMaxBlockExUnitsL :: forall f. HKDFunctor f => Lens' (PParamsHKD f DijkstraEra) (HKD f ExUnits)
+  hkdMaxBlockExUnitsL =
+    lens (hkdMap (Proxy @f) unOrdExUnits . unTHKD . dppMaxBlockExUnits) $ \pp x ->
+      pp {dppMaxBlockExUnits = THKD $ hkdMap (Proxy @f) OrdExUnits x}
+  hkdMaxValSizeL = lens (unTHKD . dppMaxValSize) $ \pp x -> pp {dppMaxValSize = THKD x}
+  hkdCollateralPercentageL =
+    lens (unTHKD . dppCollateralPercentage) $ \pp x -> pp {dppCollateralPercentage = THKD x}
+  hkdMaxCollateralInputsL =
+    lens (unTHKD . dppMaxCollateralInputs) $ \pp x -> pp {dppMaxCollateralInputs = THKD x}
+
+instance BabbageEraPParams DijkstraEra where
+  hkdCoinsPerUTxOByteL =
+    lens (unTHKD . dppCoinsPerUTxOByte) $ \pp x -> pp {dppCoinsPerUTxOByte = THKD x}
+
+instance ConwayEraPParams DijkstraEra where
+  ppuWellFormed _pv ppu =
+    and
+      [ -- Numbers
+        isValid (/= 0) ppuMaxBBSizeL
+      , isValid (/= 0) ppuMaxTxSizeL
+      , isValid (/= 0) ppuMaxBHSizeL
+      , isValid (/= 0) ppuMaxValSizeL
+      , isValid (/= 0) ppuCollateralPercentageL
+      , isValid (/= EpochInterval 0) ppuCommitteeMaxTermLengthL
+      , isValid (/= EpochInterval 0) ppuGovActionLifetimeL
+      , -- Coins
+        isValid (/= mempty) ppuPoolDepositL
+      , isValid (/= zero) ppuGovActionDepositL
+      , isValid (/= zero) ppuDRepDepositL
+      , isValid ((/= CompactCoin 0) . unCoinPerByte) ppuCoinsPerUTxOByteL
+      , ppu /= emptyPParamsUpdate
+      , isValid (/= 0) ppuNOptL
+      , isValid (/= EpochInterval 0) ppuEMaxL
+      ]
+    where
+      isValid ::
+        (t -> Bool) ->
+        Lens' (PParamsUpdate DijkstraEra) (StrictMaybe t) ->
+        Bool
+      isValid p l = case ppu ^. l of
+        SJust x -> p x
+        SNothing -> True
+  hkdPoolVotingThresholdsL =
+    lens (unTHKD . dppPoolVotingThresholds) $ \pp x -> pp {dppPoolVotingThresholds = THKD x}
+  hkdDRepVotingThresholdsL =
+    lens (unTHKD . dppDRepVotingThresholds) $ \pp x -> pp {dppDRepVotingThresholds = THKD x}
+  hkdCommitteeMinSizeL =
+    lens (unTHKD . dppCommitteeMinSize) $ \pp x -> pp {dppCommitteeMinSize = THKD x}
+  hkdCommitteeMaxTermLengthL =
+    lens (unTHKD . dppCommitteeMaxTermLength) $ \pp x -> pp {dppCommitteeMaxTermLength = THKD x}
+  hkdGovActionLifetimeL =
+    lens (unTHKD . dppGovActionLifetime) $ \pp x -> pp {dppGovActionLifetime = THKD x}
+  hkdGovActionDepositCompactL =
+    lens (unTHKD . dppGovActionDeposit) $ \pp x -> pp {dppGovActionDeposit = THKD x}
+  hkdDRepDepositCompactL =
+    lens (unTHKD . dppDRepDeposit) $ \pp x -> pp {dppDRepDeposit = THKD x}
+  hkdDRepActivityL =
+    lens (unTHKD . dppDRepActivity) $ \pp x -> pp {dppDRepActivity = THKD x}
+  hkdMinFeeRefScriptCostPerByteL =
+    lens (unTHKD . dppMinFeeRefScriptCostPerByte) $ \pp x -> pp {dppMinFeeRefScriptCostPerByte = THKD x}
+  ppMaxRefScriptSizePerTxG = ppLensHKD . hkdMaxRefScriptSizePerTxL
+  ppMaxRefScriptSizePerBlockG = ppLensHKD . hkdMaxRefScriptSizePerBlockL
+  ppRefScriptCostMultiplierG = ppLensHKD . hkdRefScriptCostMultiplierL
+  ppRefScriptCostStrideG = ppLensHKD . hkdRefScriptCostStrideL
+
+-- | Returns a basic "empty" `PParams` structure with all zero values.
+emptyDijkstraPParams :: forall era. Era era => DijkstraPParams Identity era
+emptyDijkstraPParams =
+  DijkstraPParams
+    { dppTxFeePerByte = THKD (CoinPerByte $ CompactCoin 0)
+    , dppTxFeeFixed = THKD (CompactCoin 0)
+    , dppMaxBBSize = THKD 0
+    , dppMaxTxSize = THKD 2048
+    , dppMaxBHSize = THKD 0
+    , dppKeyDeposit = THKD (CompactCoin 0)
+    , dppPoolDeposit = THKD (CompactCoin 0)
+    , dppEMax = THKD (EpochInterval 0)
+    , dppNOpt = THKD 100
+    , dppA0 = THKD minBound
+    , dppRho = THKD minBound
+    , dppTau = THKD minBound
+    , dppProtocolVersion = ProtVer (eraProtVerLow @era) 0
+    , dppMinPoolCost = THKD mempty
+    , dppCoinsPerUTxOByte = THKD (CoinPerByte $ CompactCoin 0)
+    , dppCostModels = THKD emptyCostModels
+    , dppPrices = THKD (Prices minBound minBound)
+    , dppMaxTxExUnits = THKD (OrdExUnits $ ExUnits 0 0)
+    , dppMaxBlockExUnits = THKD (OrdExUnits $ ExUnits 0 0)
+    , dppMaxValSize = THKD 0
+    , dppCollateralPercentage = THKD 150
+    , dppMaxCollateralInputs = THKD 5
+    , dppPoolVotingThresholds = THKD def
+    , dppDRepVotingThresholds = THKD def
+    , dppCommitteeMinSize = THKD 0
+    , dppCommitteeMaxTermLength = THKD (EpochInterval 0)
+    , dppGovActionLifetime = THKD (EpochInterval 0)
+    , dppGovActionDeposit = THKD (CompactCoin 0)
+    , dppDRepDeposit = THKD (CompactCoin 0)
+    , dppDRepActivity = THKD (EpochInterval 0)
+    , dppMinFeeRefScriptCostPerByte = THKD minBound
+    , dppMaxRefScriptSizePerBlock = THKD 0
+    , dppMaxRefScriptSizePerTx = THKD 0
+    , dppRefScriptCostStride = THKD $ knownNonZeroBounded @1
+    , dppRefScriptCostMultiplier = THKD minBound
+    , dppMaxPledgeLeverage = THKD (MaxPledgeLeverage SNothing)
+    , dppMinPoolMargin = THKD minBound
+    , dppLeiosAnnouncementPeriodLength = THKD (Milliseconds32 0)
+    , dppLeiosVotePeriodLength = THKD (Milliseconds32 0)
+    , dppLeiosDiffusionPeriodLength = THKD (Milliseconds32 0)
+    , dppLeiosCommitteeSize = THKD 0
+    , dppLeiosQuorumStakeThreshold = THKD minBound
+    , dppMaxEndorserBlockReferencesSize = THKD 0
+    , dppMaxEndorserBlockTxsSize = THKD 0
+    , dppMaxEndorserBlockExUnits = THKD (OrdExUnits $ ExUnits 0 0)
+    , dppMaxRefScriptSizePerEndorserBlock = THKD 0
+    , dppPerasMinCandidateBlockAge = THKD (SlotInterval 0)
+    , dppPerasHealingFactor = THKD minBound
+    , dppPerasCertBoost = THKD minBound
+    , dppPerasTargetCommitteeSize = THKD minBound
+    , dppPerasBootstrapRound = THKD SNothing
+    , dppPerasQuorumThresholdSafetyMargin = THKD minBound
+    , dppRefInputsCostPerMultiAssetPolicy = THKD (Coin 0)
+    , dppRefInputsCostPerDatumByte = THKD (CoinPerByte $ CompactCoin 0)
+    }
+
+emptyDijkstraPParamsUpdate :: DijkstraPParams StrictMaybe era
+emptyDijkstraPParamsUpdate =
+  DijkstraPParams
+    { dppTxFeePerByte = THKD SNothing
+    , dppTxFeeFixed = THKD SNothing
+    , dppMaxBBSize = THKD SNothing
+    , dppMaxTxSize = THKD SNothing
+    , dppMaxBHSize = THKD SNothing
+    , dppKeyDeposit = THKD SNothing
+    , dppPoolDeposit = THKD SNothing
+    , dppEMax = THKD SNothing
+    , dppNOpt = THKD SNothing
+    , dppA0 = THKD SNothing
+    , dppRho = THKD SNothing
+    , dppTau = THKD SNothing
+    , dppProtocolVersion = NoUpdate
+    , dppMinPoolCost = THKD SNothing
+    , dppCoinsPerUTxOByte = THKD SNothing
+    , dppCostModels = THKD SNothing
+    , dppPrices = THKD SNothing
+    , dppMaxTxExUnits = THKD SNothing
+    , dppMaxBlockExUnits = THKD SNothing
+    , dppMaxValSize = THKD SNothing
+    , dppCollateralPercentage = THKD SNothing
+    , dppMaxCollateralInputs = THKD SNothing
+    , dppPoolVotingThresholds = THKD SNothing
+    , dppDRepVotingThresholds = THKD SNothing
+    , dppCommitteeMinSize = THKD SNothing
+    , dppCommitteeMaxTermLength = THKD SNothing
+    , dppGovActionLifetime = THKD SNothing
+    , dppGovActionDeposit = THKD SNothing
+    , dppDRepDeposit = THKD SNothing
+    , dppDRepActivity = THKD SNothing
+    , dppMinFeeRefScriptCostPerByte = THKD SNothing
+    , dppMaxRefScriptSizePerBlock = THKD SNothing
+    , dppMaxRefScriptSizePerTx = THKD SNothing
+    , dppRefScriptCostStride = THKD SNothing
+    , dppRefScriptCostMultiplier = THKD SNothing
+    , dppMaxPledgeLeverage = THKD SNothing
+    , dppMinPoolMargin = THKD SNothing
+    , dppLeiosAnnouncementPeriodLength = THKD SNothing
+    , dppLeiosVotePeriodLength = THKD SNothing
+    , dppLeiosDiffusionPeriodLength = THKD SNothing
+    , dppLeiosCommitteeSize = THKD SNothing
+    , dppLeiosQuorumStakeThreshold = THKD SNothing
+    , dppMaxEndorserBlockReferencesSize = THKD SNothing
+    , dppMaxEndorserBlockTxsSize = THKD SNothing
+    , dppMaxEndorserBlockExUnits = THKD SNothing
+    , dppMaxRefScriptSizePerEndorserBlock = THKD SNothing
+    , dppPerasMinCandidateBlockAge = THKD SNothing
+    , dppPerasHealingFactor = THKD SNothing
+    , dppPerasCertBoost = THKD SNothing
+    , dppPerasTargetCommitteeSize = THKD SNothing
+    , dppPerasBootstrapRound = THKD SNothing
+    , dppPerasQuorumThresholdSafetyMargin = THKD SNothing
+    , dppRefInputsCostPerMultiAssetPolicy = THKD SNothing
+    , dppRefInputsCostPerDatumByte = THKD SNothing
+    }
+
+class ConwayEraPParams era => DijkstraEraPParams era where
+  hkdMaxRefScriptSizePerBlockL :: Lens' (PParamsHKD f era) (HKD f Word32)
+  hkdMaxRefScriptSizePerTxL :: Lens' (PParamsHKD f era) (HKD f Word32)
+  hkdRefScriptCostStrideL :: Lens' (PParamsHKD f era) (HKD f (NonZero Word32))
+  hkdRefScriptCostMultiplierL :: Lens' (PParamsHKD f era) (HKD f PositiveInterval)
+  hkdMaxPledgeLeverageL :: Lens' (PParamsHKD f era) (HKD f MaxPledgeLeverage)
+  hkdMinPoolMarginL :: Lens' (PParamsHKD f era) (HKD f UnitInterval)
+  hkdLeiosAnnouncementPeriodLengthL :: Lens' (PParamsHKD f era) (HKD f Milliseconds32)
+  hkdLeiosVotePeriodLengthL :: Lens' (PParamsHKD f era) (HKD f Milliseconds32)
+  hkdLeiosDiffusionPeriodLengthL :: Lens' (PParamsHKD f era) (HKD f Milliseconds32)
+  hkdLeiosCommitteeSizeL :: Lens' (PParamsHKD f era) (HKD f Word16)
+  hkdLeiosQuorumStakeThresholdL :: Lens' (PParamsHKD f era) (HKD f UnitInterval)
+  hkdMaxEndorserBlockReferencesSizeL :: Lens' (PParamsHKD f era) (HKD f Word32)
+  hkdMaxEndorserBlockTxsSizeL :: Lens' (PParamsHKD f era) (HKD f Word32)
+  hkdMaxEndorserBlockExUnitsL :: Lens' (PParamsHKD f era) (HKD f OrdExUnits)
+  hkdMaxRefScriptSizePerEndorserBlockL :: Lens' (PParamsHKD f era) (HKD f Word32)
+  hkdPerasMinCandidateBlockAgeL :: Lens' (PParamsHKD f era) (HKD f SlotInterval)
+  hkdPerasHealingFactorL :: Lens' (PParamsHKD f era) (HKD f PositiveInterval)
+  hkdPerasCertBoostL :: Lens' (PParamsHKD f era) (HKD f Word16)
+  hkdPerasTargetCommitteeSizeL :: Lens' (PParamsHKD f era) (HKD f Word16)
+  hkdPerasBootstrapRoundL :: Lens' (PParamsHKD f era) (HKD f (StrictMaybe Word32))
+  hkdPerasQuorumThresholdSafetyMarginL :: Lens' (PParamsHKD f era) (HKD f UnitInterval)
+  hkdRefInputsCostPerMultiAssetPolicyL :: Lens' (PParamsHKD f era) (HKD f Coin)
+  hkdRefInputsCostPerDatumByteL :: Lens' (PParamsHKD f era) (HKD f CoinPerByte)
+
+instance DijkstraEraPParams DijkstraEra where
+  hkdMaxRefScriptSizePerBlockL = lens (unTHKD . dppMaxRefScriptSizePerBlock) $ \pp x -> pp {dppMaxRefScriptSizePerBlock = THKD x}
+  hkdMaxRefScriptSizePerTxL = lens (unTHKD . dppMaxRefScriptSizePerTx) $ \pp x -> pp {dppMaxRefScriptSizePerTx = THKD x}
+  hkdRefScriptCostStrideL = lens (unTHKD . dppRefScriptCostStride) $ \pp x -> pp {dppRefScriptCostStride = THKD x}
+  hkdRefScriptCostMultiplierL = lens (unTHKD . dppRefScriptCostMultiplier) $ \pp x -> pp {dppRefScriptCostMultiplier = THKD x}
+  hkdMaxPledgeLeverageL = lens (unTHKD . dppMaxPledgeLeverage) $ \pp x -> pp {dppMaxPledgeLeverage = THKD x}
+  hkdMinPoolMarginL = lens (unTHKD . dppMinPoolMargin) $ \pp x -> pp {dppMinPoolMargin = THKD x}
+  hkdLeiosAnnouncementPeriodLengthL = lens (unTHKD . dppLeiosAnnouncementPeriodLength) $ \pp x -> pp {dppLeiosAnnouncementPeriodLength = THKD x}
+  hkdLeiosVotePeriodLengthL = lens (unTHKD . dppLeiosVotePeriodLength) $ \pp x -> pp {dppLeiosVotePeriodLength = THKD x}
+  hkdLeiosDiffusionPeriodLengthL = lens (unTHKD . dppLeiosDiffusionPeriodLength) $ \pp x -> pp {dppLeiosDiffusionPeriodLength = THKD x}
+  hkdLeiosCommitteeSizeL = lens (unTHKD . dppLeiosCommitteeSize) $ \pp x -> pp {dppLeiosCommitteeSize = THKD x}
+  hkdLeiosQuorumStakeThresholdL = lens (unTHKD . dppLeiosQuorumStakeThreshold) $ \pp x -> pp {dppLeiosQuorumStakeThreshold = THKD x}
+  hkdMaxEndorserBlockReferencesSizeL = lens (unTHKD . dppMaxEndorserBlockReferencesSize) $ \pp x -> pp {dppMaxEndorserBlockReferencesSize = THKD x}
+  hkdMaxEndorserBlockTxsSizeL = lens (unTHKD . dppMaxEndorserBlockTxsSize) $ \pp x -> pp {dppMaxEndorserBlockTxsSize = THKD x}
+  hkdMaxEndorserBlockExUnitsL = lens (unTHKD . dppMaxEndorserBlockExUnits) $ \pp x -> pp {dppMaxEndorserBlockExUnits = THKD x}
+  hkdMaxRefScriptSizePerEndorserBlockL = lens (unTHKD . dppMaxRefScriptSizePerEndorserBlock) $ \pp x -> pp {dppMaxRefScriptSizePerEndorserBlock = THKD x}
+  hkdPerasMinCandidateBlockAgeL = lens (unTHKD . dppPerasMinCandidateBlockAge) $ \pp x -> pp {dppPerasMinCandidateBlockAge = THKD x}
+  hkdPerasHealingFactorL = lens (unTHKD . dppPerasHealingFactor) $ \pp x -> pp {dppPerasHealingFactor = THKD x}
+  hkdPerasCertBoostL = lens (unTHKD . dppPerasCertBoost) $ \pp x -> pp {dppPerasCertBoost = THKD x}
+  hkdPerasTargetCommitteeSizeL = lens (unTHKD . dppPerasTargetCommitteeSize) $ \pp x -> pp {dppPerasTargetCommitteeSize = THKD x}
+  hkdPerasBootstrapRoundL = lens (unTHKD . dppPerasBootstrapRound) $ \pp x -> pp {dppPerasBootstrapRound = THKD x}
+  hkdPerasQuorumThresholdSafetyMarginL = lens (unTHKD . dppPerasQuorumThresholdSafetyMargin) $ \pp x -> pp {dppPerasQuorumThresholdSafetyMargin = THKD x}
+  hkdRefInputsCostPerMultiAssetPolicyL = lens (unTHKD . dppRefInputsCostPerMultiAssetPolicy) $ \pp x -> pp {dppRefInputsCostPerMultiAssetPolicy = THKD x}
+  hkdRefInputsCostPerDatumByteL = lens (unTHKD . dppRefInputsCostPerDatumByte) $ \pp x -> pp {dppRefInputsCostPerDatumByte = THKD x}
+
+ppMaxRefScriptSizePerBlockL :: DijkstraEraPParams era => Lens' (PParams era) Word32
+ppMaxRefScriptSizePerBlockL = ppLensHKD . hkdMaxRefScriptSizePerBlockL @_ @Identity
+
+ppMaxRefScriptSizePerTxL :: DijkstraEraPParams era => Lens' (PParams era) Word32
+ppMaxRefScriptSizePerTxL = ppLensHKD . hkdMaxRefScriptSizePerTxL @_ @Identity
+
+ppRefScriptCostStrideL :: DijkstraEraPParams era => Lens' (PParams era) (NonZero Word32)
+ppRefScriptCostStrideL = ppLensHKD . hkdRefScriptCostStrideL @_ @Identity
+
+ppRefScriptCostMultiplierL :: DijkstraEraPParams era => Lens' (PParams era) PositiveInterval
+ppRefScriptCostMultiplierL = ppLensHKD . hkdRefScriptCostMultiplierL @_ @Identity
+
+ppMinPoolMarginL :: DijkstraEraPParams era => Lens' (PParams era) UnitInterval
+ppMinPoolMarginL = ppLensHKD . hkdMinPoolMarginL @_ @Identity
+
+ppLeiosAnnouncementPeriodLengthL :: DijkstraEraPParams era => Lens' (PParams era) Milliseconds32
+ppLeiosAnnouncementPeriodLengthL = ppLensHKD . hkdLeiosAnnouncementPeriodLengthL @_ @Identity
+
+ppLeiosVotePeriodLengthL :: DijkstraEraPParams era => Lens' (PParams era) Milliseconds32
+ppLeiosVotePeriodLengthL = ppLensHKD . hkdLeiosVotePeriodLengthL @_ @Identity
+
+ppLeiosDiffusionPeriodLengthL ::
+  DijkstraEraPParams era => Lens' (PParams era) Milliseconds32
+ppLeiosDiffusionPeriodLengthL = ppLensHKD . hkdLeiosDiffusionPeriodLengthL @_ @Identity
+
+ppLeiosCommitteeSizeL :: DijkstraEraPParams era => Lens' (PParams era) Word16
+ppLeiosCommitteeSizeL = ppLensHKD . hkdLeiosCommitteeSizeL @_ @Identity
+
+ppLeiosQuorumStakeThresholdL :: DijkstraEraPParams era => Lens' (PParams era) UnitInterval
+ppLeiosQuorumStakeThresholdL = ppLensHKD . hkdLeiosQuorumStakeThresholdL @_ @Identity
+
+ppMaxEndorserBlockReferencesSizeL :: DijkstraEraPParams era => Lens' (PParams era) Word32
+ppMaxEndorserBlockReferencesSizeL = ppLensHKD . hkdMaxEndorserBlockReferencesSizeL @_ @Identity
+
+ppMaxEndorserBlockTxsSizeL :: DijkstraEraPParams era => Lens' (PParams era) Word32
+ppMaxEndorserBlockTxsSizeL = ppLensHKD . hkdMaxEndorserBlockTxsSizeL @_ @Identity
+
+ppMaxEndorserBlockExUnitsL :: DijkstraEraPParams era => Lens' (PParams era) OrdExUnits
+ppMaxEndorserBlockExUnitsL = ppLensHKD . hkdMaxEndorserBlockExUnitsL @_ @Identity
+
+ppMaxRefScriptSizePerEndorserBlockL :: DijkstraEraPParams era => Lens' (PParams era) Word32
+ppMaxRefScriptSizePerEndorserBlockL = ppLensHKD . hkdMaxRefScriptSizePerEndorserBlockL @_ @Identity
+
+ppRefInputsCostPerMultiAssetPolicyL :: DijkstraEraPParams era => Lens' (PParams era) Coin
+ppRefInputsCostPerMultiAssetPolicyL = ppLensHKD . hkdRefInputsCostPerMultiAssetPolicyL @_ @Identity
+
+ppRefInputsCostPerDatumByteL :: DijkstraEraPParams era => Lens' (PParams era) CoinPerByte
+ppRefInputsCostPerDatumByteL = ppLensHKD . hkdRefInputsCostPerDatumByteL @_ @Identity
+
+ppuMaxRefScriptSizePerBlockL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word32)
+ppuMaxRefScriptSizePerBlockL = ppuLensHKD . hkdMaxRefScriptSizePerBlockL @_ @StrictMaybe
+
+ppuMaxRefScriptSizePerTxL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word32)
+ppuMaxRefScriptSizePerTxL = ppuLensHKD . hkdMaxRefScriptSizePerTxL @_ @StrictMaybe
+
+ppuRefScriptCostStrideL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe (NonZero Word32))
+ppuRefScriptCostStrideL = ppuLensHKD . hkdRefScriptCostStrideL @_ @StrictMaybe
+
+ppuRefScriptCostMultiplierL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe PositiveInterval)
+ppuRefScriptCostMultiplierL = ppuLensHKD . hkdRefScriptCostMultiplierL @_ @StrictMaybe
+
+ppMaxPledgeLeverageL ::
+  DijkstraEraPParams era => Lens' (PParams era) MaxPledgeLeverage
+ppMaxPledgeLeverageL = ppLensHKD . hkdMaxPledgeLeverageL @_ @Identity
+
+ppuMaxPledgeLeverageL ::
+  DijkstraEraPParams era =>
+  Lens' (PParamsUpdate era) (StrictMaybe MaxPledgeLeverage)
+ppuMaxPledgeLeverageL = ppuLensHKD . hkdMaxPledgeLeverageL @_ @StrictMaybe
+
+ppuMinPoolMarginL :: DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe UnitInterval)
+ppuMinPoolMarginL = ppuLensHKD . hkdMinPoolMarginL @_ @StrictMaybe
+
+ppuLeiosAnnouncementPeriodLengthL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Milliseconds32)
+ppuLeiosAnnouncementPeriodLengthL = ppuLensHKD . hkdLeiosAnnouncementPeriodLengthL @_ @StrictMaybe
+
+ppuLeiosVotePeriodLengthL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Milliseconds32)
+ppuLeiosVotePeriodLengthL = ppuLensHKD . hkdLeiosVotePeriodLengthL @_ @StrictMaybe
+
+ppuLeiosDiffusionPeriodLengthL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Milliseconds32)
+ppuLeiosDiffusionPeriodLengthL = ppuLensHKD . hkdLeiosDiffusionPeriodLengthL @_ @StrictMaybe
+
+ppuLeiosCommitteeSizeL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word16)
+ppuLeiosCommitteeSizeL = ppuLensHKD . hkdLeiosCommitteeSizeL @_ @StrictMaybe
+
+ppuLeiosQuorumStakeThresholdL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe UnitInterval)
+ppuLeiosQuorumStakeThresholdL = ppuLensHKD . hkdLeiosQuorumStakeThresholdL @_ @StrictMaybe
+
+ppuMaxEndorserBlockReferencesSizeL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word32)
+ppuMaxEndorserBlockReferencesSizeL = ppuLensHKD . hkdMaxEndorserBlockReferencesSizeL @_ @StrictMaybe
+
+ppuMaxEndorserBlockTxsSizeL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word32)
+ppuMaxEndorserBlockTxsSizeL = ppuLensHKD . hkdMaxEndorserBlockTxsSizeL @_ @StrictMaybe
+
+ppuMaxEndorserBlockExUnitsL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe OrdExUnits)
+ppuMaxEndorserBlockExUnitsL = ppuLensHKD . hkdMaxEndorserBlockExUnitsL @_ @StrictMaybe
+
+ppuMaxRefScriptSizePerEndorserBlockL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word32)
+ppuMaxRefScriptSizePerEndorserBlockL = ppuLensHKD . hkdMaxRefScriptSizePerEndorserBlockL @_ @StrictMaybe
+
+ppPerasMinCandidateBlockAgeL :: DijkstraEraPParams era => Lens' (PParams era) SlotInterval
+ppPerasMinCandidateBlockAgeL = ppLensHKD . hkdPerasMinCandidateBlockAgeL @_ @Identity
+
+ppPerasHealingFactorL :: DijkstraEraPParams era => Lens' (PParams era) PositiveInterval
+ppPerasHealingFactorL = ppLensHKD . hkdPerasHealingFactorL @_ @Identity
+
+ppPerasCertBoostL :: DijkstraEraPParams era => Lens' (PParams era) Word16
+ppPerasCertBoostL = ppLensHKD . hkdPerasCertBoostL @_ @Identity
+
+ppPerasTargetCommitteeSizeL :: DijkstraEraPParams era => Lens' (PParams era) Word16
+ppPerasTargetCommitteeSizeL = ppLensHKD . hkdPerasTargetCommitteeSizeL @_ @Identity
+
+ppPerasBootstrapRoundL :: DijkstraEraPParams era => Lens' (PParams era) (StrictMaybe Word32)
+ppPerasBootstrapRoundL = ppLensHKD . hkdPerasBootstrapRoundL @_ @Identity
+
+ppPerasQuorumThresholdSafetyMarginL :: DijkstraEraPParams era => Lens' (PParams era) UnitInterval
+ppPerasQuorumThresholdSafetyMarginL = ppLensHKD . hkdPerasQuorumThresholdSafetyMarginL @_ @Identity
+
+ppuPerasMinCandidateBlockAgeL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe SlotInterval)
+ppuPerasMinCandidateBlockAgeL = ppuLensHKD . hkdPerasMinCandidateBlockAgeL @_ @StrictMaybe
+
+ppuPerasHealingFactorL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe PositiveInterval)
+ppuPerasHealingFactorL = ppuLensHKD . hkdPerasHealingFactorL @_ @StrictMaybe
+
+ppuPerasCertBoostL :: DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word16)
+ppuPerasCertBoostL = ppuLensHKD . hkdPerasCertBoostL @_ @StrictMaybe
+
+ppuPerasTargetCommitteeSizeL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Word16)
+ppuPerasTargetCommitteeSizeL = ppuLensHKD . hkdPerasTargetCommitteeSizeL @_ @StrictMaybe
+
+ppuPerasBootstrapRoundL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe (StrictMaybe Word32))
+ppuPerasBootstrapRoundL = ppuLensHKD . hkdPerasBootstrapRoundL @_ @StrictMaybe
+
+ppuPerasQuorumThresholdSafetyMarginL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe UnitInterval)
+ppuPerasQuorumThresholdSafetyMarginL = ppuLensHKD . hkdPerasQuorumThresholdSafetyMarginL @_ @StrictMaybe
+
+ppuRefInputsCostPerMultiAssetPolicyL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe Coin)
+ppuRefInputsCostPerMultiAssetPolicyL = ppuLensHKD . hkdRefInputsCostPerMultiAssetPolicyL @_ @StrictMaybe
+
+ppuRefInputsCostPerDatumByteL ::
+  DijkstraEraPParams era => Lens' (PParamsUpdate era) (StrictMaybe CoinPerByte)
+ppuRefInputsCostPerDatumByteL = ppuLensHKD . hkdRefInputsCostPerDatumByteL @_ @StrictMaybe

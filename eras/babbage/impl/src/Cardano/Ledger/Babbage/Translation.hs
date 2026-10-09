@@ -1,0 +1,168 @@
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Babbage.Translation () where
+
+import Cardano.Ledger.Babbage.Core
+import Cardano.Ledger.Babbage.Era (BabbageEra)
+import Cardano.Ledger.Babbage.PParams ()
+import Cardano.Ledger.Babbage.State
+import Cardano.Ledger.BaseTypes (StrictMaybe (..))
+import Cardano.Ledger.Binary (DecoderError)
+import Cardano.Ledger.Shelley.LedgerState (
+  EpochState (..),
+  LedgerState (..),
+  NewEpochState (..),
+  UTxOState (..),
+ )
+import Cardano.Ledger.Shelley.PParams (ProposedPPUpdates (..))
+import Data.Coerce (coerce)
+import qualified Data.Map.Strict as Map
+import Lens.Micro
+
+--------------------------------------------------------------------------------
+-- Translation from Alonzo to Babbage
+--
+-- The instances below are needed by the consensus layer. Do not remove any of
+-- them without coordinating with consensus.
+--
+-- Please add auxiliary instances and other declarations at the bottom of this
+-- module, not in the list below so that it remains clear which instances the
+-- consensus layer needs.
+--
+-- WARNING: when a translation instance currently uses the default
+-- 'TranslationError', i.e., 'Void', it means the consensus layer relies on it
+-- being total. Do not change it!
+--------------------------------------------------------------------------------
+
+instance TranslateEra BabbageEra NewEpochState where
+  translateEra ctxt nes =
+    pure $
+      NewEpochState
+        { nesEL = nesEL nes
+        , nesBprev = nesBprev nes
+        , nesBcur = nesBcur nes
+        , nesEs = translateEra' ctxt $ nesEs nes
+        , nesRu = nesRu nes
+        , nesPd = nesPd nes
+        , stashedAVVMAddresses = ()
+        }
+
+instance TranslateEra BabbageEra (Tx TopTx) where
+  type TranslationError BabbageEra (Tx TopTx) = DecoderError
+  translateEra _ctxt tx =
+    withTopTxLevelOnly tx $ \tx' -> do
+      -- Note that this does not preserve the hidden bytes field of the transaction.
+      -- This is under the premise that this is irrelevant for TxInBlocks, which are
+      -- not transmitted as contiguous chunks.
+      txBody <- translateEraThroughCBOR "TxBody" $ tx' ^. bodyTxL
+      txWits <- translateEraThroughCBOR "TxWitness" $ tx' ^. witsTxL
+      auxData <- case tx' ^. auxDataTxL of
+        SNothing -> pure SNothing
+        SJust auxData -> SJust <$> translateEraThroughCBOR "AuxData" auxData
+      let validating = tx' ^. isPhase2ValidTxL
+      pure . asSTxTopLevel $
+        mkBasicTx txBody
+          & witsTxL .~ txWits
+          & auxDataTxL .~ auxData
+          & isPhase2ValidTxL .~ validating
+
+--------------------------------------------------------------------------------
+-- Auxiliary instances and functions
+--------------------------------------------------------------------------------
+
+instance TranslateEra BabbageEra PParams where
+  translateEra _ = pure . upgradePParams ()
+
+instance TranslateEra BabbageEra FuturePParams where
+  translateEra ctxt = \case
+    NoPParamsUpdate -> pure NoPParamsUpdate
+    DefinitePParamsUpdate pp -> DefinitePParamsUpdate <$> translateEra ctxt pp
+    PotentialPParamsUpdate mpp -> PotentialPParamsUpdate <$> mapM (translateEra ctxt) mpp
+
+instance TranslateEra BabbageEra SnapShots where
+  translateEra _ctxt _ss@SnapShots {..} = pure SnapShots {..}
+
+instance TranslateEra BabbageEra EpochState where
+  translateEra ctxt es =
+    pure
+      EpochState
+        { esChainAccountState = esChainAccountState es
+        , esSnapshots = translateEra' ctxt $ esSnapshots es
+        , esLState = translateEra' ctxt $ esLState es
+        , esNonMyopic = esNonMyopic es
+        }
+
+instance TranslateEra BabbageEra ShelleyAccounts where
+  translateEra _ = pure . coerce
+
+instance TranslateEra BabbageEra DState where
+  translateEra ctx DState {dsAccounts = accountsShelley, ..} = do
+    dsAccounts <- translateEra ctx accountsShelley
+    pure DState {..}
+
+instance TranslateEra BabbageEra CommitteeState where
+  translateEra _ CommitteeState {..} = pure CommitteeState {..}
+
+instance TranslateEra BabbageEra PState where
+  translateEra _ PState {..} = pure $ coerce PState {..}
+
+instance TranslateEra BabbageEra ShelleyCertState where
+  translateEra ctxt ls =
+    pure
+      ShelleyCertState
+        { shelleyCertDState = translateEra' ctxt $ shelleyCertDState ls
+        , shelleyCertPState = translateEra' ctxt $ shelleyCertPState ls
+        }
+
+instance TranslateEra BabbageEra LedgerState where
+  translateEra ctxt ls =
+    pure
+      LedgerState
+        { lsUTxOState = translateEra' ctxt $ lsUTxOState ls
+        , lsCertState = translateEra' ctxt $ lsCertState ls
+        }
+
+instance TranslateEra BabbageEra UTxOState where
+  translateEra ctxt us =
+    pure
+      UTxOState
+        { utxosUtxo = translateEra' ctxt $ utxosUtxo us
+        , utxosDeposited = utxosDeposited us
+        , utxosFees = utxosFees us
+        , utxosGovState = translateEra' ctxt $ utxosGovState us
+        , utxosInstantStake = translateEra' ctxt $ utxosInstantStake us
+        , utxosDonation = utxosDonation us
+        }
+
+instance TranslateEra BabbageEra ShelleyInstantStake where
+  translateEra _ = pure . coerce
+
+instance TranslateEra BabbageEra UTxO where
+  translateEra _ctxt utxo =
+    pure $ UTxO $ upgradeTxOut `Map.map` unUTxO utxo
+
+instance TranslateEra BabbageEra ShelleyGovState where
+  translateEra ctxt ps =
+    pure
+      ShelleyGovState
+        { sgsCurProposals = translateEra' ctxt $ sgsCurProposals ps
+        , sgsFutureProposals = translateEra' ctxt $ sgsFutureProposals ps
+        , sgsCurPParams = translateEra' ctxt $ sgsCurPParams ps
+        , sgsPrevPParams = translateEra' ctxt $ sgsPrevPParams ps
+        , sgsFuturePParams = translateEra' ctxt $ sgsFuturePParams ps
+        }
+
+instance TranslateEra BabbageEra ProposedPPUpdates where
+  translateEra _ctxt (ProposedPPUpdates ppup) =
+    pure $ ProposedPPUpdates $ fmap (upgradePParamsUpdate ()) ppup

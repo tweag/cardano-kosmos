@@ -1,0 +1,658 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+-- | This module exports implementations of many of the functions outlined in the Alonzo specification.
+--     The link to source of the specification
+--       https://github.com/intersectmbo/cardano-ledger/tree/master/eras/alonzo/formal-spec
+--     The most recent version of the document can be found here:
+--       https://github.com/intersectmbo/cardano-ledger/releases/latest/download/alonzo-ledger.pdf
+--     The functions can be found in Figures in that document, and sections of this code refer to those figures.
+module Cardano.Ledger.Alonzo.Tx (
+  -- ** State Annotated
+  AlonzoStAnnTx (..),
+  -- Figure 1
+  CostModel,
+  getLanguageView,
+  -- Figure 2
+  Data,
+  DataHash,
+  IsPhase2Valid (..),
+  hashData,
+  nonNativeLanguages,
+  hashScriptIntegrity,
+  EraIndependentScriptIntegrity,
+  ScriptIntegrity (ScriptIntegrity),
+  ScriptIntegrityHash,
+  -- Figure 3
+  AlonzoTx (AlonzoTx, atBody, atWits, atIsPhase2Valid, atAuxData),
+  Tx (..),
+  AlonzoEraTx (..),
+  mkBasicAlonzoTx,
+  bodyAlonzoTxL,
+  witsAlonzoTxL,
+  auxDataAlonzoTxL,
+  sizeAlonzoTxF,
+  isPhase2ValidAlonzoTxL,
+  txrdmrs,
+  TxBody (AlonzoTxBody),
+  -- Figure 4
+  totExUnits,
+  alonzoMinFeeTx,
+  --  Figure 5
+  Shelley.txouts,
+  -- Other
+  toCBORForSizeComputation,
+  toCBORForMempoolSubmission,
+  alonzoTxEqRaw,
+  mkScriptIntegrity,
+
+  -- * Deprecated
+  IsValid,
+  pattern IsValid,
+  isValidAlonzoTxL,
+  atIsValid,
+) where
+
+import Cardano.Ledger.Allegra.Tx (validateTimelock)
+import Cardano.Ledger.Alonzo.Era (AlonzoEra)
+import Cardano.Ledger.Alonzo.PParams (
+  AlonzoEraPParams,
+  LangDepView (..),
+  encodeLangViews,
+  getLanguageView,
+  ppPricesL,
+ )
+import Cardano.Ledger.Alonzo.Plutus.Context (CollectError, SupportedPlutusRunnable)
+import Cardano.Ledger.Alonzo.Scripts (
+  AlonzoEraScript (..),
+  CostModel,
+  ExUnits (..),
+  txscriptfee,
+ )
+import Cardano.Ledger.Alonzo.TxAuxData (AlonzoEraTxAuxData)
+import Cardano.Ledger.Alonzo.TxBody (
+  AlonzoEraTxBody (..),
+  ScriptIntegrityHash,
+  TxBody (AlonzoTxBody),
+  alonzoSpendableInputsTxBodyF,
+ )
+import Cardano.Ledger.Alonzo.TxWits (
+  AlonzoEraTxWits (..),
+  AlonzoTxWits (..),
+  Redeemers (..),
+  TxDats (..),
+  txrdmrs,
+  unRedeemersL,
+  unTxDatsL,
+ )
+import Cardano.Ledger.BaseTypes (ToKeyValuePairs (..), integralToBounded)
+import Cardano.Ledger.Binary (
+  Annotator,
+  DecCBOR (..),
+  EncCBOR (encCBOR),
+  Encoding,
+  ToCBOR (..),
+  TokenType (..),
+  decodeNullStrictMaybe,
+  encodeListLen,
+  encodeNullStrictMaybe,
+  peekTokenType,
+  serialize,
+  serialize',
+ )
+import Cardano.Ledger.Binary.Coders
+import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Compactible (Compactible (fromCompact))
+import Cardano.Ledger.Core
+import Cardano.Ledger.Mary (Tx (..))
+import Cardano.Ledger.MemoBytes (EqRaw (..))
+import Cardano.Ledger.Plutus (Data, Language, PlutusWithContext, hashData, nonNativeLanguages)
+import Cardano.Ledger.Shelley.Tx (shelleyTxEqRaw)
+import Cardano.Ledger.State (ScriptsNeeded, ScriptsProvided (..))
+import qualified Cardano.Ledger.State as Shelley
+import Cardano.Ledger.Val (Val ((<+>), (<×>)))
+import Control.DeepSeq (NFData (..), deepseq)
+import Control.Monad.Trans.Fail.String (errorFail)
+import Data.Aeson (FromJSON (..), ToJSON (..), withObject, (.:), (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
+import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
+import Data.Maybe.Strict (StrictMaybe (..))
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Typeable (Typeable)
+import Data.Word (Word32)
+import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack)
+import Lens.Micro hiding (set)
+import NoThunks.Class (InspectHeap (..), NoThunks)
+
+-- ===================================================
+
+-- | Tag indicating whether the non-native (phase-2) scripts in this transaction
+-- are expected to validate. This is added by the block creator when constructing
+-- the block.
+data IsPhase2Valid
+  = Phase2Invalid
+  | Phase2Valid
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass (NoThunks, NFData)
+
+instance Semigroup IsPhase2Valid where
+  Phase2Valid <> x = x
+  Phase2Invalid <> _ = Phase2Invalid
+
+instance Monoid IsPhase2Valid where
+  mempty = Phase2Valid
+
+isPhase2Valid :: IsPhase2Valid -> Bool
+isPhase2Valid = \case
+  Phase2Invalid -> False
+  Phase2Valid -> True
+
+toIsPhase2Valid :: Bool -> IsPhase2Valid
+toIsPhase2Valid b = if b then Phase2Valid else Phase2Invalid
+
+instance EncCBOR IsPhase2Valid where
+  encCBOR = encCBOR . isPhase2Valid
+
+instance DecCBOR IsPhase2Valid where
+  decCBOR = toIsPhase2Valid <$> decCBOR
+
+instance ToCBOR IsPhase2Valid where
+  toCBOR = toCBOR . isPhase2Valid
+
+instance ToJSON IsPhase2Valid where
+  toJSON = toJSON . isPhase2Valid
+  toEncoding = toEncoding . isPhase2Valid
+
+instance FromJSON IsPhase2Valid where
+  parseJSON = fmap toIsPhase2Valid . parseJSON
+
+type IsValid = IsPhase2Valid
+
+pattern IsValid :: Bool -> IsPhase2Valid
+pattern IsValid b <- (isPhase2Valid -> b)
+  where
+    IsValid = toIsPhase2Valid
+
+{-# COMPLETE IsValid #-}
+
+{-# DEPRECATED IsValid "In favor of `IsPhase2Valid`" #-}
+
+data AlonzoTx l era where
+  AlonzoTx ::
+    { atBody :: !(TxBody TopTx era)
+    , atWits :: !(TxWits era)
+    , atIsPhase2Valid :: !IsPhase2Valid
+    , atAuxData :: !(StrictMaybe (TxAuxData era))
+    } ->
+    AlonzoTx TopTx era
+
+instance HasEraTxLevel Tx AlonzoEra where
+  toSTxLevel (MkAlonzoTx AlonzoTx {}) = STopTxOnly @AlonzoEra
+
+instance EraTx AlonzoEra where
+  newtype Tx l AlonzoEra = MkAlonzoTx {unAlonzoTx :: AlonzoTx l AlonzoEra}
+    deriving newtype (Eq, NFData, EncCBOR, ToCBOR, NoThunks, Show)
+    deriving (Generic)
+
+  type StAnnTx l AlonzoEra = AlonzoStAnnTx l AlonzoEra
+
+  type StAnnTxCache AlonzoEra = Map.Map ScriptHash (SupportedPlutusRunnable AlonzoEra)
+
+  txStAnnTxG = to $ \AlonzoStAnnTx {asatTx} -> asatTx
+
+  cacheStAnnTxG = to $ \AlonzoStAnnTx {asatPlutusRunnableCache} -> asatPlutusRunnableCache
+
+  mkBasicTx = MkAlonzoTx . mkBasicAlonzoTx
+
+  bodyTxL = alonzoTxL . bodyAlonzoTxL
+  {-# INLINE bodyTxL #-}
+
+  witsTxL = alonzoTxL . witsAlonzoTxL
+  {-# INLINE witsTxL #-}
+
+  auxDataTxL = alonzoTxL . auxDataAlonzoTxL
+  {-# INLINE auxDataTxL #-}
+
+  sizeTxF = alonzoTxL . sizeAlonzoTxF
+  {-# INLINE sizeTxF #-}
+
+  validateNativeScript = validateTimelock
+  {-# INLINE validateNativeScript #-}
+
+  getMinFeeTx pp tx _ = alonzoMinFeeTx pp tx
+  {-# INLINE getMinFeeTx #-}
+
+  allInputsTxBodyF = alonzoSpendableInputsTxBodyF
+  {-# INLINEABLE allInputsTxBodyF #-}
+
+alonzoTxEqRaw ::
+  ( AlonzoEraTx era
+  , STxLevel l era ~ STxTopLevel l era
+  ) =>
+  Tx l era -> Tx l era -> Bool
+alonzoTxEqRaw tx1 tx2 =
+  withTopTxLevelOnly tx1 $ \tx1' ->
+    withTopTxLevelOnly tx2 $ \tx2' ->
+      shelleyTxEqRaw tx1 tx2 && (tx1' ^. isPhase2ValidTxL == tx2' ^. isPhase2ValidTxL)
+
+instance EqRaw (Tx l AlonzoEra) where
+  eqRaw = alonzoTxEqRaw
+
+instance
+  ( ToJSON (TxBody TopTx era)
+  , ToJSON (TxWits era)
+  , ToJSON (TxAuxData era)
+  ) =>
+  ToKeyValuePairs (AlonzoTx TopTx era)
+  where
+  toKeyValuePairs AlonzoTx {atBody, atWits, atIsPhase2Valid, atAuxData} =
+    [ "body" .= atBody
+    , "wits" .= atWits
+    , "isPhase2Valid" .= atIsPhase2Valid
+    , "auxData" .= atAuxData
+    ]
+
+instance
+  ( ToJSON (TxBody TopTx era)
+  , ToJSON (TxWits era)
+  , ToJSON (TxAuxData era)
+  ) =>
+  ToJSON (AlonzoTx TopTx era)
+  where
+  toJSON = Aeson.object . toKeyValuePairs
+
+instance
+  ( FromJSON (TxBody TopTx era)
+  , FromJSON (TxWits era)
+  , FromJSON (TxAuxData era)
+  ) =>
+  FromJSON (AlonzoTx TopTx era)
+  where
+  parseJSON = withObject "AlonzoTx" $ \o ->
+    AlonzoTx
+      <$> o .: "body"
+      <*> o .: "wits"
+      <*> o .: "isPhase2Valid"
+      <*> o .: "auxData"
+
+instance ToJSON (Tx TopTx AlonzoEra) where
+  toJSON (MkAlonzoTx tx) = toJSON tx
+
+instance FromJSON (Tx TopTx AlonzoEra) where
+  parseJSON v = MkAlonzoTx <$> parseJSON v
+
+alonzoTxL :: Lens' (Tx l AlonzoEra) (AlonzoTx l AlonzoEra)
+alonzoTxL = lens unAlonzoTx $ const MkAlonzoTx
+
+class
+  ( EraTx era
+  , AlonzoEraTxBody era
+  , AlonzoEraTxWits era
+  , AlonzoEraScript era
+  , AlonzoEraTxAuxData era
+  ) =>
+  AlonzoEraTx era
+  where
+  isPhase2ValidTxL :: Lens' (Tx TopTx era) IsPhase2Valid
+
+  isValidTxL :: Lens' (Tx TopTx era) IsPhase2Valid
+  isValidTxL = isPhase2ValidTxL
+
+  -- | Total declared execution units, including sub-transactions when supported.
+  -- Earlier eras only have the transaction's own redeemers.
+  getTotalExUnits :: Tx l era -> ExUnits
+  getTotalExUnits tx = foldMap snd $ tx ^. witsTxL . rdmrsTxWitsL . unRedeemersL
+
+{-# DEPRECATED isValidTxL "In favor of `isPhase2ValidTxL`" #-}
+
+instance Typeable l => DecCBOR (Annotator (Tx l AlonzoEra)) where
+  decCBOR = fmap MkAlonzoTx <$> decCBOR
+
+instance AlonzoEraTx AlonzoEra where
+  isPhase2ValidTxL = alonzoTxL . isPhase2ValidAlonzoTxL
+  {-# INLINE isPhase2ValidTxL #-}
+
+mkBasicAlonzoTx ::
+  ( EraTx era
+  , STxLevel l era ~ STxTopLevel l era
+  ) =>
+  TxBody l era -> AlonzoTx l era
+mkBasicAlonzoTx txBody =
+  case toSTxLevel txBody of
+    STopTxOnly ->
+      AlonzoTx txBody mempty Phase2Valid SNothing
+
+-- | `TxBody` setter and getter for `AlonzoTx`.
+bodyAlonzoTxL :: Lens' (AlonzoTx l era) (TxBody l era)
+bodyAlonzoTxL =
+  lens (\AlonzoTx {atBody} -> atBody) $ \tx txBody ->
+    case tx of
+      AlonzoTx {} -> tx {atBody = txBody}
+{-# INLINEABLE bodyAlonzoTxL #-}
+
+-- | `TxWits` setter and getter for `AlonzoTx`.
+witsAlonzoTxL :: Lens' (AlonzoTx l era) (TxWits era)
+witsAlonzoTxL =
+  lens (\AlonzoTx {atWits} -> atWits) $ \tx txWits ->
+    case tx of
+      AlonzoTx {} -> tx {atWits = txWits}
+{-# INLINEABLE witsAlonzoTxL #-}
+
+-- | `TxAuxData` setter and getter for `AlonzoTx`.
+auxDataAlonzoTxL :: Lens' (AlonzoTx l era) (StrictMaybe (TxAuxData era))
+auxDataAlonzoTxL =
+  lens (\AlonzoTx {atAuxData} -> atAuxData) $ \tx txAuxData ->
+    case tx of
+      AlonzoTx {} -> tx {atAuxData = txAuxData}
+{-# INLINEABLE auxDataAlonzoTxL #-}
+
+-- | txsize computes the length of the serialised bytes (for estimations)
+sizeAlonzoTxF :: forall era l. (HasCallStack, EraTx era) => SimpleGetter (AlonzoTx l era) Word32
+sizeAlonzoTxF =
+  to $
+    errorFail
+      . integralToBounded @Int64 @Word32
+      . LBS.length
+      . serialize (eraProtVerLow @era)
+      . toCBORForSizeComputation
+{-# INLINEABLE sizeAlonzoTxF #-}
+
+isPhase2ValidAlonzoTxL :: Lens' (AlonzoTx l era) IsPhase2Valid
+isPhase2ValidAlonzoTxL =
+  lens (\AlonzoTx {atIsPhase2Valid} -> atIsPhase2Valid) $ \tx txIsPhase2Valid ->
+    case tx of
+      AlonzoTx {} -> tx {atIsPhase2Valid = txIsPhase2Valid}
+{-# INLINEABLE isPhase2ValidAlonzoTxL #-}
+
+isValidAlonzoTxL :: Lens' (AlonzoTx l era) IsPhase2Valid
+isValidAlonzoTxL = isPhase2ValidAlonzoTxL
+{-# DEPRECATED isValidAlonzoTxL "In favor of `isPhase2ValidAlonzoTxL`" #-}
+
+atIsValid :: AlonzoTx TopTx era -> IsPhase2Valid
+atIsValid = atIsPhase2Valid
+{-# DEPRECATED atIsValid "In favor of `atIsPhase2Valid`" #-}
+
+deriving instance
+  (Era era, Eq (TxBody l era), Eq (TxWits era), Eq (TxAuxData era)) => Eq (AlonzoTx l era)
+
+deriving instance
+  (Era era, Show (TxBody l era), Show (TxAuxData era), Show (Script era), Show (TxWits era)) =>
+  Show (AlonzoTx l era)
+
+deriving via
+  InspectHeap (AlonzoTx l era)
+  instance
+    (Typeable era, Typeable l) => NoThunks (AlonzoTx l era)
+
+instance
+  ( Era era
+  , NFData (TxWits era)
+  , NFData (TxAuxData era)
+  , NFData (TxBody l era)
+  ) =>
+  NFData (AlonzoTx l era)
+  where
+  rnf AlonzoTx {..} =
+    atBody `deepseq`
+      atWits `deepseq`
+        atAuxData `deepseq`
+          rnf atIsPhase2Valid
+
+-- | A ScriptIntegrityHash is the hash of three things.  The first two come
+-- from the witnesses and the last comes from the Protocol Parameters.
+data ScriptIntegrity era
+  = ScriptIntegrity
+      !(Redeemers era) -- From the witnesses
+      !(TxDats era)
+      !(Set LangDepView) -- From the Protocol parameters
+  deriving (Eq, Generic)
+
+deriving instance AlonzoEraScript era => Show (ScriptIntegrity era)
+
+deriving instance AlonzoEraScript era => NoThunks (ScriptIntegrity era)
+
+-- ScriptIntegrity is not transmitted over the network. The bytes are independently
+-- reconstructed by all nodes. There are no original bytes to preserve.
+-- Instead, we must use a reproducable serialization
+instance Era era => SafeToHash (ScriptIntegrity era) where
+  originalBytes (ScriptIntegrity m d l) =
+    let dBytes = if null (d ^. unTxDatsL) then mempty else originalBytes d
+        lBytes = serialize' (eraProtVerLow @era) (encodeLangViews l)
+     in originalBytes m <> dBytes <> lBytes
+
+instance
+  Era era =>
+  HashAnnotated (ScriptIntegrity era) EraIndependentScriptIntegrity
+
+hashScriptIntegrity :: Era era => ScriptIntegrity era -> ScriptIntegrityHash
+hashScriptIntegrity = hashAnnotated
+
+mkScriptIntegrity ::
+  ( EraTx era
+  , AlonzoEraPParams era
+  , AlonzoEraTxWits era
+  ) =>
+  PParams era ->
+  Tx l era ->
+  Set Language ->
+  StrictMaybe (ScriptIntegrity era)
+mkScriptIntegrity pp tx langs
+  | null (txRedeemers ^. unRedeemersL)
+  , null langViews
+  , null (txDats ^. unTxDatsL) =
+      SNothing
+  | otherwise = SJust $ ScriptIntegrity txRedeemers txDats langViews
+  where
+    langViews = Set.map (getLanguageView pp) langs
+    txWits = tx ^. witsTxL
+    txRedeemers = txWits ^. rdmrsTxWitsL
+    txDats = txWits ^. datsTxWitsL
+
+-- ===============================================================
+-- From the specification, Figure 4 "Functions related to fees"
+-- ===============================================================
+
+-- | This ensures that the size of transactions from Mary is unchanged.
+-- The individual components all store their bytes; the only work we do in this
+-- function is concatenating
+toCBORForSizeComputation ::
+  ( EncCBOR (TxBody l era)
+  , EncCBOR (TxWits era)
+  , EncCBOR (TxAuxData era)
+  ) =>
+  AlonzoTx l era ->
+  Encoding
+toCBORForSizeComputation AlonzoTx {atBody, atWits, atAuxData} =
+  encodeListLen 3
+    <> encCBOR atBody
+    <> encCBOR atWits
+    <> encodeNullStrictMaybe encCBOR atAuxData
+
+alonzoMinFeeTx ::
+  AlonzoEraTx era =>
+  PParams era ->
+  Tx l era ->
+  Coin
+alonzoMinFeeTx pp tx =
+  (tx ^. sizeTxF <×> (fromCompact . unCoinPerByte) (pp ^. ppTxFeePerByteL))
+    <+> (pp ^. ppTxFeeFixedL)
+    <+> txscriptfee (pp ^. ppPricesL) allExunits
+  where
+    allExunits = getTotalExUnits tx
+
+totExUnits ::
+  AlonzoEraTx era =>
+  Tx l era ->
+  ExUnits
+totExUnits = getTotalExUnits
+{-# DEPRECATED totExUnits "In favor of `getTotalExUnits`" #-}
+
+--------------------------------------------------------------------------------
+-- Serialisation
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- Mempool Serialisation
+--
+-- We do not store the Tx bytes for the following reasons:
+-- - A Tx serialised in this way never forms part of any hashed structure, hence
+--   we do not worry about the serialisation changing and thus seeing a new
+--   hash.
+-- - The three principal components of this Tx already store their own bytes;
+--   here we simply concatenate them. The final component, `IsValid`, is
+--   just a flag and very cheap to serialise.
+--------------------------------------------------------------------------------
+
+-- | Encode to CBOR for the purposes of transmission from node to node, or from
+-- wallet to node.
+--
+-- Note that this serialisation is neither the serialisation used on-chain
+-- (where Txs are deconstructed using segwit), nor the serialisation used for
+-- computing the transaction size (which omits the `IsValid` field for
+-- compatibility with Mary - see 'toCBORForSizeComputation').
+toCBORForMempoolSubmission ::
+  ( EncCBOR (TxBody l era)
+  , EncCBOR (TxWits era)
+  , EncCBOR (TxAuxData era)
+  ) =>
+  AlonzoTx l era ->
+  Encoding
+toCBORForMempoolSubmission
+  AlonzoTx {atBody, atWits, atAuxData, atIsPhase2Valid} =
+    encode $
+      Rec AlonzoTx
+        !> To atBody
+        !> To atWits
+        !> To atIsPhase2Valid
+        !> E (encodeNullStrictMaybe encCBOR) atAuxData
+
+instance
+  ( Era era
+  , EncCBOR (TxBody l era)
+  , EncCBOR (TxAuxData era)
+  , EncCBOR (TxWits era)
+  ) =>
+  EncCBOR (AlonzoTx l era)
+  where
+  encCBOR = toCBORForMempoolSubmission
+
+instance
+  ( Era era
+  , EncCBOR (TxBody l era)
+  , EncCBOR (TxAuxData era)
+  , EncCBOR (TxWits era)
+  , Typeable l
+  ) =>
+  ToCBOR (AlonzoTx l era)
+  where
+  toCBOR = toEraCBOR @era
+
+instance
+  ( Typeable l
+  , Era era
+  , Typeable (TxBody l era)
+  , Typeable (TxWits era)
+  , Typeable (TxAuxData era)
+  , DecCBOR (Annotator (TxBody l era))
+  , DecCBOR (Annotator (TxWits era))
+  , DecCBOR (Annotator (TxAuxData era))
+  ) =>
+  DecCBOR (Annotator (AlonzoTx l era))
+  where
+  decCBOR =
+    withSTxTopLevelM @l @era $ \case
+      STopTxOnly ->
+        fmap snd $ decodeRecordNamed "AlonzoTx" fst $ do
+          body <- decCBOR
+          wits <- decCBOR
+          (isValidFlagSupplied, isValid) <-
+            peekTokenType >>= \case
+              TypeBool -> do
+                isValid <- decCBOR
+                pure (True, isValid)
+              _ -> pure (False, IsValid True)
+          auxData <- decodeNullStrictMaybe decCBOR
+          let
+            tx = AlonzoTx <$> body <*> wits <*> pure isValid <*> sequence auxData
+          pure (if isValidFlagSupplied then 4 else 3, tx)
+  {-# INLINE decCBOR #-}
+
+data AlonzoStAnnTx l era where
+  AlonzoStAnnTx ::
+    { asatTx :: !(Tx TopTx era)
+    , asatScriptsNeeded :: ScriptsNeeded era
+    , asatScriptsProvided :: ScriptsProvided era
+    , asatPlutusLanguagesUsed :: Set Language
+    , asatPlutusRunnableCache :: Map.Map ScriptHash (SupportedPlutusRunnable era)
+    , asatPlutusScriptsWithContext :: Either (NonEmpty (CollectError era)) [PlutusWithContext]
+    } ->
+    AlonzoStAnnTx TopTx era
+
+deriving instance
+  ( AlonzoEraScript era
+  , Eq (Tx TopTx era)
+  , Eq (ScriptsNeeded era)
+  , Eq (ScriptsProvided era)
+  , Eq (CollectError era)
+  ) =>
+  Eq (AlonzoStAnnTx l era)
+
+deriving instance
+  ( AlonzoEraScript era
+  , Show (Tx TopTx era)
+  , Show (ScriptsNeeded era)
+  , Show (ScriptsProvided era)
+  , Show (CollectError era)
+  ) =>
+  Show (AlonzoStAnnTx l era)
+
+instance
+  (EraTxLevel era, STxLevel TopTx era ~ STxTopLevel TopTx era) =>
+  HasEraTxLevel AlonzoStAnnTx era
+  where
+  toSTxLevel (AlonzoStAnnTx {}) = STopTxOnly @era
+
+instance
+  ( AlonzoEraScript era
+  , NFData (Tx TopTx era)
+  , NFData (ScriptsNeeded era)
+  , NFData (ScriptsProvided era)
+  , NFData (CollectError era)
+  ) =>
+  NFData (AlonzoStAnnTx l era)
+  where
+  rnf stAnnTx@(AlonzoStAnnTx _ _ _ _ _ _) =
+    let AlonzoStAnnTx {..} = stAnnTx
+     in asatTx `deepseq`
+          asatScriptsNeeded `deepseq`
+            asatScriptsProvided `deepseq`
+              asatPlutusRunnableCache `deepseq`
+                asatPlutusLanguagesUsed `deepseq`
+                  rnf asatPlutusScriptsWithContext

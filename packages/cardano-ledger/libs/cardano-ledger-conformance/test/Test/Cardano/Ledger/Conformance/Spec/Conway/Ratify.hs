@@ -1,0 +1,89 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+
+module Test.Cardano.Ledger.Conformance.Spec.Conway.Ratify (spec) where
+
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Governance (
+  EnactState,
+  GovActionState (..),
+  RatifyEnv (..),
+  RatifyState (..),
+  rsEnactStateL,
+ )
+import Cardano.Ledger.Conway.Rules qualified as Conway
+import Constrained.Generation
+import Data.Either (fromRight)
+import Lens.Micro
+import MAlonzo.Code.Ledger.Conway.Foreign.API qualified as Agda
+import Prettyprinter as Pretty
+import Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway ()
+import Test.Cardano.Ledger.Conformance.Spec.Core
+import Test.Cardano.Ledger.Conformance.SpecTranslate.Base
+import Test.Cardano.Ledger.Constrained.Conway.MiniTrace (
+  ConstrainedGeneratorBundle (..),
+  constrainedRatify,
+ )
+import Test.Cardano.Ledger.Conway.TreeDiff (tableDoc)
+import Test.Cardano.Ledger.Imp.Common
+
+conformsToImplAccepted ::
+  (RatifyEnv ConwayEra -> RatifyState ConwayEra -> GovActionState ConwayEra -> Bool) ->
+  ( SpecRep ConwayEra (RatifyEnv ConwayEra) ->
+    SpecRep ConwayEra (EnactState ConwayEra) ->
+    SpecRep ConwayEra (GovActionState ConwayEra) ->
+    Bool
+  ) ->
+  Property
+conformsToImplAccepted impl agda = property $ do
+  let ConstrainedGeneratorBundle {..} = constrainedRatify
+      fromSpecTransM = fromRight $ error "conformsToImplAccepted: translation error"
+  govActions <- cgbContextGen
+  ratifyEnv <- genFromSpec $ cgbEnvironmentSpec govActions
+  ratifySt <- genFromSpec $ cgbStateSpec govActions ratifyEnv
+  let specEnv = fromSpecTransM $ runSpecTransM 0 $ toSpecRep @ConwayEra ratifyEnv
+      specSt =
+        fromSpecTransM $
+          runSpecTransM () $
+            toSpecRep @ConwayEra (ratifySt ^. rsEnactStateL)
+      specGovActions = fromSpecTransM $ runSpecTransM () $ toSpecRep @ConwayEra govActions
+  return $
+    conjoin $
+      zipWith
+        ( \ga sga ->
+            let implRes = impl ratifyEnv ratifySt ga
+                agdaRes = agda specEnv specSt sga
+             in counterexample (prettify ratifyEnv ratifySt ga implRes agdaRes) $
+                  implRes == agdaRes
+        )
+        govActions
+        specGovActions
+  where
+    prettify ratifyEnv ratifySt ga implRes agdaRes =
+      ansiDocToString $
+        Pretty.vsep $
+          tableDoc Nothing [("Impl:", showAccepted implRes), ("Spec:", showAccepted agdaRes)]
+            : [ansiExpr ratifyEnv, ansiExpr ratifySt, ansiExpr ga]
+
+    showAccepted True = Pretty.brackets "✓"
+    showAccepted False = Pretty.brackets "×"
+
+spec :: Spec
+spec = describe "RATIFY" $ do
+  prop "STS" $ conformsToImplConstrained_ constrainedRatify
+  describe "Accepted" $ do
+    forM_
+      [ ("DRep", (Conway.dRepAccepted, Agda.acceptedByDRep))
+      , ("SPO", (Conway.spoAccepted, Agda.acceptedBySPO))
+      , ("CC", (Conway.committeeAccepted, Agda.acceptedByCC))
+      ]
+      $ \(l, (impl, agda)) ->
+        prop l $ conformsToImplAccepted impl agda

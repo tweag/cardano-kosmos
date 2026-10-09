@@ -1,0 +1,37 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Test.Cardano.Protocol.Binary.RoundTrip (roundTripBlockSpec) where
+
+import Cardano.Ledger.Binary (Annotator, DecCBOR, EncCBOR, ToCBOR)
+import Cardano.Ledger.Block (Block)
+import Cardano.Ledger.Core
+import Data.Typeable
+import qualified Test.Cardano.Base.QuickCheck as BaseQC
+import Test.Cardano.Ledger.Common
+import Test.Cardano.Ledger.Core.Binary.RoundTrip
+import Test.Cardano.Protocol.Binary.Annotator ()
+import Test.Cardano.Protocol.TPraos.Arbitrary ()
+
+roundTripBlockSpec ::
+  forall h era.
+  ( Eq h
+  , Show h
+  , EraBlockBody era
+  , Arbitrary (Block h era)
+  , EncCBOR (Block h era)
+  , DecCBOR (Block h era)
+  , ToCBOR (Block h era)
+  , DecCBOR (Annotator (Block h era))
+  ) =>
+  Spec
+roundTripBlockSpec =
+  prop (show (typeRep $ Proxy @(Block h era))) $ do
+    BaseQC.withNumTests 3 $
+      conjoin
+        [ roundTripEraExpectation @era @(Block h era)
+        , roundTripAnnEraExpectation @era @(Block h era)
+        ]

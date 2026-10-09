@@ -1,0 +1,341 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TypeFamilies #-}
+
+module Data.VMap (
+  VG.Vector,
+  VB,
+  VU,
+  VP,
+  VS,
+  VMap (..),
+  empty,
+  size,
+  lookup,
+  findWithDefault,
+  lookupIndex,
+  elemAt,
+  member,
+  notMember,
+  map,
+  mapMaybe,
+  mapMaybeWithKey,
+  mapWithKey,
+  filter,
+  fold,
+  foldl,
+  foldlWithKey,
+  foldMap,
+  foldMapWithKey,
+  union,
+  unionWith,
+  unionWithKey,
+  fromMap,
+  toMap,
+  fromList,
+  fromListN,
+  toList,
+  toAscList,
+  keys,
+  keysSet,
+  elems,
+  fromAscList,
+  fromAscListN,
+  fromAscListWithKey,
+  fromAscListWithKeyN,
+  fromDistinctAscList,
+  fromDistinctAscListN,
+  internMaybe,
+  null,
+  splitAt,
+  -- Internal types
+  KV.KVMVector,
+  KV.KVVector,
+  KV.normalize,
+  KV.normalizeM,
+) where
+
+import Control.DeepSeq
+import Data.Aeson (FromJSON (..), FromJSONKey, ToJSON (..), ToJSONKey)
+import qualified Data.Map.Strict as Map
+import Data.Maybe as Maybe hiding (mapMaybe)
+import qualified Data.Set as Set
+import Data.VMap.KVVector (KVVector (..))
+import qualified Data.VMap.KVVector as KV
+import qualified Data.Vector as V
+import qualified Data.Vector.Generic as VG
+import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Unboxed as VU
+import qualified GHC.Exts as Exts
+import GHC.Generics (Generic)
+import NoThunks.Class
+import Prelude hiding (filter, foldMap, foldl, lookup, map, null, splitAt)
+
+type VB = V.Vector
+
+type VU = VU.Vector
+
+type VP = VP.Vector
+
+type VS = VS.Vector
+
+newtype VMap kv vv k v = VMap
+  { unVMap :: KVVector kv vv (k, v)
+  }
+  deriving (Eq, Generic, NoThunks, NFData, Semigroup, Monoid)
+
+instance (Show k, Show v, VG.Vector kv k, VG.Vector vv v) => Show (VMap kv vv k v) where
+  show = show . KV.toMap . unVMap
+
+instance (VG.Vector kv k, VG.Vector vv v, Ord k) => Exts.IsList (VMap kv vv k v) where
+  type Item (VMap kv vv k v) = (k, v)
+  fromList = fromList
+  {-# INLINE fromList #-}
+  fromListN = fromListN
+  {-# INLINE fromListN #-}
+  toList = toAscList
+  {-# INLINE toList #-}
+
+instance
+  (VG.Vector vk k, VG.Vector vv v, ToJSONKey k, ToJSON v) =>
+  ToJSON (VMap vk vv k v)
+  where
+  toJSON = toJSON . toMap
+  toEncoding = toEncoding . toMap
+
+instance
+  (VG.Vector vk k, VG.Vector vv v, Ord k, FromJSONKey k, FromJSON v) =>
+  FromJSON (VMap vk vv k v)
+  where
+  parseJSON = fmap fromMap . parseJSON
+
+empty :: (VG.Vector kv k, VG.Vector vv v) => VMap kv vv k v
+empty = VMap VG.empty
+
+size :: (VG.Vector kv k, VG.Vector vv v) => VMap kv vv k v -> Int
+size = VG.length . unVMap
+{-# INLINE size #-}
+
+lookup ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) => k -> VMap kv vv k v -> Maybe v
+lookup k = KV.lookupKVVector k . unVMap
+{-# INLINE lookup #-}
+
+elemAt ::
+  (VG.Vector kv k, VG.Vector vv v) => Int -> VMap kv vv k v -> (k, v)
+elemAt ix = KV.elemAtKVVector ix . unVMap
+{-# INLINE elemAt #-}
+
+lookupIndex ::
+  (Ord k, VG.Vector kv k) => k -> VMap kv vv k v -> Maybe Int
+lookupIndex key = KV.lookupIndexKVVector key . unVMap
+{-# INLINE lookupIndex #-}
+
+member ::
+  (Ord k, VG.Vector kv k) => k -> VMap kv vv k v -> Bool
+member k = KV.memberKVVector k . unVMap
+{-# INLINE member #-}
+
+notMember ::
+  (Ord k, VG.Vector kv k) => k -> VMap kv vv k v -> Bool
+notMember k = not . member k
+{-# INLINE notMember #-}
+
+filter ::
+  (VG.Vector kv k, VG.Vector vv v) =>
+  (k -> v -> Bool) ->
+  VMap kv vv k v ->
+  VMap kv vv k v
+filter f = VMap . VG.filter (uncurry f) . unVMap
+{-# INLINE filter #-}
+
+findWithDefault ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) => v -> k -> VMap kv vv k v -> v
+findWithDefault a k = fromMaybe a . lookup k
+{-# INLINE findWithDefault #-}
+
+union ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) =>
+  VMap kv vv k v ->
+  VMap kv vv k v ->
+  VMap kv vv k v
+union = unionWithKey KV.keepFirstDuplicate
+{-# INLINE union #-}
+
+unionWith ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) =>
+  (v -> v -> v) ->
+  VMap kv vv k v ->
+  VMap kv vv k v ->
+  VMap kv vv k v
+unionWith f = unionWithKey (const f)
+{-# INLINE unionWith #-}
+
+unionWithKey ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) =>
+  (k -> v -> v -> v) ->
+  VMap kv vv k v ->
+  VMap kv vv k v ->
+  VMap kv vv k v
+unionWithKey f (VMap kv1) (VMap kv2) = VMap (KV.unionWithKey f kv1 kv2)
+{-# INLINE unionWithKey #-}
+
+fromMap :: (VG.Vector kv k, VG.Vector vv v) => Map.Map k v -> VMap kv vv k v
+fromMap = VMap . KV.fromMap
+{-# INLINE fromMap #-}
+
+toMap :: (VG.Vector kv k, VG.Vector vv v) => VMap kv vv k v -> Map.Map k v
+toMap = KV.toMap . unVMap
+{-# INLINE toMap #-}
+
+toList :: (VG.Vector kv k, VG.Vector vv v) => VMap kv vv k v -> [(k, v)]
+toList = VG.toList . unVMap
+{-# INLINE toList #-}
+
+toAscList :: (VG.Vector kv k, VG.Vector vv v) => VMap kv vv k v -> [(k, v)]
+toAscList = VG.toList . unVMap
+{-# INLINE toAscList #-}
+
+fromList ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) => [(k, v)] -> VMap kv vv k v
+fromList = VMap . KV.fromList
+{-# INLINE fromList #-}
+
+fromListN ::
+  (Ord k, VG.Vector kv k, VG.Vector vv v) => Int -> [(k, v)] -> VMap kv vv k v
+fromListN n = VMap . KV.fromListN n
+{-# INLINE fromListN #-}
+
+fromAscList ::
+  (Eq k, VG.Vector kv k, VG.Vector vv v) => [(k, v)] -> VMap kv vv k v
+fromAscList = VMap . KV.fromAscList
+{-# INLINE fromAscList #-}
+
+fromAscListN ::
+  (Eq k, VG.Vector kv k, VG.Vector vv v) => Int -> [(k, v)] -> VMap kv vv k v
+fromAscListN n = VMap . KV.fromAscListN n
+{-# INLINE fromAscListN #-}
+
+fromAscListWithKey ::
+  (Eq k, VG.Vector kv k, VG.Vector vv v) => (k -> v -> v -> v) -> [(k, v)] -> VMap kv vv k v
+fromAscListWithKey f = VMap . KV.fromAscListWithKey f
+{-# INLINE fromAscListWithKey #-}
+
+fromAscListWithKeyN ::
+  (Eq k, VG.Vector kv k, VG.Vector vv v) => Int -> (k -> v -> v -> v) -> [(k, v)] -> VMap kv vv k v
+fromAscListWithKeyN n f = VMap . KV.fromAscListWithKeyN n f
+{-# INLINE fromAscListWithKeyN #-}
+
+fromDistinctAscList ::
+  (VG.Vector kv k, VG.Vector vv v) => [(k, v)] -> VMap kv vv k v
+fromDistinctAscList = VMap . KV.fromDistinctAscList
+{-# INLINE fromDistinctAscList #-}
+
+fromDistinctAscListN ::
+  (VG.Vector kv k, VG.Vector vv v) => Int -> [(k, v)] -> VMap kv vv k v
+fromDistinctAscListN n = VMap . KV.fromDistinctAscListN n
+{-# INLINE fromDistinctAscListN #-}
+
+map ::
+  (VG.Vector kv k, VG.Vector vv a, VG.Vector vv b) =>
+  (a -> b) ->
+  VMap kv vv k a ->
+  VMap kv vv k b
+map f (VMap vec) = VMap (VG.map (\(k, v) -> let v' = f v in v' `seq` (k, v')) vec)
+-- TODO: benchmark and switch to this implementation when we switch to Data.Vector.Strict
+-- VMap (KV.mapValsKVVector f vec)
+--
+-- This is marked as NOINLINE because there is some strange issue in `vector`, likely due to stream
+-- fusion, that prevents elements from being forced. This needs further investigation, but for now
+-- we can get away with NOINLINE. FTR. `Data.Vector.Strict` is also susceptible to this problem.
+{-# NOINLINE map #-}
+
+mapMaybe ::
+  (VG.Vector kv k, VG.Vector vv a, VG.Vector vv b) =>
+  (a -> Maybe b) ->
+  VMap kv vv k a ->
+  VMap kv vv k b
+mapMaybe f = mapMaybeWithKey (const f)
+{-# INLINE mapMaybe #-}
+
+mapMaybeWithKey ::
+  (VG.Vector kv k, VG.Vector vv a, VG.Vector vv b) =>
+  (k -> a -> Maybe b) ->
+  VMap kv vv k a ->
+  VMap kv vv k b
+mapMaybeWithKey f (VMap vec) = VMap (VG.mapMaybe (\(k, x) -> (,) k <$> f k x) vec)
+{-# INLINE mapMaybeWithKey #-}
+
+mapWithKey ::
+  (VG.Vector kv k, VG.Vector vv a, VG.Vector vv b) =>
+  (k -> a -> b) ->
+  VMap kv vv k a ->
+  VMap kv vv k b
+mapWithKey f (VMap vec) = VMap (VG.map (\(k, v) -> (k, f k v)) vec)
+-- TODO: benchmark and switch to this implementation when we switch to Data.Vector.Strict
+-- VMap (KV.mapWithKeyKVVector f vec)
+{-# INLINE mapWithKey #-}
+
+foldMapWithKey ::
+  (VG.Vector kv k, VG.Vector vv v, Monoid m) =>
+  (k -> v -> m) ->
+  VMap kv vv k v ->
+  m
+foldMapWithKey f = VG.foldMap' (uncurry f) . unVMap
+{-# INLINE foldMapWithKey #-}
+
+foldl ::
+  VG.Vector vv v =>
+  (a -> v -> a) ->
+  a ->
+  VMap kv vv k v ->
+  a
+foldl f a = VG.foldl' f a . valsVector . unVMap
+{-# INLINE foldl #-}
+
+foldlWithKey ::
+  (VG.Vector kv k, VG.Vector vv v) =>
+  (a -> k -> v -> a) ->
+  a ->
+  VMap kv vv k v ->
+  a
+foldlWithKey f a = VG.foldl' (uncurry . f) a . unVMap
+{-# INLINE foldlWithKey #-}
+
+foldMap :: (VG.Vector vv v, Monoid m) => (v -> m) -> VMap kv vv k v -> m
+foldMap f = VG.foldMap' f . valsVector . unVMap
+{-# INLINE foldMap #-}
+
+-- | Fold values monoidally
+fold :: (VG.Vector vv m, Monoid m) => VMap kv vv k m -> m
+fold = VG.foldMap' id . valsVector . unVMap
+{-# INLINE fold #-}
+
+keys :: VG.Vector kv k => VMap kv vv k v -> [k]
+keys = VG.toList . keysVector . unVMap
+{-# INLINE keys #-}
+
+keysSet :: VG.Vector kv k => VMap kv vv k v -> Set.Set k
+keysSet = Set.fromDistinctAscList . VG.toList . keysVector . unVMap
+{-# INLINE keysSet #-}
+
+elems :: VG.Vector vv v => VMap kv vv k v -> [v]
+elems = VG.toList . valsVector . unVMap
+{-# INLINE elems #-}
+
+null :: (VG.Vector vv v, VG.Vector kv k) => VMap kv vv k v -> Bool
+null (VMap vec) = VG.null vec
+{-# INLINE null #-}
+
+splitAt ::
+  (VG.Vector vv v, VG.Vector kv k) =>
+  Int ->
+  VMap kv vv k v ->
+  (VMap kv vv k v, VMap kv vv k v)
+splitAt i (VMap vec) = let (l, r) = VG.splitAt i vec in (VMap l, VMap r)
+{-# INLINE splitAt #-}
+
+internMaybe :: (VG.Vector kv k, Ord k) => k -> VMap kv vv k v -> Maybe k
+internMaybe key = KV.internKVVectorMaybe key . unVMap
+{-# INLINE internMaybe #-}

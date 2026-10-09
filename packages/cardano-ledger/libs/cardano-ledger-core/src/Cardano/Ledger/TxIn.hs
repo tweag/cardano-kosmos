@@ -1,0 +1,142 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Cardano.Ledger.TxIn (
+  TxId (..),
+  TxIn (TxIn),
+  mkTxInPartial,
+  txInToText,
+  parseTxId,
+  txIdToHex,
+  TxIx,
+) where
+
+import Cardano.Crypto.Hash.Class (hashToTextAsHex)
+import Cardano.Ledger.BaseTypes (TxIx (..), mkTxIxPartial)
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  DecShareCBOR (..),
+  EncCBOR (..),
+  TokenType (..),
+  decodeMemPack,
+  decodeRecordNamed,
+  encodeListLen,
+  peekTokenType,
+ )
+import Cardano.Ledger.Hashes (EraIndependentTxBody, SafeHash, extractHash)
+import Control.DeepSeq (NFData)
+import Data.Aeson (FromJSON (..), ToJSON (..), eitherDecodeStrict')
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (ToJSONKey (..), toJSONKeyText)
+import Data.MemPack
+import Data.Text (Text)
+import qualified Data.Text as Text
+import Data.Text.Encoding (encodeUtf8)
+import Data.Word (Word16)
+import GHC.Generics (Generic)
+import GHC.Stack (HasCallStack)
+import NoThunks.Class (NoThunks (..))
+
+-- ===================================================================================
+-- Because we expect other Era's to import and use TxId, TxIn, TxOut, we use the weakest
+-- constraint possible when deriving their instances. A Stronger constraint, Gathering
+-- many constraints together, like:  type Strong = (C1 x, C2 x, ..., Cn x)
+-- may make this file look systematic by having things like:
+-- derving instance (Strong x) => Foo x,  for many Foo (Eq, Show, NfData, etc) BUT this
+-- forces unnecessary requirements on any new Era which tries to embed one of these
+-- types in their own datatypes, if they then try and derive (Foo TheirDataType).
+-- ====================================================================================
+
+-- | A unique ID of a transaction, which is computable from the transaction.
+newtype TxId = TxId {unTxId :: SafeHash EraIndependentTxBody}
+  deriving (Show, Eq, Ord, Generic)
+  deriving newtype (NoThunks, ToJSON, FromJSON, EncCBOR, DecCBOR, NFData, MemPack)
+
+-- | The input of a UTxO.
+data TxIn = TxIn !TxId {-# UNPACK #-} !TxIx
+  deriving (Generic, Eq, Ord, Show)
+
+instance MemPack TxIn where
+  packedByteCount (TxIn txId txIx) = packedByteCount txId + packedByteCount txIx
+  {-# INLINE packedByteCount #-}
+  packM (TxIn txId txIx) = packM txId >> packM txIx
+  {-# INLINE packM #-}
+  unpackM = TxIn <$> unpackM <*> unpackM
+  {-# INLINE unpackM #-}
+
+-- | Construct `TxIn` while throwing an error for an out of range `TxIx`. Make
+-- sure to use it only for testing.
+mkTxInPartial :: HasCallStack => TxId -> Integer -> TxIn
+mkTxInPartial txId = TxIn txId . mkTxIxPartial
+
+instance NFData TxIn
+
+instance NoThunks TxIn
+
+instance ToJSON TxIn where
+  toJSON = toJSON . txInToText
+  toEncoding = toEncoding . txInToText
+
+instance ToJSONKey TxIn where
+  toJSONKey = toJSONKeyText txInToText
+
+instance FromJSON TxIn where
+  parseJSON v = do
+    t <- parseJSON @Text v
+    (txId, txIx) <- parseTxId t
+    pure $ TxIn txId (TxIx txIx)
+
+parseTxId :: MonadFail m => Text -> m (TxId, Word16)
+parseTxId t = case Text.splitOn "#" t of
+  [txIdText, txIxText] -> do
+    txId <- case Aeson.fromJSON (Aeson.String txIdText) of
+      Aeson.Success v -> pure v
+      Aeson.Error e -> fail $ "invalid txId: " <> e
+    txIx <- case eitherDecodeStrict' (encodeUtf8 txIxText) of
+      Left err -> fail $ "invalid transaction index: " <> err
+      Right ix -> pure ix
+    pure (txId, txIx)
+  _ -> fail "expected 'txhash#ix'"
+
+txIdToHex :: TxId -> Text
+txIdToHex (TxId txidHash) = hashToTextAsHex (extractHash txidHash)
+
+txInToText :: TxIn -> Text
+txInToText (TxIn txId ix) =
+  txIdToHex txId
+    <> Text.pack "#"
+    <> Text.pack (show (unTxIx ix))
+
+instance EncCBOR TxIn where
+  encCBOR (TxIn txId index) =
+    encodeListLen 2
+      <> encCBOR txId
+      <> encCBOR index
+
+instance DecCBOR TxIn where
+  decCBOR =
+    decodeRecordNamed
+      "TxIn"
+      (const 2)
+      (TxIn <$> decCBOR <*> decCBOR)
+
+instance DecShareCBOR TxIn where
+  decShareCBOR _ =
+    peekTokenType >>= \case
+      TypeBytes -> decodeMemPack
+      TypeBytesIndef -> decodeMemPack
+      _ -> decCBOR

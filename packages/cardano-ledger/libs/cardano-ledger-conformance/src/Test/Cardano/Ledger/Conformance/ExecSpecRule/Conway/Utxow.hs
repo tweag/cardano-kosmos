@@ -1,0 +1,86 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Utxow () where
+
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.UTxO (getConwayWitsVKeyNeeded)
+import Cardano.Ledger.Shelley.LedgerState (UTxOState (..))
+import Cardano.Ledger.Shelley.Rules (utxoEnvCertStateL)
+import Control.State.Transition.Extended (TRC (..))
+import Data.Bifunctor (Bifunctor (..))
+import Data.Coerce (coerce)
+import qualified Data.Text as T
+import Lens.Micro ((^.))
+import Lens.Micro.Extras (view)
+import qualified MAlonzo.Code.Ledger.Conway.Foreign.API as Agda
+import qualified Prettyprinter as PP
+import Test.Cardano.Ledger.Conformance.ExecSpecRule.Base (externalFunctions)
+import Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Utxo ()
+import Test.Cardano.Ledger.Conformance.ExecSpecRule.Core (
+  ExecSpecRule (..),
+  SpecTRC (..),
+  runFromAgdaFunction,
+ )
+import Test.Cardano.Ledger.Conformance.SpecTranslate.Base (
+  SpecTranslate (..),
+  runSpecTransM,
+  withCtxSpecTransM,
+  withSpecTransM,
+ )
+import Test.Cardano.Ledger.Conformance.SpecTranslate.Conway ()
+import Test.Cardano.Ledger.Constrained.Conway (
+  UtxoExecContext (..),
+ )
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Conway.ImpTest ()
+import Test.Cardano.Ledger.Conway.TreeDiff (showExpr)
+import Test.Cardano.Ledger.Shelley.Utils (runSTS)
+
+instance ExecSpecRule "UTXOW" ConwayEra where
+  type ExecContext "UTXOW" ConwayEra = UtxoExecContext ConwayEra
+
+  translateInputs (TRC (env, st, sig)) = do
+    agdaEnv <- withCtxSpecTransM () $ toSpecRep env
+    agdaSt <- withSpecTransM (view utxoEnvCertStateL . uecUtxoEnv) $ toSpecRep st
+    agdaSig <- withCtxSpecTransM () $ toSpecRep sig
+    pure $ SpecTRC agdaEnv agdaSt agdaSig
+
+  translateOutput _ =
+    withSpecTransM (view utxoEnvCertStateL . uecUtxoEnv) . toSpecRep
+
+  runAgdaRule = runFromAgdaFunction (Agda.utxowStep externalFunctions)
+
+  extraInfo globals ctx trc@(TRC (env, st, sig)) _ =
+    let
+      result = either show T.unpack $ do
+        agdaEnv <- runSpecTransM () $ toSpecRep @ConwayEra env
+        agdaSt <- runSpecTransM (uecUtxoEnv ctx ^. utxoEnvCertStateL) $ toSpecRep @ConwayEra st
+        agdaSig <- runSpecTransM () $ toSpecRep @ConwayEra sig
+        pure $ Agda.utxowDebug externalFunctions agdaEnv agdaSt agdaSig
+      stFinal = first (T.pack . show) $ runSTS @"UTXO" @ConwayEra globals env st sig
+      utxoInfo = extraInfo @"UTXO" @ConwayEra globals ctx (coerce trc) stFinal
+     in
+      PP.vcat
+        [ "UTXOW"
+        , "Impl:"
+        , "witsVKeyNeeded"
+        , PP.pretty . showExpr $
+            getConwayWitsVKeyNeeded @ConwayEra (utxosUtxo st) (sig ^. txStAnnTxG . bodyTxL)
+        , "witsVKeyHashes"
+        , "Spec:"
+        , PP.pretty result
+        , mempty
+        , "UTXO"
+        , utxoInfo
+        ]

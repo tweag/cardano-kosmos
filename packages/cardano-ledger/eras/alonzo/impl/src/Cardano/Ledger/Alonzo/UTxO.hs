@@ -1,0 +1,465 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Alonzo.UTxO (
+  AlonzoEraUTxO (..),
+  getAlonzoSpendingDatum,
+
+  -- * Scripts needed
+  AlonzoScriptsNeeded (..),
+  getAlonzoScriptsNeeded,
+  getSpendingScriptsNeeded,
+  getWithdrawingScriptsNeeded,
+  getRewardingScriptsNeeded,
+  getMintingScriptsNeeded,
+  getAlonzoScriptsHashesNeeded,
+  scriptsNeededAlonzoStAnnTx,
+  zipAsIxItem,
+
+  -- * Scripts provided
+  scriptsProvidedAlonzoStAnnTx,
+  resolveNeededPlutusScriptsWithPurpose,
+
+  -- * Plutus scripts with context
+  plutusScriptsWithContextAlonzoStAnnTx,
+
+  -- * Plutus languages used
+  plutusLanguagesUsedAlonzoStAnnTx,
+
+  -- * Datums needed
+  getInputDataHashesTxBody,
+
+  -- * WitsVKey needed
+  getAlonzoWitsVKeyNeeded,
+) where
+
+import Cardano.Ledger.Address (accountAddressCredentialL)
+import Cardano.Ledger.Alonzo.Core
+import Cardano.Ledger.Alonzo.Era (AlonzoEra)
+import Cardano.Ledger.Alonzo.Plutus.Context (
+  CollectError,
+  EraPlutusContext,
+  SupportedPlutusRunnable (..),
+  mkSupportedPlutusRunnable,
+ )
+import Cardano.Ledger.Alonzo.Scripts (lookupPlutusScript, plutusScriptLanguage)
+import Cardano.Ledger.Alonzo.State ()
+import Cardano.Ledger.Alonzo.Tx (AlonzoStAnnTx (..))
+import Cardano.Ledger.Alonzo.TxWits (unTxDatsL)
+import Cardano.Ledger.BaseTypes (ProtVer (..), StrictMaybe (..))
+import Cardano.Ledger.Credential (credScriptHash)
+import Cardano.Ledger.Keys (asWitness)
+import Cardano.Ledger.Mary.UTxO (getConsumedMaryValue, getProducedMaryValue)
+import Cardano.Ledger.Mary.Value (PolicyID (..))
+import Cardano.Ledger.Plutus (
+  Data,
+  Datum (..),
+  Language (..),
+  PlutusRunnable (..),
+  PlutusWithContext,
+ )
+import Cardano.Ledger.Shelley.UTxO (
+  getShelleyMinFeeTxUtxo,
+  getShelleyWitsVKeyNeeded,
+ )
+import Cardano.Ledger.State (
+  EraCertState (..),
+  EraUTxO (..),
+  ScriptsProvided (..),
+  UTxO (..),
+  getScriptHash,
+ )
+import Cardano.Ledger.TxIn
+import Control.DeepSeq (NFData)
+import Data.Foldable as F (foldl', toList)
+import Data.Functor ((<&>))
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe, isJust)
+import qualified Data.Set as Set
+import Data.Word (Word32)
+import GHC.Generics
+import Lens.Micro ((^.))
+import Lens.Micro.Extras (view)
+
+-- | Alonzo era style `ScriptsNeeded` require also a `PlutusPurpose`, not only the `ScriptHash`
+newtype AlonzoScriptsNeeded era
+  = AlonzoScriptsNeeded {unAlonzoScriptsNeeded :: [(PlutusPurpose AsIxItem era, ScriptHash)]}
+  deriving (Monoid, Semigroup, Generic)
+
+deriving instance AlonzoEraScript era => Eq (AlonzoScriptsNeeded era)
+
+deriving instance AlonzoEraScript era => Show (AlonzoScriptsNeeded era)
+
+deriving instance AlonzoEraScript era => NFData (AlonzoScriptsNeeded era)
+
+instance EraUTxO AlonzoEra where
+  type ScriptsNeeded AlonzoEra = AlonzoScriptsNeeded AlonzoEra
+
+  getConsumedValue = getConsumedMaryValue
+
+  getProducedValue = getProducedMaryValue
+
+  getScriptsProvided _ tx = ScriptsProvided (tx ^. witsTxL . scriptTxWitsL)
+
+  getScriptsNeeded = getAlonzoScriptsNeeded
+
+  getScriptsHashesNeeded = getAlonzoScriptsHashesNeeded
+
+  getWitsVKeyNeeded = getAlonzoWitsVKeyNeeded
+
+  getMinFeeTxUtxo pp tx _ = getShelleyMinFeeTxUtxo pp tx
+
+class EraUTxO era => AlonzoEraUTxO era where
+  -- | Get data hashes for a transaction that are not required. Such datums are optional,
+  -- but they can be added to the witness set. In a broaded terms datums corresponding to
+  -- the inputs that might be spent are the required datums and the datums corresponding
+  -- to the outputs and reference inputs are the supplemental datums.
+  getSupplementalDataHashes ::
+    UTxO era ->
+    TxBody l era ->
+    Set.Set DataHash
+
+  -- | Lookup the TxIn from the `Spending` ScriptPurpose and find the datum needed for
+  -- spending that input. This function will return `Nothing` for all script purposes,
+  -- except spending, because only spending scripts require an extra datum.
+  --
+  -- This is similar to @getDatum@ function as in the spec:
+  --
+  -- @
+  --   getDatum :: Tx era -> UTxO era -> ScriptPurpose era -> [Data era]
+  -- @
+  getSpendingDatum ::
+    UTxO era ->
+    Tx l era ->
+    PlutusPurpose AsItem era ->
+    Maybe (Data era)
+
+  scriptsProvidedStAnnTx :: StAnnTx l era -> ScriptsProvided era
+
+  scriptsNeededStAnnTx :: StAnnTx l era -> ScriptsNeeded era
+
+  plutusScriptsWithContextStAnnTx ::
+    StAnnTx l era ->
+    Either (NonEmpty (CollectError era)) [PlutusWithContext]
+
+  plutusLanguagesUsedStAnnTx :: StAnnTx l era -> Set.Set Language
+
+instance AlonzoEraUTxO AlonzoEra where
+  getSupplementalDataHashes _ = getAlonzoSupplementalDataHashes
+
+  getSpendingDatum = getAlonzoSpendingDatum
+
+  scriptsProvidedStAnnTx = scriptsProvidedAlonzoStAnnTx
+
+  scriptsNeededStAnnTx = scriptsNeededAlonzoStAnnTx
+
+  plutusScriptsWithContextStAnnTx = plutusScriptsWithContextAlonzoStAnnTx
+
+  plutusLanguagesUsedStAnnTx = plutusLanguagesUsedAlonzoStAnnTx
+
+scriptsProvidedAlonzoStAnnTx ::
+  ( EraTxLevel era
+  , STxLevel l era ~ STxTopLevel l era
+  , STxLevel TopTx era ~ STxTopLevel TopTx era
+  ) =>
+  AlonzoStAnnTx l era -> ScriptsProvided era
+scriptsProvidedAlonzoStAnnTx stAnnTx =
+  withTopTxLevelOnly stAnnTx $ \AlonzoStAnnTx {asatScriptsProvided} -> asatScriptsProvided
+
+scriptsNeededAlonzoStAnnTx ::
+  ( EraTxLevel era
+  , STxLevel l era ~ STxTopLevel l era
+  , STxLevel TopTx era ~ STxTopLevel TopTx era
+  ) =>
+  AlonzoStAnnTx l era -> ScriptsNeeded era
+scriptsNeededAlonzoStAnnTx stAnnTx =
+  withTopTxLevelOnly stAnnTx $ \AlonzoStAnnTx {asatScriptsNeeded} -> asatScriptsNeeded
+
+plutusScriptsWithContextAlonzoStAnnTx ::
+  ( EraTxLevel era
+  , STxLevel l era ~ STxTopLevel l era
+  , STxLevel TopTx era ~ STxTopLevel TopTx era
+  ) =>
+  AlonzoStAnnTx l era ->
+  Either (NonEmpty (CollectError era)) [PlutusWithContext]
+plutusScriptsWithContextAlonzoStAnnTx stAnnTx =
+  withTopTxLevelOnly stAnnTx $
+    \AlonzoStAnnTx {asatPlutusScriptsWithContext} -> asatPlutusScriptsWithContext
+
+plutusLanguagesUsedAlonzoStAnnTx ::
+  ( EraTxLevel era
+  , STxLevel l era ~ STxTopLevel l era
+  , STxLevel TopTx era ~ STxTopLevel TopTx era
+  ) =>
+  AlonzoStAnnTx l era -> Set.Set Language
+plutusLanguagesUsedAlonzoStAnnTx stAnnTx =
+  withTopTxLevelOnly stAnnTx $
+    \AlonzoStAnnTx {asatPlutusLanguagesUsed} -> asatPlutusLanguagesUsed
+
+getAlonzoSupplementalDataHashes ::
+  (EraTxBody era, AlonzoEraTxOut era) =>
+  TxBody l era ->
+  Set.Set DataHash
+getAlonzoSupplementalDataHashes txBody =
+  Set.fromList
+    [ dh
+    | txOut <- toList $ txBody ^. outputsTxBodyL
+    , SJust dh <- [txOut ^. dataHashTxOutL]
+    ]
+
+-- | Get the Data associated with a ScriptPurpose. Only the Spending ScriptPurpose
+--  contains Data. Nothing is returned for the other kinds.
+getAlonzoSpendingDatum ::
+  (AlonzoEraTxWits era, AlonzoEraTxOut era, EraTx era) =>
+  UTxO era ->
+  Tx l era ->
+  PlutusPurpose AsItem era ->
+  Maybe (Data era)
+getAlonzoSpendingDatum (UTxO m) tx sp = do
+  AsItem txIn <- toSpendingPurpose sp
+  txOut <- Map.lookup txIn m
+  SJust hash <- Just $ txOut ^. dataHashTxOutL
+  Map.lookup hash $ tx ^. witsTxL . datsTxWitsL . unTxDatsL
+
+getAlonzoScriptsHashesNeeded :: AlonzoScriptsNeeded era -> Set.Set ScriptHash
+getAlonzoScriptsHashesNeeded (AlonzoScriptsNeeded sn) = Set.fromList (map snd sn)
+
+-- | Compute two sets for all TwoPhase scripts in a Tx.
+--
+--   1) DataHashes for each Two phase Script in a TxIn that has a DataHash
+--   2) TxIns that are TwoPhase scripts, and should have a DataHash but don't.
+--
+-- @{ h | (_ → (a,_,h)) ∈ txins tx ◁ utxo, isNonNativeScriptAddress tx a}@
+getInputDataHashesTxBody ::
+  (EraTxBody era, AlonzoEraTxOut era, AlonzoEraScript era) =>
+  UTxO era ->
+  TxBody l era ->
+  ScriptsProvided era ->
+  (Set.Set DataHash, Set.Set TxIn)
+getInputDataHashesTxBody (UTxO utxo) txBody (ScriptsProvided scriptsProvided) =
+  Map.foldlWithKey' accum (Set.empty, Set.empty) spendUTxO
+  where
+    spendingPlutusScriptLanguage addr = do
+      scriptHash <- getScriptHash addr
+      plutusScript <- lookupPlutusScript scriptHash scriptsProvided
+      pure $ plutusScriptLanguage plutusScript
+    isSpendingPlutusScript = isJust . spendingPlutusScriptLanguage
+    spendInputs = txBody ^. inputsTxBodyL
+    spendUTxO = Map.restrictKeys utxo spendInputs
+    accum ans@(!hashSet, !inputSet) txIn txOut =
+      let addr = txOut ^. addrTxOutL
+       in case txOut ^. datumTxOutF of
+            NoDatum
+              | Just lang <- spendingPlutusScriptLanguage addr
+              , -- Spending Datums are no longer required with PlutusV3. See: CIP-0069
+                lang < PlutusV3 ->
+                  (hashSet, Set.insert txIn inputSet)
+            DatumHash dataHash
+              | isSpendingPlutusScript addr -> (Set.insert dataHash hashSet, inputSet)
+            -- Though it is somewhat odd to allow native scripts to include a datum,
+            -- the Alonzo era already set the precedent with datum hashes, and several dapp
+            -- developers see this as a helpful feature.
+            _ -> ans
+
+-- |
+-- Uses of inputs in ‘txscripts’ and ‘neededScripts’
+-- There are currently 3 sets of inputs (spending, collateral, reference). A particular TxInput
+-- can appear in more than one of the sets. Even in all three at the same, but that may not be
+-- a really useful case. Inputs are where you find scripts with the 'Spending' purpose.
+--
+-- 1) Collateral inputs are only spent if phase two fails. Their corresponding TxOut can only have
+--    Key (not Script) Pay credentials, so ‘neededScripts’ does not look there.
+-- 2) Reference inputs are not spent in the current Tx, unless that same input also appears in one
+--    of the other sets. If that is not the case, their credentials are never needed, so anyone can
+--    access the inline datums and scripts in their corresponding TxOut, without needing any
+--    authorizing credentials. So ‘neededScripts’ does not look there.
+-- 3) Spending inputs are always spent. So their Pay credentials are always needed.
+--
+-- Collect information (purpose and ScriptHash) about all the Credentials that refer to scripts
+-- that will be needed to run in a TxBody in the Utxow rule. Note there may be credentials that
+-- cannot be run, so are not collected. In Babbage, reference inputs, fit that description.
+-- Purposes include
+-- 1) Spending (payment script credentials, but NOT staking scripts) in the Addr of a TxOut, pointed
+--    to by some input that needs authorization. Be sure (txBody ^. inputsTxBodyL) gets all such inputs.
+--    In some Eras there may be multiple sets of inputs, which ones should be included? Currently that
+--    is only the spending inputs. Because collateral inputs can only have key-locked credentials,
+--    and reference inputs are never authorized. That might not always be the case.
+-- 2) Withdrawing,
+-- 3) Minting (minted field), and
+-- 4) Certifying (Delegating) scripts.
+--
+-- 'getAlonzoScriptsNeeded' is an aggregation of the needed Credentials referring to
+-- Scripts used in Utxow rule.  The flip side of 'getAlonzoScriptsNeeded' (which collects
+-- script hashes) is 'txscripts' which finds the actual scripts. We maintain an invariant
+-- that every script credential refers to some actual script.  This is tested in the test
+-- function 'validateMissingScripts' in the Utxow rule.
+getAlonzoScriptsNeeded ::
+  (MaryEraTxBody era, AlonzoEraScript era) =>
+  UTxO era ->
+  TxBody l era ->
+  AlonzoScriptsNeeded era
+getAlonzoScriptsNeeded utxo txBody =
+  getSpendingScriptsNeeded utxo txBody
+    <> getWithdrawingScriptsNeeded txBody
+    <> certifyingScriptsNeeded
+    <> getMintingScriptsNeeded txBody
+  where
+    certifyingScriptsNeeded =
+      AlonzoScriptsNeeded $
+        case F.foldl' addUniqueTxCertPurpose (Map.empty, 0, []) (txBody ^. certsTxBodyL) of
+          (_, _, certPurposes) -> reverse certPurposes
+      where
+        -- We need to do this funny index manipulation here because we've allowed
+        -- duplicate certificates all the way until Conway. This prevented second
+        -- occurance of a duplicate certificate in the sequence to be used. In order to
+        -- preserve this behavior we need to use the index of the first occurrence of a
+        -- duplicate certificate.
+        --
+        -- The `ix + 1` part is to count the actual index of each element. It is only when
+        -- we see a duplicate we use the index of the first occurrence of the element, but
+        -- that should not affect indices of other elements.
+        --
+        -- For example if these are our certificates:
+        -- cert = [c0, c1, c2, c3, c4, c5]
+        --
+        -- Let's say `c3` is locked by a native script or a key witness, so it does not
+        -- participate in the script purpose
+        --
+        -- Also, let's say `c1 == c4`. Here is what we should get for the plutus purpose:
+        -- plutusPurpose = [(0, c0), (1, c1), (2, c2), (1, c4), (5, c5)]
+        --
+        -- The count must continue no matter what, thus the counter `ix + 1`, but
+        -- whenever we find a duplicate we use the stored `ix'`.
+        --
+        addUniqueTxCertPurpose (!seenTxCerts, !ix, !certPurposes) txCert =
+          fromMaybe (seenTxCerts, ix + 1, certPurposes) $ do
+            scriptHash <- getScriptWitnessTxCert txCert
+            case Map.lookup txCert seenTxCerts of
+              Nothing -> do
+                let !purpose = CertifyingPurpose (AsIxItem ix txCert)
+                    !certScriptHashes' = Map.insert txCert ix seenTxCerts
+                pure (certScriptHashes', ix + 1, (purpose, scriptHash) : certPurposes)
+              Just ix' -> do
+                let !purpose = CertifyingPurpose (AsIxItem ix' txCert)
+                pure (seenTxCerts, ix + 1, (purpose, scriptHash) : certPurposes)
+{-# INLINEABLE getAlonzoScriptsNeeded #-}
+
+zipAsIxItem :: Foldable f => f it -> (AsIxItem Word32 it -> c) -> [c]
+zipAsIxItem xs f =
+  -- Past experience showed that enumeration for Int is faster than for Word32
+  zipWith (\it ix -> f (AsIxItem (fromIntegral @Int @Word32 ix) it)) (toList xs) [0 ..]
+{-# INLINE zipAsIxItem #-}
+
+getSpendingScriptsNeeded ::
+  (AlonzoEraScript era, EraTxBody era) =>
+  UTxO era ->
+  TxBody l era ->
+  AlonzoScriptsNeeded era
+getSpendingScriptsNeeded (UTxO utxo) txBody =
+  AlonzoScriptsNeeded $
+    catMaybes $
+      zipAsIxItem (txBody ^. inputsTxBodyL) $
+        \asIxItem@(AsIxItem _ txIn) -> do
+          addr <- view addrTxOutL <$> Map.lookup txIn utxo
+          hash <- getScriptHash addr
+          return (SpendingPurpose asIxItem, hash)
+{-# INLINEABLE getSpendingScriptsNeeded #-}
+
+getWithdrawingScriptsNeeded ::
+  (AlonzoEraScript era, EraTxBody era) =>
+  TxBody l era ->
+  AlonzoScriptsNeeded era
+getWithdrawingScriptsNeeded txBody =
+  AlonzoScriptsNeeded $
+    catMaybes $
+      zipAsIxItem (Map.keys (unWithdrawals $ txBody ^. withdrawalsTxBodyL)) $
+        \asIxItem@(AsIxItem _ accountAddress) -> (WithdrawingPurpose asIxItem,) <$> credScriptHash (accountAddress ^. accountAddressCredentialL)
+{-# INLINEABLE getWithdrawingScriptsNeeded #-}
+
+getRewardingScriptsNeeded ::
+  (AlonzoEraScript era, EraTxBody era) =>
+  TxBody l era ->
+  AlonzoScriptsNeeded era
+getRewardingScriptsNeeded = getWithdrawingScriptsNeeded
+{-# DEPRECATED getRewardingScriptsNeeded "In favor of `getWithdrawingScriptsNeeded`" #-}
+
+getMintingScriptsNeeded ::
+  (AlonzoEraScript era, MaryEraTxBody era) =>
+  TxBody l era ->
+  AlonzoScriptsNeeded era
+getMintingScriptsNeeded txBody =
+  AlonzoScriptsNeeded $
+    zipAsIxItem (txBody ^. mintedTxBodyF) $
+      \asIxItem@(AsIxItem _ (PolicyID scriptHash)) -> (MintingPurpose asIxItem, scriptHash)
+{-# INLINEABLE getMintingScriptsNeeded #-}
+
+-- | Just like `getShelleyWitsVKeyNeeded`, but also requires `reqSignerHashesTxBodyL`.
+getAlonzoWitsVKeyNeeded ::
+  forall era l.
+  ( EraTx era
+  , AlonzoEraTxBody era
+  , ShelleyEraTxBody era
+  , EraCertState era
+  , STxLevel l era ~ STxTopLevel l era
+  ) =>
+  CertState era ->
+  UTxO era ->
+  TxBody l era ->
+  Set.Set (KeyHash Witness)
+getAlonzoWitsVKeyNeeded certState utxo txBody =
+  getShelleyWitsVKeyNeeded certState utxo txBody
+    `Set.union` Set.map asWitness (txBody ^. reqSignerHashesTxBodyG)
+{-# INLINEABLE getAlonzoWitsVKeyNeeded #-}
+
+resolveNeededPlutusScriptsWithPurpose ::
+  EraPlutusContext era =>
+  ProtVer ->
+  ScriptsProvided era ->
+  AlonzoScriptsNeeded era ->
+  -- | These are cached scripts. Make sure they were constructed using the exact same protocol
+  -- version as the one supplied to this function.
+  Map.Map ScriptHash (SupportedPlutusRunnable era) ->
+  ( Map.Map ScriptHash (SupportedPlutusRunnable era)
+  , [(PlutusPurpose AsIxItem era, SupportedPlutusRunnable era)]
+  )
+resolveNeededPlutusScriptsWithPurpose protVer scriptsProvided scriptsNeeded plutusScriptsCache =
+  (updatedPlutusScriptCache, neededPlutusScriptsWithPurpose)
+  where
+    updatedPlutusScriptCache = plutusScriptsCache `Map.union` plutusScriptsProvided
+    neededPlutusScriptsWithPurpose =
+      [ (sp, s)
+      | (sp, sh) <- unAlonzoScriptsNeeded scriptsNeeded
+      , Just s <- [lookupPlutusScriptRunnable sh]
+      ]
+    version = pvMajor protVer
+    lookupPlutusScriptRunnable sh =
+      -- We must look into `plutusScriptsProvided`, before we can look for the same script in the
+      -- `plutusScriptsCache`, since that cache can contain scripts from prior transactions in a
+      -- block
+      Map.lookup sh plutusScriptsProvided <&> \case
+        SupportedPlutusRunnable plutusRunnable ->
+          case Map.lookup sh plutusScriptsCache of
+            Just cachedPlutusRunnable -> cachedPlutusRunnable
+            Nothing ->
+              -- Avoid recomputing script hash
+              SupportedPlutusRunnable $ plutusRunnable {plutusRunnableScriptHash = sh}
+    plutusScriptsProvided =
+      Map.mapMaybe (fmap (mkSupportedPlutusRunnable version) . toPlutusScript) $
+        unScriptsProvided scriptsProvided

@@ -1,0 +1,217 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+#if __GLASGOW_HASKELL__ >= 910
+-- See https://gitlab.haskell.org/ghc/ghc/-/issues/27342
+{-# OPTIONS_GHC -fno-spec-eval #-}
+#endif
+
+module Cardano.Ledger.Shelley.Rules.Delegs (
+  DELEGS,
+  DelegsEnv (..),
+  ShelleyDelegsPredFailure (..),
+  ShelleyDelegsEvent (..),
+) where
+
+import Cardano.Ledger.BaseTypes (
+  CertIx (..),
+  EpochNo,
+  ShelleyBase,
+  TxIx (..),
+  invalidKey,
+ )
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+  decodeRecordSum,
+  encodeListLen,
+ )
+import Cardano.Ledger.Core
+import Cardano.Ledger.Credential (Ptr (..), SlotNo32 (..))
+import Cardano.Ledger.Shelley.Core
+import Cardano.Ledger.Shelley.Era (DELEGS, ShelleyEra)
+import Cardano.Ledger.Shelley.Rules.Deleg (ShelleyDelegPredFailure)
+import Cardano.Ledger.Shelley.Rules.Delpl (
+  DELPL,
+  DelplEnv (..),
+  ShelleyDelplEvent,
+  ShelleyDelplPredFailure,
+ )
+import Cardano.Ledger.Shelley.Rules.Pool (ShelleyPoolPredFailure)
+import Cardano.Ledger.Shelley.State
+import Cardano.Ledger.Slot (SlotNo (..))
+import Control.DeepSeq
+import Control.State.Transition (
+  Embed (..),
+  STS (..),
+  TRC (..),
+  TransitionRule,
+  judgmentContext,
+  trans,
+ )
+import Data.Sequence (Seq (..))
+import Data.Typeable (Typeable)
+import Data.Word (Word16, Word32, Word64, Word8)
+import GHC.Generics (Generic)
+
+data DelegsEnv era = DelegsEnv
+  { delegsSlotNo :: SlotNo
+  , delegsEpochNo :: EpochNo
+  -- ^ Lazy on purpose, because not all certificates need to know the current EpochNo
+  , delegsIx :: TxIx
+  , delegspp :: PParams era
+  , delegsTx :: Tx TopTx era
+  , delegsAccount :: ChainAccountState
+  }
+
+deriving stock instance
+  ( Show (Tx TopTx era)
+  , Show (PParams era)
+  ) =>
+  Show (DelegsEnv era)
+
+newtype ShelleyDelegsPredFailure era
+  = -- | Subtransition Failures
+    DelplFailure (PredicateFailure (EraRule "DELPL" era))
+  deriving (Generic)
+
+type instance EraRuleFailure "DELEGS" ShelleyEra = ShelleyDelegsPredFailure ShelleyEra
+
+instance InjectRuleFailure "DELEGS" ShelleyDelegsPredFailure ShelleyEra
+
+instance InjectRuleFailure "DELEGS" ShelleyDelplPredFailure ShelleyEra where
+  injectFailure = DelplFailure
+
+instance InjectRuleFailure "DELEGS" ShelleyPoolPredFailure ShelleyEra where
+  injectFailure = DelplFailure . injectFailure
+
+instance InjectRuleFailure "DELEGS" ShelleyDelegPredFailure ShelleyEra where
+  injectFailure = DelplFailure . injectFailure
+
+newtype ShelleyDelegsEvent era = DelplEvent (Event (EraRule "DELPL" era))
+  deriving (Generic)
+
+deriving instance Eq (Event (EraRule "DELPL" era)) => Eq (ShelleyDelegsEvent era)
+
+instance NFData (Event (EraRule "DELPL" era)) => NFData (ShelleyDelegsEvent era)
+
+deriving stock instance
+  Show (PredicateFailure (EraRule "DELPL" era)) =>
+  Show (ShelleyDelegsPredFailure era)
+
+deriving stock instance
+  Eq (PredicateFailure (EraRule "DELPL" era)) =>
+  Eq (ShelleyDelegsPredFailure era)
+
+deriving stock instance
+  Ord (PredicateFailure (EraRule "DELPL" era)) =>
+  Ord (ShelleyDelegsPredFailure era)
+
+instance
+  NFData (PredicateFailure (EraRule "DELPL" era)) =>
+  NFData (ShelleyDelegsPredFailure era)
+
+instance
+  ( EraTx era
+  , EraCertState era
+  , ShelleyEraTxBody era
+  , Embed (EraRule "DELPL" era) (DELEGS era)
+  , Environment (EraRule "DELPL" era) ~ DelplEnv era
+  , State (EraRule "DELPL" era) ~ CertState era
+  , Signal (EraRule "DELPL" era) ~ TxCert era
+  , EraRule "DELEGS" era ~ DELEGS era
+  ) =>
+  STS (DELEGS era)
+  where
+  type State (DELEGS era) = CertState era
+  type Signal (DELEGS era) = Seq (TxCert era)
+  type Environment (DELEGS era) = DelegsEnv era
+  type BaseM (DELEGS era) = ShelleyBase
+  type
+    PredicateFailure (DELEGS era) =
+      ShelleyDelegsPredFailure era
+  type Event (DELEGS era) = ShelleyDelegsEvent era
+
+  transitionRules = [delegsTransition]
+
+instance
+  ( Era era
+  , EncCBOR (PredicateFailure (EraRule "DELPL" era))
+  ) =>
+  EncCBOR (ShelleyDelegsPredFailure era)
+  where
+  encCBOR = \case
+    (DelplFailure a) ->
+      encodeListLen 2
+        <> encCBOR (1 :: Word8)
+        <> encCBOR a
+
+instance
+  ( Era era
+  , DecCBOR (PredicateFailure (EraRule "DELPL" era))
+  , Typeable (Script era)
+  ) =>
+  DecCBOR (ShelleyDelegsPredFailure era)
+  where
+  decCBOR =
+    decodeRecordSum "PredicateFailure" $
+      \case
+        1 -> do
+          a <- decCBOR
+          pure (2, DelplFailure a)
+        k -> invalidKey k
+
+delegsTransition ::
+  forall era.
+  ( EraTx era
+  , EraCertState era
+  , ShelleyEraTxBody era
+  , Embed (EraRule "DELPL" era) (DELEGS era)
+  , Environment (EraRule "DELPL" era) ~ DelplEnv era
+  , State (EraRule "DELPL" era) ~ CertState era
+  , Signal (EraRule "DELPL" era) ~ TxCert era
+  , EraRule "DELEGS" era ~ DELEGS era
+  ) =>
+  TransitionRule (DELEGS era)
+delegsTransition = do
+  TRC
+    ( env@(DelegsEnv slot@(SlotNo slot64) epochNo txIx pp _tx chainAccountState)
+      , certState
+      , certificates
+      ) <-
+    judgmentContext
+  case certificates of
+    Empty -> pure certState
+    gamma :|> txCert -> do
+      certState' <-
+        trans @(DELEGS era) $ TRC (env, certState, gamma)
+      -- It is impossible to have 65535 number of certificates in a transaction.
+      let certIx = CertIx (fromIntegral @Int @Word16 $ length gamma)
+          ptr = Ptr (SlotNo32 (fromIntegral @Word64 @Word32 slot64)) txIx certIx
+      trans @(EraRule "DELPL" era) $
+        TRC (DelplEnv slot epochNo ptr pp chainAccountState, certState', txCert)
+
+instance
+  ( Era era
+  , STS (DELPL era)
+  , PredicateFailure (EraRule "DELPL" era) ~ ShelleyDelplPredFailure era
+  , Event (EraRule "DELPL" era) ~ ShelleyDelplEvent era
+  ) =>
+  Embed (DELPL era) (DELEGS era)
+  where
+  wrapFailed = DelplFailure
+  wrapEvent = DelplEvent

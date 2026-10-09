@@ -1,0 +1,357 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.TreeDiff (
+  module Test.Cardano.Ledger.Binary.TreeDiff,
+) where
+
+import Cardano.Crypto.DSIGN (
+  DSIGNAggregatable (PossessionProofDSIGN),
+  DSIGNAlgorithm,
+  VerKeyDSIGN,
+ )
+import Cardano.Ledger.Address
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (rawEncodeFixedSized)
+import Cardano.Ledger.Block
+import Cardano.Ledger.Coin
+import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Core
+import Cardano.Ledger.Credential
+import Cardano.Ledger.HKD
+import Cardano.Ledger.Keys
+import Cardano.Ledger.MemoBytes
+import Cardano.Ledger.Plutus
+import Cardano.Ledger.State
+import Cardano.Ledger.TxIn
+import Cardano.Slotting.Slot (SlotInterval (..))
+import Data.Functor.Identity
+import qualified Data.TreeDiff.OMap as OMap
+import GHC.TypeLits
+import Prettyprinter
+import Test.Cardano.Data.TreeDiff ()
+import Test.Cardano.Ledger.Binary.TreeDiff
+import Test.Cardano.Ledger.BlockHeader (TestBlockHeader)
+import Test.Data.VMap.TreeDiff ()
+import Type.Reflection (Typeable, typeRep)
+
+-- Coin
+instance ToExpr Coin
+
+instance ToExpr DeltaCoin
+
+instance ToExpr (CompactForm Coin) where
+  toExpr x = toExpr (fromCompact x)
+
+deriving newtype instance ToExpr (CompactForm DeltaCoin)
+
+deriving newtype instance ToExpr a => ToExpr (Inclusive a)
+
+deriving newtype instance ToExpr a => ToExpr (Exclusive a)
+
+-- HKD
+instance ToExpr (NoUpdate a)
+
+-- Keys
+instance ToExpr (VKey r) where
+  toExpr vk =
+    Rec "VKey" $ OMap.fromList [("VKey (hashOf)", toExpr $ hashKey vk)]
+
+instance DSIGNAlgorithm r => ToExpr (VerKeyDSIGN r) where
+  toExpr vk =
+    Rec "VerKeyDSIGN" $
+      OMap.fromList [("VerKeyDSIGN", toExpr $ HexBytes $ rawEncodeFixedSized vk)]
+
+instance DSIGNAggregatable r => ToExpr (PossessionProofDSIGN r) where
+  toExpr proof =
+    Rec "PossessionProofDSIGN" $
+      OMap.fromList [("PossessionProofDSIGN", toExpr $ HexBytes $ rawEncodeFixedSized proof)]
+
+instance ToExpr GenDelegs
+
+instance ToExpr GenDelegPair
+
+instance ToExpr (KeyHash keyrole) where
+  toExpr (KeyHash x) = App "KeyHash" [toExpr x]
+
+instance ToExpr (VRFVerKeyHash keyrole) where
+  toExpr (VRFVerKeyHash x) = App "VRFVerKeyHash" [toExpr x]
+
+-- PoolDist
+instance ToExpr PoolDistr
+
+instance ToExpr IndividualPoolStake
+
+-- SafeHash
+instance ToExpr (SafeHash i) where
+  toExpr x = App "SafeHash" [toExpr (extractHash x)]
+
+-- Language
+instance ToExpr (Plutus l)
+
+instance ToExpr (PlutusRunnable l) where
+  toExpr pr@(PlutusRunnable _ _ _) =
+    let PlutusRunnable {..} = pr
+     in Rec "PlutusRunnable" $
+          OMap.fromList
+            [ ("plutusRunnableBinary", toExpr plutusRunnableBinary)
+            , ("plutusRunnableScriptHash", toExpr plutusRunnableScriptHash)
+            ,
+              ( "plutusRunnableResult"
+              , case plutusRunnableResult of
+                  Left err -> App "Left" [toExpr $ show $ pretty err]
+                  -- There is no point in showing plutus AST when debugging tests
+                  Right _sfe -> App "Right" [toExpr ("<ScriptForEvaluation>" :: String)]
+              )
+            ]
+
+instance ToExpr PlutusBinary
+
+instance ToExpr Language
+
+instance
+  ToExpr ScriptHash =>
+  ToExpr PlutusWithContext
+  where
+  toExpr PlutusWithContext {..} =
+    Rec "PlutusWithContext" $
+      OMap.fromList
+        [ ("pwcProtocolVersion", toExpr pwcProtocolVersion)
+        , ("pwcScript", toExpr (plutusRunnableScriptHash pwcScript))
+        , ("pwcExUnits", toExpr pwcExUnits)
+        , ("pwcCostModel", toExpr pwcCostModel)
+        ]
+
+-- MemoBytes
+instance ToExpr t => ToExpr (MemoBytes t)
+
+-- Core
+
+instance ToExpr (VoidEraRule (rule :: Symbol) era) where
+  toExpr = absurdEraRule
+
+instance ToExpr ScriptHash
+
+instance ToExpr CostModel where
+  toExpr costModel =
+    App
+      "CostModel"
+      [ toExpr (getCostModelLanguage costModel)
+      , paramsExpr (getCostModelParams costModel)
+      ]
+    where
+      paramsExpr [] = Lst []
+      paramsExpr xs = App "concat" [Lst . map Lst . chunksOf 15 . map toExpr $ xs]
+      chunksOf _ [] = []
+      chunksOf n xs = let (chunk, rest) = splitAt n xs in chunk : chunksOf n rest
+
+instance ToExpr CostModels
+
+-- Keys/WitVKey
+instance ToExpr (WitVKey kr)
+
+-- Keys/Bootstrap
+instance ToExpr BootstrapWitness
+
+instance ToExpr ChainCode
+
+-- TxIn
+instance ToExpr TxIx
+
+-- BaseTypes
+instance ToExpr CertIx where
+  toExpr (CertIx x) = App "CertIx" [toExpr x]
+
+instance ToExpr UnitInterval where
+  toExpr = toExpr . unboundRational
+
+instance ToExpr NonNegativeInterval where
+  toExpr = toExpr . unboundRational
+
+instance ToExpr Network
+
+instance ToExpr Port
+
+instance ToExpr Url
+
+instance ToExpr Nonce where
+  toExpr NeutralNonce = App "NeutralNonce" []
+  toExpr (Nonce x) = App "Nonce" [trimExprViaShow 10 x]
+
+instance ToExpr DnsName
+
+instance ToExpr BlocksMade
+
+instance ToExpr ProtVer
+
+instance ToExpr BlockHeaderVersionInfo
+
+instance ToExpr Anchor
+
+instance (Typeable r, ToExpr a) => ToExpr (Mismatch r a) where
+  toExpr (Mismatch supplied expected) =
+    Rec
+      ("Mismatch (" <> show (typeRep @r) <> ")")
+      $ OMap.fromList
+        [ ("supplied", toExpr supplied)
+        , ("expected", toExpr expected)
+        ]
+
+instance ToExpr Milliseconds32
+
+instance ToExpr SlotInterval
+
+instance ToExpr EpochInterval
+
+-- AuxiliaryData
+instance ToExpr TxAuxDataHash
+
+-- Plutus/ExUnits
+instance ToExpr Prices
+
+instance ToExpr ExUnits where
+  toExpr (WrapExUnits (ExUnits' x y)) = App "ExUnits" [defaultExprViaShow x, defaultExprViaShow y]
+
+-- Credential
+instance ToExpr (Credential keyrole)
+
+instance ToExpr StakeReference
+
+deriving newtype instance ToExpr SlotNo32
+
+instance ToExpr Ptr
+
+deriving newtype instance
+  ToExpr (PParamsHKD Identity era) => ToExpr (PParams era)
+
+deriving newtype instance
+  ToExpr (PParamsHKD StrictMaybe era) => ToExpr (PParamsUpdate era)
+
+deriving newtype instance ToExpr CoinPerByte
+
+instance ToExpr MaxPledgeLeverage
+
+instance ToExpr TxIn
+
+instance ToExpr TxId
+
+instance ToExpr ChainAccountState
+
+-- CertState
+instance ToExpr DRep
+
+instance ToExpr DRepState
+
+-- Address
+instance ToExpr Addr
+
+instance ToExpr AccountAddress
+
+instance ToExpr AccountId
+
+instance ToExpr BootstrapAddress where
+  toExpr = defaultExprViaShow
+
+instance ToExpr Withdrawals
+
+instance ToExpr DirectDeposits
+
+instance ToExpr CompactAddr
+
+-- PoolParams
+instance ToExpr PoolMetadata
+
+instance ToExpr (StakePoolParams era)
+
+instance ToExpr BlsKey
+
+instance ToExpr BlsKeyState
+
+instance ToExpr StakePoolState
+
+instance ToExpr StakePoolRelay
+
+instance ToExpr (PoolCert era)
+
+instance ToExpr (PlutusData era) where
+  toExpr = trimExprViaShow 30
+
+instance ToExpr (Data era)
+
+instance ToExpr (BinaryData era) where
+  toExpr _ = App "BinaryData" []
+
+instance ToExpr (Datum era) where
+  toExpr NoDatum = App "NoDatum" []
+  toExpr (DatumHash x) = App "DatumHash" [toExpr x]
+  toExpr (Datum bd) = App "Datum" [toExpr bd]
+
+-- EpochBoundary
+instance ToExpr LeiosSeat where
+  toExpr (LeiosSeat w vk) =
+    Rec "LeiosSeat" $
+      OMap.fromList [("seatWeight", toExpr w), ("seatVKey", toExpr vk)]
+
+instance ToExpr LeiosCommittee where
+  toExpr = App "LeiosCommittee" . map toExpr . foldr (:) [] . leiosCommitteeSeats
+
+instance ToExpr (SnapShots era)
+
+instance ToExpr SnapShot
+
+instance ToExpr MarkSnapShot
+
+instance ToExpr SetSnapShot
+
+instance ToExpr GoSnapShot
+
+instance ToExpr StakePoolSnapShot
+
+deriving newtype instance ToExpr Stake
+
+instance ToExpr StakeWithDelegation
+
+deriving newtype instance ToExpr ActiveStake
+
+instance ToExpr (PState era)
+
+instance ToExpr (Accounts era) => ToExpr (DState era)
+
+instance ToExpr FutureGenDeleg
+
+instance ToExpr InstantaneousRewards
+
+instance ToExpr CommitteeAuthorization
+
+instance ToExpr (CommitteeState era)
+
+-- UTxO
+deriving instance (Era era, ToExpr (Script era)) => ToExpr (ScriptsProvided era)
+
+instance ToExpr (TxOut era) => ToExpr (UTxO era)
+
+instance ToExpr TxOutSource
+
+instance ToExpr a => ToExpr (NonZero a) where
+  toExpr x = App "NonZero" [toExpr $ unNonZero x]
+
+instance ToExpr PositiveInterval where
+  toExpr = toExpr . unboundRational
+
+instance (ToExpr h, ToExpr (BlockBody era)) => ToExpr (Block h era)
+
+instance ToExpr TestBlockHeader
+
+instance ToExpr EbReferencesAnnouncement

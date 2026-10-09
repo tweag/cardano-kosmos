@@ -1,0 +1,255 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
+
+-- | Specs necessary to generate, environment, state, and signal
+-- for the UTXO rule
+module Test.Cardano.Ledger.Constrained.Conway.Utxo where
+
+import Cardano.Ledger.Babbage.TxOut
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+  decodeRecordSum,
+  encodeListLen,
+  encodeWord,
+ )
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Core (
+  Era (..),
+  EraPParams (..),
+  EraTx (..),
+  EraTxAuxData (..),
+  EraTxWits (..),
+  TxLevel (..),
+  ppMaxTxSizeL,
+ )
+import Cardano.Ledger.Conway.Governance (GovActionId)
+import Cardano.Ledger.Conway.State
+import Cardano.Ledger.Shelley.API.Types
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Slot (epochFromSlot)
+import Constrained.API
+import Control.DeepSeq (NFData)
+import Control.Monad.Reader (runReader)
+import Data.Functor.Identity (Identity)
+import Data.Word
+import GHC.Generics (Generic)
+import Lens.Micro ((&), (.~), (^.))
+import Test.Cardano.Ledger.Babbage.Arbitrary ()
+import Test.Cardano.Ledger.Common (Arbitrary (..), Gen, ToExpr, oneof)
+import Test.Cardano.Ledger.Constrained.Conway.Gov (proposalsSpec, succVersionOrCurrent)
+import Test.Cardano.Ledger.Constrained.Conway.WitnessUniverse
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Conway.TreeDiff ()
+import Test.Cardano.Ledger.Core.Utils (testGlobals)
+import Test.Cardano.Ledger.Generic.GenState (
+  GenEnv (..),
+  GenSize (..),
+  GenState (..),
+  initialLedgerState,
+  runGenRS,
+ )
+import qualified Test.Cardano.Ledger.Generic.GenState as GenSize
+import Test.Cardano.Ledger.Generic.Instances ()
+import Test.Cardano.Ledger.Generic.TxGen (genAlonzoTx)
+
+instance HasSimpleRep DepositPurpose
+
+instance HasSpec DepositPurpose
+
+witnessDepositPurpose ::
+  forall era.
+  Era era =>
+  WitUniv era -> Specification DepositPurpose
+witnessDepositPurpose univ = constrained $ \ [var|depPurpose|] ->
+  (caseOn depPurpose)
+    -- CredentialDeposit !(Credential 'Staking c)
+    (branch $ \cred -> witness univ cred)
+    -- PoolDeposit !(KeyHash 'StakePool c)
+    (branch $ \keyhash -> witness univ keyhash)
+    -- DRepDeposit !(Credential 'DRepRole c)
+    (branch $ \drep -> witness univ drep)
+    -- GovActionDeposit
+    (branch $ \_ -> True)
+
+data DepositPurpose
+  = CredentialDeposit !(Credential Staking)
+  | PoolDeposit !(KeyHash StakePool)
+  | DRepDeposit !(Credential DRepRole)
+  | GovActionDeposit !GovActionId
+  deriving (Generic, Eq, Show, Ord)
+
+instance Arbitrary DepositPurpose where
+  arbitrary =
+    oneof
+      [ CredentialDeposit <$> arbitrary
+      , PoolDeposit <$> arbitrary
+      , DRepDeposit <$> arbitrary
+      , GovActionDeposit <$> arbitrary
+      ]
+
+instance DecCBOR DepositPurpose where
+  decCBOR = decodeRecordSum "DepositPurpose" $ \case
+    0 -> do
+      c <- decCBOR
+      pure (2, CredentialDeposit c)
+    1 -> do
+      kh <- decCBOR
+      pure (2, PoolDeposit kh)
+    2 -> do
+      c <- decCBOR
+      pure (2, DRepDeposit c)
+    3 -> do
+      gaid <- decCBOR
+      pure (2, GovActionDeposit gaid)
+    k -> invalidKey k
+
+instance EncCBOR DepositPurpose where
+  encCBOR = \case
+    CredentialDeposit c -> encodeListLen 2 <> encodeWord 0 <> encCBOR c
+    PoolDeposit kh -> encodeListLen 2 <> encodeWord 1 <> encCBOR kh
+    DRepDeposit c -> encodeListLen 2 <> encodeWord 2 <> encCBOR c
+    GovActionDeposit gaid -> encodeListLen 2 <> encodeWord 3 <> encCBOR gaid
+
+instance NFData DepositPurpose
+
+instance ToExpr DepositPurpose
+
+utxoEnvSpec ::
+  UtxoExecContext ConwayEra ->
+  Specification (UtxoEnv ConwayEra)
+utxoEnvSpec UtxoExecContext {..} =
+  constrained $ \utxoEnv ->
+    utxoEnv ==. lit uecUtxoEnv
+
+utxoStateSpec ::
+  UtxoExecContext ConwayEra ->
+  UtxoEnv ConwayEra ->
+  Specification (UTxOState ConwayEra)
+utxoStateSpec UtxoExecContext {uecUTxO} UtxoEnv {ueSlot, uePParams, ueCertState} =
+  constrained $ \utxoState ->
+    match utxoState $
+      \utxosUtxo
+       _utxosDeposited
+       _utxosFees
+       utxosGovState
+       _utxosStakeDistr
+       _utxosDonation ->
+          [ assert $ utxosUtxo ==. lit uecUTxO
+          , match utxosGovState $ \props _ constitution _ _ _ _ ->
+              match constitution $ \_ policy ->
+                satisfies props $
+                  proposalsSpec
+                    (lit curEpoch)
+                    (lit (succVersionOrCurrent (uePParams ^. ppProtocolVersionL)))
+                    policy
+                    (lit ueCertState)
+          ]
+  where
+    curEpoch = runReader (epochFromSlot ueSlot) testGlobals
+
+data UtxoExecContext era = UtxoExecContext
+  { uecTx :: !(Tx TopTx era)
+  , uecUTxO :: !(UTxO era)
+  , uecUtxoEnv :: !(UtxoEnv era)
+  }
+  deriving (Generic)
+
+instance
+  ( EraTx era
+  , NFData (TxWits era)
+  , NFData (TxAuxData era)
+  , EraCertState era
+  ) =>
+  NFData (UtxoExecContext era)
+
+instance
+  ( EraTx era
+  , ToExpr (TxOut era)
+  , ToExpr (TxBody TopTx era)
+  , ToExpr (TxWits era)
+  , ToExpr (TxAuxData era)
+  , ToExpr (PParamsHKD Identity era)
+  , EraCertState era
+  , ToExpr (CertState era)
+  , ToExpr (Tx TopTx era)
+  ) =>
+  ToExpr (UtxoExecContext era)
+
+instance
+  ( EraPParams era
+  , EncCBOR (TxOut era)
+  , EncCBOR (Tx TopTx era)
+  , EraCertState era
+  ) =>
+  EncCBOR (UtxoExecContext era)
+  where
+  encCBOR x@(UtxoExecContext _ _ _) =
+    let UtxoExecContext {..} = x
+     in encodeListLen 3
+          <> encCBOR uecTx
+          <> encCBOR uecUTxO
+          <> encCBOR uecUtxoEnv
+
+instance CertState era ~ ConwayCertState era => Inject (UtxoExecContext era) (ConwayCertState era) where
+  inject ctx = (uecUtxoEnv ctx) ^. Shelley.utxoEnvCertStateL
+
+utxoTxSpec ::
+  HasSpec (Tx TopTx era) =>
+  UtxoExecContext era ->
+  Specification (Tx TopTx era)
+utxoTxSpec UtxoExecContext {uecTx} =
+  constrained $ \tx -> tx ==. lit uecTx
+
+correctAddrAndWFCoin ::
+  Term (TxOut ConwayEra) ->
+  Pred
+correctAddrAndWFCoin txOut =
+  match txOut $ \addr v _ _ ->
+    [ match v $ \c -> [0 <. c, c <=. fromIntegral (maxBound :: Word64)]
+    , (caseOn addr)
+        (branch $ \n _ _ -> n ==. lit Testnet)
+        ( branch $ \bootstrapAddr ->
+            match bootstrapAddr $ \_ nm _ ->
+              (caseOn nm)
+                (branch $ \_ -> False)
+                (branch $ \_ -> True)
+        )
+    ]
+
+genUtxoExecContext :: Gen (UtxoExecContext ConwayEra)
+genUtxoExecContext = do
+  ueSlot <- arbitrary
+  let
+    genSize =
+      GenSize.small
+        { invalidScriptFreq = 0 -- TODO make the test work with invalid scripts
+        , regCertFreq = 0
+        , delegCertFreq = 0
+        }
+  ((uecUTxO, uecTx), gs) <- runGenRS genSize $ genAlonzoTx ueSlot
+  let
+    txSize = uecTx ^. sizeTxF
+    lState = initialLedgerState gs
+    ueCertState = lsCertState lState
+    uePParams =
+      gePParams (gsGenEnv gs)
+        & ppMaxTxSizeL .~ fromIntegral txSize
+        & ppProtocolVersionL .~ ProtVer (natVersion @11) 0
+    uecUtxoEnv = UtxoEnv {..}
+  pure UtxoExecContext {..}

@@ -1,0 +1,236 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Cardano.Ledger.Keys.Bootstrap (
+  BootstrapWitness (..),
+  ChainCode (..),
+  bootstrapWitKeyHash,
+  unpackByronVKey,
+  makeBootstrapWitness,
+  verifyBootstrapWit,
+) where
+
+import Cardano.Base.Bytes (byteArrayFromByteString)
+import qualified Cardano.Chain.Common as Byron
+import Cardano.Crypto.DSIGN (SignedDSIGN (..))
+import qualified Cardano.Crypto.DSIGN as DSIGN
+import Cardano.Crypto.DSIGN.Class ()
+import qualified Cardano.Crypto.Hash as Hash
+import qualified Cardano.Crypto.Signing as Byron
+import qualified Cardano.Crypto.Wallet as WC
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+  FixedSizeCodec (..),
+  encodeListLen,
+  natVersion,
+  whenDecoderVersionAtLeast,
+ )
+import Cardano.Ledger.Binary.Decoding (decodeRecordNamed)
+import Cardano.Ledger.Binary.Plain (
+  serialize',
+ )
+import Cardano.Ledger.Hashes (ADDRHASH, EraIndependentTxBody, HASH, Hash, KeyHash (..))
+import Cardano.Ledger.Keys.Internal (
+  DSIGN,
+  KeyRole (..),
+  VKey (..),
+  verifySignedDSIGN,
+ )
+import Control.DeepSeq (NFData (..), rwhnf)
+import Control.Monad (unless)
+import Data.Aeson (FromJSON (parseJSON), KeyValue ((.=)), ToJSON (toJSON), (.:))
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (Parser)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Base16 as Base16
+import qualified Data.ByteString.Builder as B
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Short as SBS
+import Data.Coerce (coerce)
+import Data.Maybe (fromMaybe)
+import Data.MemPack.Buffer (byteArrayToShortByteString)
+import Data.Ord (comparing)
+import qualified Data.Primitive.ByteArray as BA
+import Data.Proxy (Proxy (..))
+import Data.Text (Text)
+import qualified Data.Text.Encoding as Text
+import GHC.Generics (Generic)
+import NoThunks.Class (NoThunks (..))
+import Quiet
+
+newtype ChainCode = ChainCode {unChainCode :: BA.ByteArray}
+  deriving (Eq, Generic)
+  deriving (Show) via Quiet ChainCode
+  deriving newtype (NoThunks, EncCBOR, NFData)
+
+instance DecCBOR ChainCode where
+  decCBOR = do
+    chainCode <- decCBOR
+    whenDecoderVersionAtLeast (natVersion @12) $ do
+      unless (BA.sizeofByteArray chainCode == 32) $
+        fail "ChainCode is expected to be 32 bytes in size"
+    pure $ ChainCode chainCode
+
+data BootstrapWitness = BootstrapWitness
+  { bwKey :: !(VKey Witness)
+  , bwSignature :: !(SignedDSIGN DSIGN (Hash HASH EraIndependentTxBody))
+  , bwChainCode :: !ChainCode
+  , bwAttributes :: !BA.ByteArray
+  }
+  deriving (Generic, Show, Eq)
+
+instance NFData BootstrapWitness where
+  rnf = rwhnf
+
+instance NoThunks BootstrapWitness
+
+instance EncCBOR BootstrapWitness where
+  encCBOR bw@(BootstrapWitness {}) =
+    let BootstrapWitness {..} = bw
+     in encodeListLen 4
+          <> encCBOR bwKey
+          <> encCBOR bwSignature
+          <> encCBOR bwChainCode
+          <> encCBOR bwAttributes
+
+instance DecCBOR BootstrapWitness where
+  decCBOR =
+    decodeRecordNamed "BootstrapWitness" (const 4) $
+      BootstrapWitness <$> decCBOR <*> decCBOR <*> decCBOR <*> decCBOR
+  {-# INLINE decCBOR #-}
+
+instance Ord BootstrapWitness where
+  compare = comparing bootstrapWitKeyHash
+
+instance ToJSON BootstrapWitness where
+  toJSON (BootstrapWitness (VKey vk) (SignedDSIGN sig) (ChainCode cc) attrs) =
+    let
+      encodeHex :: ByteString -> Text
+      encodeHex = Text.decodeUtf8 . Base16.encode
+      toBS :: BA.ByteArray -> ByteString
+      toBS = SBS.fromShort . byteArrayToShortByteString
+     in
+      Aeson.object
+        [ "key" .= encodeHex (rawEncodeFixedSized vk)
+        , "signature" .= encodeHex (rawEncodeFixedSized sig)
+        , "chainCode" .= encodeHex (toBS cc)
+        , "attributes" .= encodeHex (toBS attrs)
+        ]
+
+instance FromJSON BootstrapWitness where
+  parseJSON =
+    let
+      decodeHex :: Text -> Parser ByteString
+      decodeHex t = either fail pure $ Base16.decode (Text.encodeUtf8 t)
+     in
+      Aeson.withObject "BootstrapWitness" $ \o -> do
+        !keyHex <- o .: "key"
+        !sigHex <- o .: "signature"
+        !ccHex <- o .: "chainCode"
+        !attrsHex <- o .: "attributes"
+        !keyBytes <- decodeHex keyHex
+        !sigBytes <- decodeHex sigHex
+        !ccBytes <- decodeHex ccHex
+        !attrsBytes <- decodeHex attrsHex
+        !vk <- rawDecodeFixedSized keyBytes
+        !sig <- rawDecodeFixedSized sigBytes
+        pure $
+          BootstrapWitness
+            (VKey vk)
+            (SignedDSIGN sig)
+            (ChainCode (byteArrayFromByteString ccBytes))
+            (byteArrayFromByteString attrsBytes)
+
+-- | Rebuild the addrRoot of the corresponding address.
+bootstrapWitKeyHash ::
+  BootstrapWitness ->
+  KeyHash Witness
+bootstrapWitKeyHash (BootstrapWitness (VKey key) _ (ChainCode cc) attributes) =
+  KeyHash . hash_crypto . hash_SHA3_256 $ bytes
+  where
+    -- The payload hashed to create an addrRoot consists of the following:
+    -- 1: a token indicating a list of length 3
+    -- 2: the addrType
+    -- 3: the key
+    -- 3a: token indicating list length 2
+    -- 3b: token indicating address type (which will be a vkey address)
+    -- 3c: a token indicating a bytestring of length 64
+    -- 3d: public key bytes (32)
+    -- 3e: chain code bytes (32)
+    -- 4: the addrAttributes
+    -- the prefix is constant, and hard coded here:
+    prefix :: SBS.ShortByteString
+    prefix = "\131\00\130\00\88\64"
+    -- Here we are reserializing a key which we have previously deserialized.
+    -- This is normally naughty. However, this is a blob of bytes -- serializing
+    -- it amounts to wrapping the underlying byte array in a ByteString
+    -- constructor.
+    keyBytes = rawEncodeFixedSized key
+    bytes =
+      BSL.toStrict $
+        B.toLazyByteString $
+          B.shortByteString prefix
+            <> B.byteString keyBytes
+            <> B.shortByteString (byteArrayToShortByteString cc)
+            <> B.shortByteString (byteArrayToShortByteString attributes)
+    hash_SHA3_256 :: ByteString -> ByteString
+    hash_SHA3_256 = Hash.digest (Proxy :: Proxy Hash.SHA3_256)
+    hash_crypto :: ByteString -> Hash.Hash ADDRHASH a
+    hash_crypto = Hash.castHash . Hash.hashWith @ADDRHASH id
+
+unpackByronVKey ::
+  Byron.VerificationKey ->
+  (VKey Witness, ChainCode)
+unpackByronVKey
+  ( Byron.VerificationKey
+      (WC.XPub vkeyBytes (WC.ChainCode chainCodeBytes))
+    ) = case rawDecodeFixedSized vkeyBytes of
+    -- This maybe is produced by a check that the length of the public key
+    -- is the correct one. (32 bytes). If the XPub was constructed correctly,
+    -- we already know that it has this length.
+    Nothing -> error "unpackByronVKey: impossible!"
+    Just vk -> (VKey vk, ChainCode $ byteArrayFromByteString chainCodeBytes)
+
+verifyBootstrapWit ::
+  Hash HASH EraIndependentTxBody ->
+  BootstrapWitness ->
+  Bool
+verifyBootstrapWit txbodyHash witness =
+  verifySignedDSIGN
+    (bwKey witness)
+    txbodyHash
+    (coerce $ bwSignature witness)
+
+coerceSignature :: WC.XSignature -> DSIGN.SigDSIGN DSIGN.Ed25519DSIGN
+coerceSignature sig =
+  fromMaybe (error "coerceSignature: impossible! signature size mismatch") $
+    rawDecodeFixedSized (WC.unXSignature sig)
+
+makeBootstrapWitness ::
+  Hash HASH EraIndependentTxBody ->
+  Byron.SigningKey ->
+  Byron.Attributes Byron.AddrAttributes ->
+  BootstrapWitness
+makeBootstrapWitness txBodyHash byronSigningKey addrAttributes =
+  BootstrapWitness vk signature cc $ byteArrayFromByteString (serialize' addrAttributes)
+  where
+    (vk, cc) = unpackByronVKey $ Byron.toVerification byronSigningKey
+    signature =
+      SignedDSIGN . coerceSignature $
+        WC.sign
+          (mempty :: ByteString)
+          (Byron.unSigningKey byronSigningKey)
+          (Hash.hashToBytes txBodyHash)

@@ -50,10 +50,7 @@ packages:
   bench/cardano-timeseries-io
   bench/trace-schemas/scripts/schema-gen
   trace-forward
-
---optional-packages:
 --  ../ouroboros-consensus
---
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node
@@ -151,7 +148,7 @@ source-repository-package
 source-repository-package
   type: git
   location: https://github.com/tweag/ouroboros-consensus
-  tag: 7cb9ec08245d7d80624bcd6146b3ede0ea3ba810
-  --sha256: sha256-FvDxaWgNZ0T5XZgKY/FBfntKcxeiQJ4880+AFc6dnL8=
+  tag: cea6126ff7ef4f2134ee131500fc649d14ac4b39
+  --sha256: sha256-Di5S0HXKBbb2RHHVM1zpsQN9uJ541ZhZ7wRpc83R/8c=
   subdir:
     .

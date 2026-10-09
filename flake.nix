@@ -48,6 +48,8 @@
 
     nixpkgs.follows = "haskellNix/nixpkgs-unstable";
 
+    freshNixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
     utils.url = "github:numtide/flake-utils";
   };
 
@@ -60,6 +62,7 @@
     nixpkgs,
     self,
     utils,
+    freshNixpkgs,
     ...
   } @ input: let
     inherit (builtins) elem match;
@@ -163,7 +166,7 @@
         inherit (project.pkgs) cardanoLib;
       };
 
-    mkFlakeAttrs = pkgs: rec {
+    mkFlakeAttrs = pkgs: freshPkgs: rec {
       system = pkgs.stdenv.hostPlatform.system;
       inherit (pkgs.haskell-nix) haskellLib;
       inherit (haskellLib) collectChecks' collectComponents';
@@ -179,8 +182,22 @@
         shell = import ./shell.nix {inherit pkgs customConfig;};
       in
         {
-          inherit (shell) devops workbench-shell;
-          default = shell.dev;
+          default = shell.dev.overrideAttrs (attrs: {
+            nativeBuildInputs = (attrs.nativeBuildInputs or []) ++ [
+              pkgs.process-compose
+              pkgs.curl
+              pkgs.bash
+              pkgs.git
+              pkgs.which
+              pkgs.xxd
+              pkgs.jq
+              pkgs.toxiproxy
+              pkgs.gnused
+              freshPkgs.victoriametrics
+              freshPkgs.victorialogs
+              freshPkgs.vlagent
+            ];
+          });
           cluster = shell;
           profiled = project.profiled.shell;
         }
@@ -335,7 +352,7 @@
         ciJobsVariants =
           mapAttrs (
             _: p:
-              (mkFlakeAttrs (pkgs.extend (prev: final: {cardanoNodeProject = p;}))).ciJobs
+              (mkFlakeAttrs (pkgs.extend (prev: final: {cardanoNodeProject = p;})) []).ciJobs
           )
           project.projectVariants;
 
@@ -461,7 +478,10 @@
         pkgs = import nixpkgs {
           inherit config system overlays;
         };
-        inherit (mkFlakeAttrs pkgs) environments packages checks apps project ciJobs devShells workbench;
+        freshPkgs = import freshNixpkgs {
+          inherit config system overlays;
+        };
+        inherit (mkFlakeAttrs pkgs freshPkgs) environments packages checks apps project ciJobs devShells workbench;
       in {
         inherit environments checks project ciJobs devShells workbench;
 

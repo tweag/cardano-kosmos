@@ -36,9 +36,6 @@ package cardano-api
   ghc-options: -XUndecidableSuperClasses
 
 packages:
-  -- tweag
-  packages/peras-testnet
-
   -- intersectmbo
   packages/cardano-node/cardano-node
   packages/cardano-node/cardano-node-capi

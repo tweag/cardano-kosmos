@@ -2,52 +2,53 @@
 
 set -e
 
-
-cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer peras-testnet
-
 cleanup() {
-    trap - EXIT INT TERM
-    kill -- -$$ 2>/dev/null || true
+  echo "Shutting down process-compose and child processes..."
+  pkill -TERM -P $$ 2>/dev/null
+  sleep 1
+  pkill -KILL -P $$ 2>/dev/null
+
+  # annoying
+  pkill cardano-node
+  pkill cardano-tracer
 }
 trap cleanup EXIT INT TERM
-
-CARDANO_NODE=$(cabal list-bin cardano-node)
-CARDANO_NODE_CHAIRMAN=$(cabal list-bin cardano-node-chairman)
-CARDANO_CLI=$(cabal list-bin cardano-cli)
-CARDANO_TESTNET=$(cabal list-bin cardano-testnet)
-CARDANO_TRACER=$(cabal list-bin cardano-tracer:cardano-tracer)
-CARDANO_PERAS_TESTNET=$(cabal list-bin peras-testnet)
-
-export CARDANO_NODE CARDANO_NODE_CHAIRMAN CARDANO_CLI CARDANO_TESTNET CARDANO_TRACER CARDANO_PERAS_TESTNET
-
-TESTNET_SCENARIOS_DIR="${TESTNET_SCENARIOS_DIR:-packages/peras-testnet/scenarios}"
 
 usage() {
     echo "Usage: $0 [SCENARIO]" >&2
     echo "  SCENARIO defaults to 'vanilla' if omitted." >&2
     echo "Available scenarios:" >&2
-    for f in "$TESTNET_SCENARIOS_DIR"/*.yaml; do
-        [ -e "$f" ] && echo "  $(basename "$f" .yaml)" >&2
+    for f in nickel/scenarios/*.ncl; do
+        [ -e "$f" ] && echo "  $(basename "$f" .ncl)" >&2
     done
 }
+
+DEVENV_PATH="devnet-env"
 
 runTestnet() {
     scenarioArg="${1:-vanilla}"
     scenarioFile="$scenarioArg"
     if [ ! -f "$scenarioArg" ]; then
-      scenarioFile="$TESTNET_SCENARIOS_DIR/$scenarioArg.yaml"
+      scenarioFile="nickel/scenarios/$scenarioArg.ncl"
       if [ ! -f "$scenarioFile" ]; then
           echo "Unknown scenario '$scenarioArg': $scenarioFile does not exist." >&2
           usage
           exit 1
       fi
     fi
-    echo "Using scenario: $scenarioFile"
-    export TESTNET_SCENARIO="$scenarioFile"
+
+    # Setup devnet-env
+    if [ ! -d "$DEVENV_PATH" ]; then
+      bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
+    fi
+
+    echo "Using: $scenarioFile"
+    echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml > "$DEVENV_PATH"/process-compose.yaml
     process-compose \
-        -f <("$CARDANO_PERAS_TESTNET" stdout-compose-yaml "$CARDANO_PERAS_TESTNET") \
+        -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \
-        -L process-compose.log
+        -L "$DEVENV_PATH"/logs/process-compose.log &
+    wait $!
 }
 
 case "${1:-}" in

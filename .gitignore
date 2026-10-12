@@ -30,7 +30,9 @@ result-*
 devenv
 devnet-env
 local-config
+process-compose.yaml
 process-compose.log
+cardano_binaries.json
 
 ### Victoria Metrics ###
 victoria-metrics-data/

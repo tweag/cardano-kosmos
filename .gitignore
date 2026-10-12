@@ -37,3 +37,9 @@ victoria-metrics-data/
 victoria-logs-data/
 vlagent-remotewrite-data/
 vlagent-file-checkpoints.json
+
+#buck2
+buck2
+buck-out
+third-party
+

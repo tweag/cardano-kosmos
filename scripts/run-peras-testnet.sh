@@ -44,7 +44,7 @@ runTestnet() {
 
     echo "Running: $scenarioFile"
     export PC_DISABLE_TUI
-    echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml > "$DEVENV_PATH"/process-compose.yaml
+    ./scripts/mk-process-compose.sh $scenarioArg "$DEVENV_PATH"/process-compose.yaml
     exec process-compose up \
         -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \

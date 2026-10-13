@@ -12,6 +12,23 @@ let export = {
 
   count_nodes | Array Group -> Number =
     fun groups => std.array.fold_left (fun acc group => acc + group.count) 0 groups,
+
+  groupsWithIndices | Array Group -> Array { group | Group, indices | Array Number } = fun groups =>
+    let filtered = std.array.filter (fun g => g.role == 'spo) groups in
+    let result = std.array.fold_left 
+      (fun acc g => 
+        let start = acc.next_index in
+        let count = g.count in
+        let indices' = std.array.generate (fun i => start + i) count in
+        {
+          next_index = start + count,
+          list = acc.list @ [{ group = g, indices = indices' }]
+        }
+      )
+      { next_index = 1, list = [] }
+      filtered
+    in
+    result.list,
   
   Genesis = {
     epoch_length_slots | Number | default = 360,

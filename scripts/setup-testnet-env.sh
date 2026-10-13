@@ -83,8 +83,29 @@ if [ $start_directly_in_dijkstra ]; then
   jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
 fi
 
-# TODO: implement redistribution of stakes
+# prepare pools.json
+json_output="{}"
 
+for pool_dir in "${DEVENV_PATH}"/pools-keys/pool*; do
+  pool_name=$(basename "$pool_dir")
+  pool_index=$(echo "$pool_name" | sed 's/[^0-9]//g')
+
+  pool_id=$($CARDANO_CLI dijkstra stake-pool id --cold-verification-key-file "$pool_dir/cold.vkey" --output-hex | tr -d '[:space:]')
+  
+  # Append the key-value pair to the JSON object using jq
+  if [ -n "$pool_id" ]; then
+    json_output=$(echo "$json_output" | jq --arg key "$pool_id" --argjson val "$pool_index" '. + {($key): $val}')
+  fi
+done
+
+echo "$json_output" > "$DEVENV_PATH"/pools-idxs-map.json
+
+# TODO: implement redistribution of stakes
+echo "(import \"nickel/redistribute-stakes.ncl\")
+      (import \""$scenarioFile"\")
+      (import \"$DEVENV_PATH/shelley-genesis.json\")
+      (import \"$DEVENV_PATH/pools-idxs-map.json\")
+      " | nickel export --format json > "$DEVENV_PATH/new_initial_funds.json" 
 
 # TODO: move to the nickel config
 trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]}}'

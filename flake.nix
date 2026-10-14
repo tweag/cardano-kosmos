@@ -196,6 +196,7 @@
               freshPkgs.victoriametrics
               freshPkgs.victorialogs
               freshPkgs.vlagent
+              freshPkgs.nickel
             ];
           });
           cluster = shell;

@@ -36,6 +36,7 @@ package cardano-api
   ghc-options: -XUndecidableSuperClasses
 
 packages:
+   -- intersectmbo
   packages/cardano-node/cardano-node
   packages/cardano-node/cardano-node-capi
   packages/cardano-node/cardano-node-chairman

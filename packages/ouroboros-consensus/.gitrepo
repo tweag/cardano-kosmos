@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:tweag/ouroboros-consensus.git
+	branch = cea6126ff7ef4f2134ee131500fc649d14ac4b39
+	commit = cea6126ff7ef4f2134ee131500fc649d14ac4b39
+	parent = 37639b252eee729846519a1954f0ad65f0c4b3b4
+	method = merge
+	cmdver = 0.4.9

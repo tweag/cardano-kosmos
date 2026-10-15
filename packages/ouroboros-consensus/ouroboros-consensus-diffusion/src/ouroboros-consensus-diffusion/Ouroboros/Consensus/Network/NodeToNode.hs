@@ -1,0 +1,1274 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+-- | Intended for qualified import
+module Ouroboros.Consensus.Network.NodeToNode
+  ( -- * Handlers
+    Handlers (..)
+  , mkHandlers
+
+    -- * Codecs
+  , Codecs (..)
+  , defaultCodecs
+  , identityCodecs
+
+    -- * Byte Limits
+  , ByteLimits
+  , byteLimits
+  , noByteLimits
+
+    -- * Tracers
+  , Tracers
+  , Tracers' (..)
+  , nullTracers
+  , showTracers
+
+    -- * Applications
+  , Apps (..)
+  , ClientApp
+  , ServerApp
+  , mkApps
+
+    -- ** Projections
+  , initiator
+  , initiatorAndResponder
+  ) where
+
+import Cardano.Base.FeatureFlags (CardanoFeatureFlag)
+import Cardano.Network.NodeToNode
+import Cardano.Network.PeerSelection (PeerTrustable (..))
+import Codec.CBOR.Decoding (Decoder)
+import qualified Codec.CBOR.Decoding as CBOR
+import Codec.CBOR.Encoding (Encoding)
+import qualified Codec.CBOR.Encoding as CBOR
+import Codec.CBOR.Read (DeserialiseFailure)
+import qualified Control.Concurrent.Class.MonadSTM.Strict.TVar as TVar.Unchecked
+import Control.DeepSeq (NFData)
+import Control.Monad.Class.MonadTime.SI (MonadTime)
+import Control.Monad.Class.MonadTimer.SI (MonadTimer)
+import Control.ResourceRegistry
+import Control.Tracer
+import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as BSL
+import Data.Hashable (Hashable)
+import Data.Int (Int64)
+import Data.Map.Strict (Map)
+import Data.Set (Set)
+import Data.Void (Void)
+import qualified Network.Mux as Mux
+import Network.TypedProtocol.Codec
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.Config (DiffusionPipeliningSupport (..))
+import Ouroboros.Consensus.HeaderValidation (HeaderWithTime)
+import Ouroboros.Consensus.Ledger.SupportsMempool
+import Ouroboros.Consensus.Ledger.SupportsProtocol
+import Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
+import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
+  ( ChainSyncStateView (..)
+  )
+import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CsClient
+import Ouroboros.Consensus.MiniProtocol.ChainSync.Server
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound (objectDiffusionInbound)
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasCert
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasVote
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Outbound (objectDiffusionOutbound)
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote
+import Ouroboros.Consensus.Node.ExitPolicy
+import Ouroboros.Consensus.Node.NetworkProtocolVersion
+import Ouroboros.Consensus.Node.Run
+import Ouroboros.Consensus.Node.Serialisation
+import qualified Ouroboros.Consensus.Node.Tracers as Node
+import Ouroboros.Consensus.NodeKernel
+import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
+import Ouroboros.Consensus.Storage.Serialisation (SerialisedHeader)
+import Ouroboros.Consensus.Util (ShowProxy)
+import Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Consensus.Util.Orphans ()
+import Ouroboros.Network.Block
+  ( Serialised (..)
+  )
+import Ouroboros.Network.BlockFetch
+import Ouroboros.Network.BlockFetch.Client
+  ( BlockFetchClient
+  , blockFetchClient
+  )
+import Ouroboros.Network.Channel
+import Ouroboros.Network.DeltaQ
+import Ouroboros.Network.Driver
+import Ouroboros.Network.Driver.Limits
+import Ouroboros.Network.KeepAlive
+import Ouroboros.Network.Mux
+import Ouroboros.Network.PeerSelection.PeerMetric.Type
+  ( FetchedMetricsTracer
+  , ReportPeerMetrics (..)
+  )
+import Ouroboros.Network.PeerSharing
+  ( PeerSharingController
+  , bracketPeerSharingClient
+  , peerSharingClient
+  , peerSharingServer
+  )
+import Ouroboros.Network.Protocol.BlockFetch.Codec
+import Ouroboros.Network.Protocol.BlockFetch.Server
+  ( BlockFetchServer
+  , blockFetchServerPeer
+  )
+import Ouroboros.Network.Protocol.BlockFetch.Type (BlockFetch (..))
+import Ouroboros.Network.Protocol.ChainSync.ClientPipelined
+import Ouroboros.Network.Protocol.ChainSync.Codec
+import Ouroboros.Network.Protocol.ChainSync.PipelineDecision
+import Ouroboros.Network.Protocol.ChainSync.Server
+import Ouroboros.Network.Protocol.ChainSync.Type
+import Ouroboros.Network.Protocol.KeepAlive.Client
+import Ouroboros.Network.Protocol.KeepAlive.Codec
+import Ouroboros.Network.Protocol.KeepAlive.Server
+import Ouroboros.Network.Protocol.KeepAlive.Type
+import Ouroboros.Network.Protocol.ObjectDiffusion.Codec
+  ( byteLimitsObjectDiffusion
+  , codecObjectDiffusion
+  , codecObjectDiffusionId
+  , timeLimitsObjectDiffusion
+  )
+import Ouroboros.Network.Protocol.ObjectDiffusion.Inbound
+  ( objectDiffusionInboundPeerPipelined
+  )
+import Ouroboros.Network.Protocol.ObjectDiffusion.Outbound
+  ( objectDiffusionOutboundPeer
+  )
+import Ouroboros.Network.Protocol.PeerSharing.Client
+  ( PeerSharingClient
+  , peerSharingClientPeer
+  )
+import Ouroboros.Network.Protocol.PeerSharing.Codec
+  ( byteLimitsPeerSharing
+  , codecPeerSharing
+  , codecPeerSharingId
+  , timeLimitsPeerSharing
+  )
+import Ouroboros.Network.Protocol.PeerSharing.Server
+  ( PeerSharingServer
+  , peerSharingServerPeer
+  )
+import Ouroboros.Network.Protocol.PeerSharing.Type (PeerSharing)
+import Ouroboros.Network.Protocol.TxSubmission2.Client
+import Ouroboros.Network.Protocol.TxSubmission2.Codec
+import Ouroboros.Network.Protocol.TxSubmission2.Server
+import Ouroboros.Network.Protocol.TxSubmission2.Type
+import Ouroboros.Network.Tx (HasRawTxId)
+import Ouroboros.Network.TxSubmission.Inbound.V1
+import Ouroboros.Network.TxSubmission.Inbound.V2
+  ( PeerTxAPI
+  , TxDecisionPolicy (..)
+  , TxSubmissionLogicVersion (..)
+  , txSubmissionInboundV2
+  , withPeer
+  )
+import Ouroboros.Network.TxSubmission.Mempool.Reader
+  ( mapTxSubmissionMempoolReader
+  )
+import Ouroboros.Network.TxSubmission.Outbound
+import System.Random (StdGen, splitGen)
+
+{-------------------------------------------------------------------------------
+  Handlers
+-------------------------------------------------------------------------------}
+
+-- | Protocol handlers for node-to-node (remote) communication
+data Handlers m addr blk = Handlers
+  { hChainSyncClient ::
+      ConnectionId addr ->
+      IsBigLedgerPeer ->
+      CsClient.DynamicEnv m blk ->
+      ChainSyncClientPipelined
+        (Header blk)
+        (Point blk)
+        (Tip blk)
+        m
+        CsClient.ChainSyncClientResult
+  , -- TODO: we should reconsider bundling these context parameters into a
+    -- record, perhaps instead extending the protocol handler
+    -- representation to support bracket-style initialisation so that we
+    -- could have the closure include these and not need to be explicit
+    -- about them here.
+
+    hChainSyncServer ::
+      ConnectionId addr ->
+      NodeToNodeVersion ->
+      ChainDB.Follower m blk (ChainDB.WithPoint blk (SerialisedHeader blk)) ->
+      ChainSyncServer (SerialisedHeader blk) (Point blk) (Tip blk) m ()
+  , -- TODO block fetch client does not have GADT view of the handlers.
+    hBlockFetchClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      FetchedMetricsTracer m ->
+      BlockFetchClient (HeaderWithTime blk) blk blk m ()
+  , hBlockFetchServer ::
+      ConnectionId addr ->
+      NodeToNodeVersion ->
+      ResourceRegistry m ->
+      BlockFetchServer (Serialised blk) (Point blk) m ()
+  , hTxSubmissionClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      ConnectionId addr ->
+      TxSubmissionClient (GenTxId blk) (GenTx blk) m ()
+  , hTxSubmissionServer ::
+      NodeToNodeVersion ->
+      ConnectionId addr ->
+      Either
+        (TxSubmissionServerPipelined (GenTxId blk) (GenTx blk) m ())
+        ( PeerTxAPI m (GenTxId blk) (GenTx blk) ->
+          TxSubmissionServerPipelined (GenTxId blk) (GenTx blk) m ()
+        )
+  -- ^ Either we use the legacy tx submission protocol or the newest one
+  -- which require PeerTxAPI. This is decided by
+  -- 'EnableNewTxSubmissionProtocol' flag.
+  , hPerasCertDiffusionClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      ConnectionId addr ->
+      PerasCertDiffusionInboundPipelined blk m ()
+  , hPerasCertDiffusionServer ::
+      NodeToNodeVersion ->
+      ConnectionId addr ->
+      PerasCertDiffusionOutbound blk m ()
+  , hPerasVoteDiffusionClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      ConnectionId addr ->
+      PerasVoteDiffusionInboundPipelined blk m ()
+  , hPerasVoteDiffusionServer ::
+      NodeToNodeVersion ->
+      ConnectionId addr ->
+      PerasVoteDiffusionOutbound blk m ()
+  , hKeepAliveClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      ConnectionId addr ->
+      TVar.Unchecked.StrictTVar m (Map (ConnectionId addr) PeerGSV) ->
+      KeepAliveInterval ->
+      KeepAliveClient m ()
+  , hKeepAliveServer ::
+      NodeToNodeVersion ->
+      ConnectionId addr ->
+      KeepAliveServer m ()
+  , hPeerSharingClient ::
+      NodeToNodeVersion ->
+      ControlMessageSTM m ->
+      ConnectionId addr ->
+      PeerSharingController addr m ->
+      m (PeerSharingClient addr m ())
+  , hPeerSharingServer ::
+      NodeToNodeVersion ->
+      ConnectionId addr ->
+      PeerSharingServer addr m
+  }
+
+mkHandlers ::
+  forall m blk addrNTN addrNTC.
+  ( IOLike m
+  , MonadTime m
+  , MonadTimer m
+  , HasTxId (GenTx blk)
+  , BlockSupportsPeras blk
+  , LedgerSupportsMempool blk
+  , LedgerSupportsProtocol blk
+  , Ord addrNTN
+  , Hashable addrNTN
+  ) =>
+  NodeKernelArgs m addrNTN addrNTC blk ->
+  NodeKernel m addrNTN addrNTC blk ->
+  TxSubmissionLogicVersion ->
+  Handlers m addrNTN blk
+mkHandlers
+  NodeKernelArgs
+    { chainSyncFutureCheck
+    , chainSyncHistoricityCheck
+    , keepAliveRng
+    , miniProtocolParameters
+    , getDiffusionPipeliningSupport
+    , txSubmissionInitDelay
+    , systemTime
+    }
+  NodeKernel
+    { getChainDB
+    , getMempool
+    , getTopLevelConfig
+    , getTracers = tracers
+    , getPeerSharingAPI
+    , getGsmState
+    }
+  txSubmissionLogicVersion =
+    Handlers
+      { hChainSyncClient = \peer _isBigLedgerpeer dynEnv ->
+          CsClient.chainSyncClient
+            CsClient.ConfigEnv
+              { CsClient.cfg = getTopLevelConfig
+              , CsClient.someHeaderInFutureCheck = chainSyncFutureCheck
+              , CsClient.historicityCheck = chainSyncHistoricityCheck (atomically getGsmState)
+              , CsClient.chainDbView =
+                  CsClient.defaultChainDbView getChainDB
+              , CsClient.mkPipelineDecision0 =
+                  pipelineDecisionLowHighMark
+                    (chainSyncPipeliningLowMark miniProtocolParameters)
+                    (chainSyncPipeliningHighMark miniProtocolParameters)
+              , CsClient.tracer =
+                  contramap (TraceLabelPeer peer) (Node.chainSyncClientTracer tracers)
+              , CsClient.getDiffusionPipeliningSupport = getDiffusionPipeliningSupport
+              }
+            dynEnv
+      , hChainSyncServer = \peer _version ->
+          chainSyncHeadersServer
+            (contramap (TraceLabelPeer peer) (Node.chainSyncServerHeaderTracer tracers))
+            getChainDB
+      , hBlockFetchClient =
+          blockFetchClient
+      , hBlockFetchServer = \peer version ->
+          blockFetchServer
+            (contramap (TraceLabelPeer peer) (Node.blockFetchServerTracer tracers))
+            getChainDB
+            version
+      , hTxSubmissionClient = \version controlMessageSTM peer ->
+          txSubmissionOutbound
+            (contramap (TraceLabelPeer peer) (Node.txOutboundTracer tracers))
+            ( NumTxIdsToAck $
+                getNumTxIdsToReq $
+                  maxUnacknowledgedTxIds $
+                    txDecisionPolicy $
+                      miniProtocolParameters
+            )
+            (mapTxSubmissionMempoolReader txForgetValidated $ getMempoolReader getMempool)
+            version
+            controlMessageSTM
+      , hTxSubmissionServer = \version peer ->
+          case txSubmissionLogicVersion of
+            TxSubmissionLogicV2 ->
+              Right $ \api ->
+                txSubmissionInboundV2
+                  ( contramap
+                      (TraceLabelPeer peer)
+                      (Node.txInboundTracer tracers)
+                  )
+                  txSubmissionInitDelay
+                  (txDecisionPolicy miniProtocolParameters)
+                  (getMempoolWriter getMempool)
+                  txWireSize
+                  api
+            TxSubmissionLogicV1 ->
+              Left $
+                txSubmissionInbound
+                  (contramap (TraceLabelPeer peer) (Node.txInboundTracer tracers))
+                  txSubmissionInitDelay
+                  ( NumTxIdsToAck $
+                      getNumTxIdsToReq $
+                        maxUnacknowledgedTxIds $
+                          txDecisionPolicy $
+                            miniProtocolParameters
+                  )
+                  (mapTxSubmissionMempoolReader txForgetValidated $ getMempoolReader getMempool)
+                  (getMempoolWriter getMempool)
+                  version
+      , hPerasCertDiffusionClient = \version controlMessageSTM peer ->
+          objectDiffusionInbound
+            (contramap (TraceLabelPeer peer) (Node.perasCertDiffusionInboundTracer tracers))
+            ( perasCertDiffusionMaxObjectsUnacknowledged miniProtocolParameters
+            , 10 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            , 10 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            )
+            (makePerasCertPoolWriterFromChainDB systemTime getChainDB)
+            version
+            controlMessageSTM
+      , hPerasCertDiffusionServer = \version peer ->
+          objectDiffusionOutbound
+            (contramap (TraceLabelPeer peer) (Node.perasCertDiffusionOutboundTracer tracers))
+            (perasCertDiffusionMaxObjectsUnacknowledged miniProtocolParameters)
+            (makePerasCertPoolReaderFromChainDB $ getChainDB)
+            version
+      , hPerasVoteDiffusionClient = \version controlMessageSTM peer ->
+          objectDiffusionInbound
+            (contramap (TraceLabelPeer peer) (Node.perasVoteDiffusionInboundTracer tracers))
+            ( perasVoteDiffusionMaxObjectsUnacknowledged miniProtocolParameters
+            , 50 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            , 50 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            )
+            (makePerasVotePoolWriterFromChainDB systemTime getChainDB)
+            version
+            controlMessageSTM
+      , hPerasVoteDiffusionServer = \version peer ->
+          objectDiffusionOutbound
+            (contramap (TraceLabelPeer peer) (Node.perasVoteDiffusionOutboundTracer tracers))
+            (perasVoteDiffusionMaxObjectsUnacknowledged miniProtocolParameters)
+            (makePerasVotePoolReaderFromChainDB $ getChainDB)
+            version
+      , hKeepAliveClient = \_version -> keepAliveClient (Node.keepAliveClientTracer tracers) keepAliveRng
+      , hKeepAliveServer = \_version _peer -> keepAliveServer
+      , hPeerSharingClient = \_version controlMessageSTM _peer -> peerSharingClient controlMessageSTM
+      , hPeerSharingServer = \_version _peer -> peerSharingServer getPeerSharingAPI
+      }
+
+{-------------------------------------------------------------------------------
+  Codecs
+-------------------------------------------------------------------------------}
+
+-- | Node-to-node protocol codecs needed to run 'Handlers'.
+data Codecs blk addr e m bCS bSCS bBF bSBF bTX bPCD bPVD bKA bPS = Codecs
+  { cChainSyncCodec :: Codec (ChainSync (Header blk) (Point blk) (Tip blk)) e m bCS
+  , cChainSyncCodecSerialised ::
+      Codec (ChainSync (SerialisedHeader blk) (Point blk) (Tip blk)) e m bSCS
+  , cBlockFetchCodec :: Codec (BlockFetch blk (Point blk)) e m bBF
+  , cBlockFetchCodecSerialised ::
+      Codec (BlockFetch (Serialised blk) (Point blk)) e m bSBF
+  , cTxSubmission2Codec :: Codec (TxSubmission2 (GenTxId blk) (GenTx blk)) e m bTX
+  , cPerasCertDiffusionCodec :: Codec (PerasCertDiffusion blk) e m bPCD
+  , cPerasVoteDiffusionCodec :: Codec (PerasVoteDiffusion blk) e m bPVD
+  , cKeepAliveCodec :: Codec KeepAlive e m bKA
+  , cPeerSharingCodec :: Codec (PeerSharing addr) e m bPS
+  }
+
+-- | Protocol codecs for the node-to-node protocols
+defaultCodecs ::
+  forall m blk addr.
+  ( IOLike m
+  , SerialiseNodeToNodeConstraints blk
+  ) =>
+  CodecConfig blk ->
+  BlockNodeToNodeVersion blk ->
+  (NodeToNodeVersion -> addr -> CBOR.Encoding) ->
+  (NodeToNodeVersion -> forall s. CBOR.Decoder s addr) ->
+  NodeToNodeVersion ->
+  Codecs
+    blk
+    addr
+    DeserialiseFailure
+    m
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+    ByteString
+defaultCodecs ccfg version encAddr decAddr nodeToNodeVersion =
+  Codecs
+    { cChainSyncCodec =
+        codecChainSync
+          enc
+          dec
+          enc
+          dec
+          enc
+          dec
+    , cChainSyncCodecSerialised =
+        codecChainSync
+          enc
+          dec
+          enc
+          dec
+          enc
+          dec
+    , cBlockFetchCodec =
+        codecBlockFetch
+          enc
+          dec
+          enc
+          dec
+    , cBlockFetchCodecSerialised =
+        codecBlockFetch
+          enc
+          dec
+          enc
+          dec
+    , cTxSubmission2Codec =
+        codecTxSubmission2
+          enc
+          dec
+          enc
+          dec
+    , cPerasCertDiffusionCodec =
+        codecObjectDiffusion
+          enc
+          dec
+          enc
+          dec
+    , cPerasVoteDiffusionCodec =
+        codecObjectDiffusion
+          enc
+          dec
+          enc
+          dec
+    , cKeepAliveCodec = codecKeepAlive_v2
+    , cPeerSharingCodec = codecPeerSharing (encAddr nodeToNodeVersion) (decAddr nodeToNodeVersion)
+    }
+ where
+  enc :: SerialiseNodeToNode blk a => a -> Encoding
+  enc = encodeNodeToNode ccfg version
+
+  dec :: SerialiseNodeToNode blk a => forall s. Decoder s a
+  dec = decodeNodeToNode ccfg version
+
+-- | Identity codecs used in tests.
+identityCodecs ::
+  Monad m =>
+  Codecs
+    blk
+    addr
+    CodecFailure
+    m
+    (AnyMessage (ChainSync (Header blk) (Point blk) (Tip blk)))
+    (AnyMessage (ChainSync (SerialisedHeader blk) (Point blk) (Tip blk)))
+    (AnyMessage (BlockFetch blk (Point blk)))
+    (AnyMessage (BlockFetch (Serialised blk) (Point blk)))
+    (AnyMessage (TxSubmission2 (GenTxId blk) (GenTx blk)))
+    (AnyMessage (PerasCertDiffusion blk))
+    (AnyMessage (PerasVoteDiffusion blk))
+    (AnyMessage KeepAlive)
+    (AnyMessage (PeerSharing addr))
+identityCodecs =
+  Codecs
+    { cChainSyncCodec = codecChainSyncId
+    , cChainSyncCodecSerialised = codecChainSyncId
+    , cBlockFetchCodec = codecBlockFetchId
+    , cBlockFetchCodecSerialised = codecBlockFetchId
+    , cTxSubmission2Codec = codecTxSubmission2Id
+    , cPerasCertDiffusionCodec = codecObjectDiffusionId
+    , cPerasVoteDiffusionCodec = codecObjectDiffusionId
+    , cKeepAliveCodec = codecKeepAliveId
+    , cPeerSharingCodec = codecPeerSharingId
+    }
+
+{-------------------------------------------------------------------------------
+  Tracers
+-------------------------------------------------------------------------------}
+
+-- | A record of 'Tracer's for the different protocols.
+type Tracers m ntnAddr blk e =
+  Tracers' (ConnectionId ntnAddr) ntnAddr blk e (Tracer m)
+
+data Tracers' peer ntnAddr blk e f = Tracers
+  { tChainSyncTracer ::
+      f (TraceLabelPeer peer (TraceSendRecv (ChainSync (Header blk) (Point blk) (Tip blk))))
+  , tChainSyncSerialisedTracer ::
+      f (TraceLabelPeer peer (TraceSendRecv (ChainSync (SerialisedHeader blk) (Point blk) (Tip blk))))
+  , tBlockFetchTracer :: f (TraceLabelPeer peer (TraceSendRecv (BlockFetch blk (Point blk))))
+  , tBlockFetchSerialisedTracer ::
+      f (TraceLabelPeer peer (TraceSendRecv (BlockFetch (Serialised blk) (Point blk))))
+  , tTxSubmission2Tracer ::
+      f (TraceLabelPeer peer (TraceSendRecv (TxSubmission2 (GenTxId blk) (GenTx blk))))
+  , tPerasCertDiffusionTracer :: f (TraceLabelPeer peer (TraceSendRecv (PerasCertDiffusion blk)))
+  , tPerasVoteDiffusionTracer :: f (TraceLabelPeer peer (TraceSendRecv (PerasVoteDiffusion blk)))
+  , tKeepAliveTracer :: f (TraceLabelPeer peer (TraceSendRecv KeepAlive))
+  , tPeerSharingTracer :: f (TraceLabelPeer peer (TraceSendRecv (PeerSharing ntnAddr)))
+  }
+
+instance (forall a. Semigroup (f a)) => Semigroup (Tracers' peer ntnAddr blk e f) where
+  l <> r =
+    Tracers
+      { tChainSyncTracer = f tChainSyncTracer
+      , tChainSyncSerialisedTracer = f tChainSyncSerialisedTracer
+      , tBlockFetchTracer = f tBlockFetchTracer
+      , tBlockFetchSerialisedTracer = f tBlockFetchSerialisedTracer
+      , tTxSubmission2Tracer = f tTxSubmission2Tracer
+      , tPerasCertDiffusionTracer = f tPerasCertDiffusionTracer
+      , tPerasVoteDiffusionTracer = f tPerasVoteDiffusionTracer
+      , tKeepAliveTracer = f tKeepAliveTracer
+      , tPeerSharingTracer = f tPeerSharingTracer
+      }
+   where
+    f ::
+      forall a.
+      Semigroup a =>
+      (Tracers' peer ntnAddr blk e f -> a) ->
+      a
+    f prj = prj l <> prj r
+
+-- | Use a 'nullTracer' for each protocol.
+nullTracers :: Monad m => Tracers m ntnAddr blk e
+nullTracers =
+  Tracers
+    { tChainSyncTracer = nullTracer
+    , tChainSyncSerialisedTracer = nullTracer
+    , tBlockFetchTracer = nullTracer
+    , tBlockFetchSerialisedTracer = nullTracer
+    , tTxSubmission2Tracer = nullTracer
+    , tPerasCertDiffusionTracer = nullTracer
+    , tPerasVoteDiffusionTracer = nullTracer
+    , tKeepAliveTracer = nullTracer
+    , tPeerSharingTracer = nullTracer
+    }
+
+showTracers ::
+  ( Monad m
+  , Show blk
+  , Show ntnAddr
+  , Show (Header blk)
+  , Show (GenTx blk)
+  , Show (GenTxId blk)
+  , Show (PerasVote blk)
+  , Show (PerasCert blk)
+  , HasHeader blk
+  , HasNestedContent Header blk
+  ) =>
+  Tracer m String -> Tracers m ntnAddr blk e
+showTracers tr =
+  Tracers
+    { tChainSyncTracer = show >$< tr
+    , tChainSyncSerialisedTracer = show >$< tr
+    , tBlockFetchTracer = show >$< tr
+    , tBlockFetchSerialisedTracer = show >$< tr
+    , tTxSubmission2Tracer = show >$< tr
+    , tPerasCertDiffusionTracer = show >$< tr
+    , tPerasVoteDiffusionTracer = show >$< tr
+    , tKeepAliveTracer = show >$< tr
+    , tPeerSharingTracer = show >$< tr
+    }
+
+{-------------------------------------------------------------------------------
+  Applications
+-------------------------------------------------------------------------------}
+
+-- | A node-to-node application
+type ClientApp m addr bytes a =
+  NodeToNodeVersion ->
+  ExpandedInitiatorContext addr PeerTrustable m ->
+  Channel m bytes ->
+  m (a, Maybe bytes)
+
+type ServerApp m addr bytes a =
+  NodeToNodeVersion ->
+  ResponderContext addr ->
+  Channel m bytes ->
+  m (a, Maybe bytes)
+
+-- | Applications for the node-to-node protocols
+--
+-- See 'Network.Mux.Types.MuxApplication'
+data Apps m addr bCS bBF bTX bPCD bPVD bKA bPS a b = Apps
+  { aChainSyncClient :: ClientApp m addr bCS a
+  -- ^ Start a chain sync client that communicates with the given upstream
+  -- node.
+  , aChainSyncServer :: ServerApp m addr bCS b
+  -- ^ Start a chain sync server.
+  , aBlockFetchClient :: ClientApp m addr bBF a
+  -- ^ Start a block fetch client that communicates with the given
+  -- upstream node.
+  , aBlockFetchServer :: ServerApp m addr bBF b
+  -- ^ Start a block fetch server.
+  , aTxSubmission2Client :: ClientApp m addr bTX a
+  -- ^ Start a transaction submission v2 client that communicates with the
+  -- given upstream node.
+  , aTxSubmission2Server :: ServerApp m addr bTX b
+  -- ^ Start a transaction submission v2 server.
+  , aPerasCertDiffusionClient :: ClientApp m addr bPCD a
+  -- ^ Start a Peras cert diffusion client.
+  , aPerasCertDiffusionServer :: ServerApp m addr bPCD b
+  -- ^ Start a Peras cert diffusion server.
+  , aPerasVoteDiffusionClient :: ClientApp m addr bPVD a
+  -- ^ Start a Peras vote diffusion client.
+  , aPerasVoteDiffusionServer :: ServerApp m addr bPVD b
+  -- ^ Start a Peras vote diffusion server.
+  , aKeepAliveClient :: ClientApp m addr bKA a
+  -- ^ Start a keep-alive client.
+  , aKeepAliveServer :: ServerApp m addr bKA b
+  -- ^ Start a keep-alive server.
+  , aPeerSharingClient :: ClientApp m addr bPS a
+  -- ^ Start a peer-sharing client.
+  , aPeerSharingServer :: ServerApp m addr bPS b
+  -- ^ Start a peer-sharing server.
+  }
+
+-- | Per mini-protocol byte limits;  For each mini-protocol they provide
+-- per-state byte size limits, i.e. how much data can arrive from the network.
+--
+-- They don't depend on the instantiation of the protocol parameters (which
+-- block type is used, etc.), hence the use of 'RankNTypes'.
+data ByteLimits bCS bBF bTX bPCD bPVD bKA bPS = ByteLimits
+  { blChainSync ::
+      forall header point tip.
+      ProtocolSizeLimits
+        (ChainSync header point tip)
+        bCS
+  , blBlockFetch ::
+      forall block point.
+      ProtocolSizeLimits
+        (BlockFetch block point)
+        bBF
+  , blTxSubmission2 ::
+      forall txid tx.
+      ProtocolSizeLimits
+        (TxSubmission2 txid tx)
+        bTX
+  , blPerasCertDiffusion ::
+      forall blk.
+      ProtocolSizeLimits
+        (PerasCertDiffusion blk)
+        bPCD
+  , blPerasVoteDiffusion ::
+      forall blk.
+      ProtocolSizeLimits
+        (PerasVoteDiffusion blk)
+        bPVD
+  , blKeepAlive ::
+      ProtocolSizeLimits
+        KeepAlive
+        bKA
+  , blPeerSharing ::
+      forall addr.
+      ProtocolSizeLimits
+        (PeerSharing addr)
+        bPS
+  }
+
+noByteLimits :: ByteLimits bCS bBF bTX bPCD bPVD bKA bPS
+noByteLimits =
+  ByteLimits
+    { blChainSync = byteLimitsChainSync (const 0)
+    , blBlockFetch = byteLimitsBlockFetch (const 0)
+    , blTxSubmission2 = byteLimitsTxSubmission2 (const 0)
+    , blPerasCertDiffusion = byteLimitsObjectDiffusion (const 0)
+    , blPerasVoteDiffusion = byteLimitsObjectDiffusion (const 0)
+    , blKeepAlive = byteLimitsKeepAlive (const 0)
+    , blPeerSharing = byteLimitsPeerSharing (const 0)
+    }
+
+byteLimits ::
+  ByteLimits ByteString ByteString ByteString ByteString ByteString ByteString ByteString
+byteLimits =
+  ByteLimits
+    { blChainSync = byteLimitsChainSync size
+    , blBlockFetch = byteLimitsBlockFetch size
+    , blTxSubmission2 = byteLimitsTxSubmission2 size
+    , blPerasCertDiffusion = byteLimitsObjectDiffusion size
+    , blPerasVoteDiffusion = byteLimitsObjectDiffusion size
+    , blKeepAlive = byteLimitsKeepAlive size
+    , blPeerSharing = byteLimitsPeerSharing size
+    }
+ where
+  size :: ByteString -> Word
+  size =
+    (fromIntegral :: Int64 -> Word)
+      . BSL.length
+
+-- | Construct the 'NetworkApplication' for the node-to-node protocols
+mkApps ::
+  forall m addrNTN addrNTC blk e bCS bBF bTX bPCD bPVD bKA bPS.
+  ( IOLike m
+  , MonadTimer m
+  , Ord addrNTN
+  , Exception e
+  , NFData e
+  , LedgerSupportsProtocol blk
+  , BlockSupportsPeras blk
+  , ShowProxy blk
+  , ShowProxy (Header blk)
+  , ShowProxy (TxId (GenTx blk))
+  , ShowProxy (GenTx blk)
+  , ShowProxy (PerasVote blk)
+  , ShowProxy (PerasCert blk)
+  , Show addrNTN
+  , LedgerSupportsMempool blk
+  , HasTxId (GenTx blk)
+  , HasRawTxId (GenTxId blk)
+  ) =>
+  -- | Needed for bracketing only
+  NodeKernel m addrNTN addrNTC blk ->
+  StdGen ->
+  Tracers m addrNTN blk e ->
+  (NodeToNodeVersion -> Codecs blk addrNTN e m bCS bCS bBF bBF bTX bPCD bPVD bKA bPS) ->
+  ByteLimits bCS bBF bTX bPCD bPVD bKA bPS ->
+  -- Chain-Sync timeouts for chain-sync client (using `Header blk`) as well as
+  -- the server (`SerialisedHeader blk`).
+  (forall header. PeerTrustable -> ProtocolTimeLimitsWithRnd (ChainSync header (Point blk) (Tip blk))) ->
+  CsClient.ChainSyncLoPBucketConfig ->
+  CsClient.CSJConfig ->
+  ReportPeerMetrics m (ConnectionId addrNTN) ->
+  Handlers m addrNTN blk ->
+  Apps m addrNTN bCS bBF bTX bPCD bPVD bKA bPS NodeToNodeInitiatorResult ()
+mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucketConfig csjConfig ReportPeerMetrics{..} Handlers{..} =
+  Apps{..}
+ where
+  (chainSyncRng, chainSyncRng') = splitGen rng
+  NodeKernel{getDiffusionPipeliningSupport} = kernel
+
+  aChainSyncClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bCS ->
+    m (NodeToNodeInitiatorResult, Maybe bCS)
+  aChainSyncClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      , eicIsBigLedgerPeer = isBigLedgerPeer
+      , eicExtraFlags = peerTrustable
+      }
+    channel = do
+      labelThisThread "ChainSyncClient"
+      -- Note that it is crucial that we sync with the fetch client "outside"
+      -- of registering the state for the sync client. This is needed to
+      -- maintain a state invariant required by the block fetch logic: that for
+      -- each candidate chain there is a corresponding block fetch client that
+      -- can be used to fetch blocks for that chain.
+      bracketSyncWithFetchClient
+        (getFetchClientRegistry kernel)
+        them
+        $ CsClient.bracketChainSyncClient
+          (contramap (TraceLabelPeer them) (Node.chainSyncClientTracer (getTracers kernel)))
+          (contramap (TraceLabelPeer them) (Node.csjTracer (getTracers kernel)))
+          (CsClient.defaultChainDbView (getChainDB kernel))
+          (getChainSyncHandles kernel)
+          (getGsmState kernel)
+          them
+          version
+          lopBucketConfig
+          csjConfig
+          getDiffusionPipeliningSupport
+        $ \csState -> do
+          (r, trailing) <-
+            runPipelinedPeerWithLimitsRnd
+              (contramap (TraceLabelPeer them) tChainSyncTracer)
+              chainSyncRng
+              (cChainSyncCodec (mkCodecs version))
+              blChainSync
+              (chainSyncTimeouts peerTrustable)
+              channel
+              $ chainSyncClientPeerPipelined
+              $ hChainSyncClient
+                them
+                isBigLedgerPeer
+                CsClient.DynamicEnv
+                  { CsClient.version
+                  , CsClient.controlMessageSTM
+                  , CsClient.headerMetricsTracer = TraceLabelPeer them `contramap` reportHeader
+                  , CsClient.setCandidate = csvSetCandidate csState
+                  , CsClient.idling = csvIdling csState
+                  , CsClient.loPBucket = csvLoPBucket csState
+                  , CsClient.setLatestSlot = csvSetLatestSlot csState
+                  , CsClient.jumping = csvJumping csState
+                  }
+          return (ChainSyncInitiatorResult r, trailing)
+
+  aChainSyncServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bCS ->
+    m ((), Maybe bCS)
+  aChainSyncServer version ResponderContext{rcConnectionId = them} channel = do
+    labelThisThread "ChainSyncServer"
+    bracketWithPrivateRegistry
+      ( chainSyncHeaderServerFollower
+          (getChainDB kernel)
+          ( case getDiffusionPipeliningSupport of
+              DiffusionPipeliningOn -> ChainDB.TentativeChain
+              DiffusionPipeliningOff -> ChainDB.SelectedChain
+          )
+      )
+      ChainDB.followerClose
+      $ \flr ->
+        runPeerWithLimitsRnd
+          (contramap (TraceLabelPeer them) tChainSyncSerialisedTracer)
+          chainSyncRng'
+          (cChainSyncCodecSerialised (mkCodecs version))
+          blChainSync
+          (chainSyncTimeouts IsNotTrustable)
+          channel
+          $ chainSyncServerPeer
+          $ hChainSyncServer them version flr
+
+  aBlockFetchClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bBF ->
+    m (NodeToNodeInitiatorResult, Maybe bBF)
+  aBlockFetchClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "BlockFetchClient"
+      bracketFetchClient
+        (getFetchClientRegistry kernel)
+        (getKeepAliveRegistry kernel)
+        version
+        them
+        $ \clientCtx -> do
+          ((), trailing) <-
+            runPipelinedPeerWithLimits
+              (contramap (TraceLabelPeer them) tBlockFetchTracer)
+              (cBlockFetchCodec (mkCodecs version))
+              blBlockFetch
+              timeLimitsBlockFetch
+              channel
+              $ hBlockFetchClient
+                version
+                controlMessageSTM
+                (TraceLabelPeer them `contramap` reportFetch)
+                clientCtx
+          return (NoInitiatorResult, trailing)
+
+  aBlockFetchServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bBF ->
+    m ((), Maybe bBF)
+  aBlockFetchServer version ResponderContext{rcConnectionId = them} channel = do
+    labelThisThread "BlockFetchServer"
+    withRegistry $ \registry ->
+      runPeerWithLimits
+        (contramap (TraceLabelPeer them) tBlockFetchSerialisedTracer)
+        (cBlockFetchCodecSerialised (mkCodecs version))
+        blBlockFetch
+        timeLimitsBlockFetch
+        channel
+        $ blockFetchServerPeer
+        $ hBlockFetchServer them version registry
+
+  aTxSubmission2Client ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bTX ->
+    m (NodeToNodeInitiatorResult, Maybe bTX)
+  aTxSubmission2Client
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "TxSubmissionClient"
+      ((), trailing) <-
+        runPeerWithLimits
+          (contramap (TraceLabelPeer them) tTxSubmission2Tracer)
+          (cTxSubmission2Codec (mkCodecs version))
+          blTxSubmission2
+          timeLimitsTxSubmission2
+          channel
+          (txSubmissionClientPeer (hTxSubmissionClient version controlMessageSTM them))
+      return (NoInitiatorResult, trailing)
+
+  aTxSubmission2Server ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bTX ->
+    m ((), Maybe bTX)
+  aTxSubmission2Server version ResponderContext{rcConnectionId = them} channel = do
+    labelThisThread "TxSubmissionServer"
+
+    let runServer serverApi =
+          runPipelinedPeerWithLimits
+            (contramap (TraceLabelPeer them) tTxSubmission2Tracer)
+            (cTxSubmission2Codec (mkCodecs version))
+            blTxSubmission2
+            timeLimitsTxSubmission2
+            channel
+            (txSubmissionServerPeerPipelined serverApi)
+
+    case hTxSubmissionServer version them of
+      Left legacyTxSubmissionServer ->
+        runServer legacyTxSubmissionServer
+      Right newTxSubmissionServer ->
+        withPeer
+          (getTxDecisionPolicy kernel)
+          ( mapTxSubmissionMempoolReader txForgetValidated $
+              getMempoolReader (getMempool kernel)
+          )
+          (getSharedTxStateVar kernel)
+          (getPeerTxRegistry kernel)
+          (getTxCountersVar kernel)
+          them
+          $ \api ->
+            runServer (newTxSubmissionServer api)
+
+  aPerasCertDiffusionClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bPCD ->
+    m (NodeToNodeInitiatorResult, Maybe bPCD)
+  aPerasCertDiffusionClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "PerasCertDiffusionClient"
+      ((), trailing) <-
+        runPipelinedPeerWithLimits
+          (TraceLabelPeer them `contramap` tPerasCertDiffusionTracer)
+          (cPerasCertDiffusionCodec (mkCodecs version))
+          blPerasCertDiffusion
+          timeLimitsObjectDiffusion
+          channel
+          ( objectDiffusionInboundPeerPipelined
+              (hPerasCertDiffusionClient version controlMessageSTM them)
+          )
+      return (NoInitiatorResult, trailing)
+
+  aPerasCertDiffusionServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bPCD ->
+    m ((), Maybe bPCD)
+  aPerasCertDiffusionServer
+    version
+    ResponderContext{rcConnectionId = them}
+    channel = do
+      labelThisThread "PerasCertDiffusionServer"
+      runPeerWithLimits
+        (TraceLabelPeer them `contramap` tPerasCertDiffusionTracer)
+        (cPerasCertDiffusionCodec (mkCodecs version))
+        blPerasCertDiffusion
+        timeLimitsObjectDiffusion
+        channel
+        ( objectDiffusionOutboundPeer
+            (hPerasCertDiffusionServer version them)
+        )
+
+  aPerasVoteDiffusionClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bPVD ->
+    m (NodeToNodeInitiatorResult, Maybe bPVD)
+  aPerasVoteDiffusionClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "PerasVoteDiffusionClient"
+      ((), trailing) <-
+        runPipelinedPeerWithLimits
+          (TraceLabelPeer them `contramap` tPerasVoteDiffusionTracer)
+          (cPerasVoteDiffusionCodec (mkCodecs version))
+          blPerasVoteDiffusion
+          timeLimitsObjectDiffusion
+          channel
+          ( objectDiffusionInboundPeerPipelined
+              (hPerasVoteDiffusionClient version controlMessageSTM them)
+          )
+      return (NoInitiatorResult, trailing)
+
+  aPerasVoteDiffusionServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bPVD ->
+    m ((), Maybe bPVD)
+  aPerasVoteDiffusionServer
+    version
+    ResponderContext{rcConnectionId = them}
+    channel = do
+      labelThisThread "PerasVoteDiffusionServer"
+      runPeerWithLimits
+        (TraceLabelPeer them `contramap` tPerasVoteDiffusionTracer)
+        (cPerasVoteDiffusionCodec (mkCodecs version))
+        blPerasVoteDiffusion
+        timeLimitsObjectDiffusion
+        channel
+        ( objectDiffusionOutboundPeer
+            (hPerasVoteDiffusionServer version them)
+        )
+
+  aKeepAliveClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bKA ->
+    m (NodeToNodeInitiatorResult, Maybe bKA)
+  aKeepAliveClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "KeepAliveClient"
+      let kacApp = \dqCtx ->
+            runPeerWithLimits
+              (TraceLabelPeer them `contramap` tKeepAliveTracer)
+              (cKeepAliveCodec (mkCodecs version))
+              blKeepAlive
+              timeLimitsKeepAlive
+              channel
+              $ keepAliveClientPeer
+              $ hKeepAliveClient
+                version
+                controlMessageSTM
+                them
+                dqCtx
+                (KeepAliveInterval 10)
+
+      ((), trailing) <-
+        bracketKeepAliveClient (getKeepAliveRegistry kernel) them kacApp
+      return (NoInitiatorResult, trailing)
+
+  aKeepAliveServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bKA ->
+    m ((), Maybe bKA)
+  aKeepAliveServer version ResponderContext{rcConnectionId = them} channel = do
+    labelThisThread "KeepAliveServer"
+    runPeerWithLimits
+      (TraceLabelPeer them `contramap` tKeepAliveTracer)
+      (cKeepAliveCodec (mkCodecs version))
+      blKeepAlive
+      timeLimitsKeepAlive
+      channel
+      $ keepAliveServerPeer
+      $ keepAliveServer
+
+  aPeerSharingClient ::
+    NodeToNodeVersion ->
+    ExpandedInitiatorContext addrNTN PeerTrustable m ->
+    Channel m bPS ->
+    m (NodeToNodeInitiatorResult, Maybe bPS)
+  aPeerSharingClient
+    version
+    ExpandedInitiatorContext
+      { eicConnectionId = them
+      , eicControlMessage = controlMessageSTM
+      }
+    channel = do
+      labelThisThread "PeerSharingClient"
+      bracketPeerSharingClient (getPeerSharingRegistry kernel) (remoteAddress them) $
+        \controller -> do
+          psClient <- hPeerSharingClient version controlMessageSTM them controller
+          ((), trailing) <-
+            runPeerWithLimits
+              (TraceLabelPeer them `contramap` tPeerSharingTracer)
+              (cPeerSharingCodec (mkCodecs version))
+              blPeerSharing
+              timeLimitsPeerSharing
+              channel
+              (peerSharingClientPeer psClient)
+          return (NoInitiatorResult, trailing)
+
+  aPeerSharingServer ::
+    NodeToNodeVersion ->
+    ResponderContext addrNTN ->
+    Channel m bPS ->
+    m ((), Maybe bPS)
+  aPeerSharingServer version ResponderContext{rcConnectionId = them} channel = do
+    labelThisThread "PeerSharingServer"
+    runPeerWithLimits
+      (TraceLabelPeer them `contramap` tPeerSharingTracer)
+      (cPeerSharingCodec (mkCodecs version))
+      blPeerSharing
+      timeLimitsPeerSharing
+      channel
+      $ peerSharingServerPeer
+      $ hPeerSharingServer version them
+
+{-------------------------------------------------------------------------------
+  Projections from 'Apps'
+-------------------------------------------------------------------------------}
+
+-- | A projection from 'NetworkApplication' to a client-side
+-- 'OuroborosApplication' for the node-to-node protocols.
+--
+-- Implementation note: network currently doesn't enable protocols conditional
+-- on the protocol version, but it eventually may; this is why @_version@ is
+-- currently unused.
+initiator ::
+  Set CardanoFeatureFlag ->
+  MiniProtocolParameters ->
+  NodeToNodeVersion ->
+  NodeToNodeVersionData ->
+  Apps m addr b b b b b b b a c ->
+  OuroborosBundleWithExpandedCtx 'Mux.InitiatorMode addr PeerTrustable b m a Void
+initiator featureFlags miniProtocolParameters version versionData Apps{..} =
+  nodeToNodeProtocols
+    featureFlags
+    miniProtocolParameters
+    -- TODO: currently consensus is using 'ConnectionId' for its 'peer' type.
+    -- This is currently ok, as we might accept multiple connections from the
+    -- same ip address, however this will change when we will switch to
+    -- p2p-governor & connection-manager.  Then consensus can use peer's ip
+    -- address & port number, rather than 'ConnectionId' (which is
+    -- a quadruple uniquely determining a connection).
+    ( NodeToNodeProtocols
+        { chainSyncProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aChainSyncClient version ctx)))
+        , blockFetchProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aBlockFetchClient version ctx)))
+        , txSubmissionProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aTxSubmission2Client version ctx)))
+        , perasCertDiffusionProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aPerasCertDiffusionClient version ctx)))
+        , perasVoteDiffusionProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aPerasVoteDiffusionClient version ctx)))
+        , keepAliveProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aKeepAliveClient version ctx)))
+        , peerSharingProtocol =
+            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aPeerSharingClient version ctx)))
+        }
+    )
+    version
+    versionData
+
+-- | A bi-directional network application.
+--
+-- Implementation note: network currently doesn't enable protocols conditional
+-- on the protocol version, but it eventually may; this is why @_version@ is
+-- currently unused.
+initiatorAndResponder ::
+  Set CardanoFeatureFlag ->
+  MiniProtocolParameters ->
+  NodeToNodeVersion ->
+  NodeToNodeVersionData ->
+  Apps m addr b b b b b b b a c ->
+  OuroborosBundleWithExpandedCtx 'Mux.InitiatorResponderMode addr PeerTrustable b m a c
+initiatorAndResponder featureFlags miniProtocolParameters version versionData Apps{..} =
+  nodeToNodeProtocols
+    featureFlags
+    miniProtocolParameters
+    ( NodeToNodeProtocols
+        { chainSyncProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aChainSyncClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aChainSyncServer version responderCtx))
+            )
+        , blockFetchProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aBlockFetchClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aBlockFetchServer version responderCtx))
+            )
+        , txSubmissionProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aTxSubmission2Client version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aTxSubmission2Server version responderCtx))
+            )
+        , perasCertDiffusionProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aPerasCertDiffusionClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aPerasCertDiffusionServer version responderCtx))
+            )
+        , perasVoteDiffusionProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aPerasVoteDiffusionClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aPerasVoteDiffusionServer version responderCtx))
+            )
+        , keepAliveProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aKeepAliveClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aKeepAliveServer version responderCtx))
+            )
+        , peerSharingProtocol =
+            ( InitiatorAndResponderProtocol
+                (MiniProtocolCb (\initiatorCtx -> aPeerSharingClient version initiatorCtx))
+                (MiniProtocolCb (\responderCtx -> aPeerSharingServer version responderCtx))
+            )
+        }
+    )
+    version
+    versionData

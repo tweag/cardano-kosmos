@@ -1,0 +1,278 @@
+{-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Test.Consensus.PeerSimulator.NodeLifecycle
+  ( LiveInterval (..)
+  , LiveIntervalResult (..)
+  , LiveNode (..)
+  , LiveResources (..)
+  , NodeLifecycle (..)
+  , lifecycleStart
+  , lifecycleStop
+  , restoreNode
+  ) where
+
+import Control.ResourceRegistry
+import Control.Tracer (Tracer, mkTracer, traceWith)
+import Data.Functor (void)
+import Data.SOP (All, Top)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Typeable (Typeable)
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.Config (TopLevelConfig (..))
+import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory (..))
+import Ouroboros.Consensus.HeaderValidation (HeaderWithTime (..))
+import Ouroboros.Consensus.Ledger.Basics (LedgerState)
+import Ouroboros.Consensus.Ledger.Extended (ExtLedgerState)
+import Ouroboros.Consensus.Ledger.Inspect (InspectLedger)
+import Ouroboros.Consensus.Ledger.SupportsProtocol
+  ( LedgerSupportsProtocol
+  )
+import Ouroboros.Consensus.Ledger.Tables.MapKind (ValuesMK)
+import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
+  ( ChainSyncClientHandleCollection (..)
+  )
+import Ouroboros.Consensus.Peras.Context (StateSupportsPerasEpochContext)
+import Ouroboros.Consensus.Storage.ChainDB.API
+import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
+import qualified Ouroboros.Consensus.Storage.ChainDB.Impl as ChainDB
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Args
+  ( cdbsLoE
+  , updateTracer
+  )
+import Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal
+  ( ChunkInfo
+  )
+import Ouroboros.Consensus.Storage.LedgerDB.API
+  ( CanUpgradeLedgerTables
+  )
+import Ouroboros.Consensus.Util.IOLike
+import Ouroboros.Network.AnchoredFragment (AnchoredFragment)
+import qualified Ouroboros.Network.AnchoredFragment as AF
+import System.FS.Sim.MockFS (MockFS)
+import qualified System.FS.Sim.MockFS as MockFS
+import Test.Consensus.PeerSimulator.Resources
+import Test.Consensus.PeerSimulator.StateView
+import Test.Consensus.PeerSimulator.Trace
+import Test.Consensus.PointSchedule.Peers (PeerId)
+import Test.Util.ChainDB
+import Test.Util.Orphans.IOLike ()
+
+-- | Resources used for a single live interval of the node, constructed when the
+-- node is started.
+-- When the node is shut down, 'lnCopyToImmDb' is used to persist the current
+-- chain.
+data LiveNode blk m = LiveNode
+  { lnChainDb :: ChainDB m blk
+  , lnStateViewTracers :: StateViewTracers blk m
+  , lnStateTracer :: Tracer m ()
+  , lnCopyToImmDb :: m (WithOrigin SlotNo)
+  -- ^ Write persistent ChainDB state (the immutable and volatile DBs, but not
+  -- the ledger and GSM state) to the VFS TVars to preserve it for the next
+  -- interval.
+  -- Returns the immutable tip's slot for tracing.
+  , lnPeers :: Set PeerId
+  -- ^ The set of peers that should be started.
+  -- Based on the simulation results at node shutdown, disconnected peers are
+  -- removed for the next live interval.
+  }
+
+-- | Result of a node shutdown at the end of a live interval.
+data LiveIntervalResult blk = LiveIntervalResult
+  { lirPeerResults :: [PeerSimulatorResult blk]
+  -- ^ Used to initialize the 'StateViewTracers' of the next run to preserve
+  -- earlier disconnections for the final result.
+  , lirActive :: Set PeerId
+  -- ^ The remaining peers, computed by removing all peers present in
+  -- 'lrPeerResults' from the current state in 'lnPeers'.
+  }
+
+-- | Resources used by the handlers 'lifecycleStart' and 'lifecycleStop' to
+-- shut down running components, construct tracers used for single intervals,
+-- and reset and persist state.
+data LiveResources blk m = LiveResources
+  { lrRegistry :: ResourceRegistry m
+  , lrPeerSim :: PeerSimulatorResources m blk
+  , lrTracer :: Tracer m (TraceEvent blk)
+  , lrSTracer :: ChainDB m blk -> m (Tracer m ())
+  , lrConfig :: TopLevelConfig blk
+  , lrChunkInfo :: ChunkInfo
+  , lrInitLedger :: ExtLedgerState blk ValuesMK
+  , lrCdb :: NodeDBs (StrictTMVar m MockFS)
+  -- ^ The chain DB state consists of several transient parts and the
+  -- immutable DB's virtual file system.
+  -- After 'lnCopyToImmDb' was executed, the latter will contain the final
+  -- state of an interval.
+  -- The rest is reset when the chain DB is recreated.
+  , lrLoEVar :: LoE (StrictTVar m (AnchoredFragment (HeaderWithTime blk)))
+  -- ^ The LoE fragment must be reset for each live interval.
+  }
+
+data LiveInterval blk m = LiveInterval
+  { liResources :: LiveResources blk m
+  , liResult :: LiveIntervalResult blk
+  , liNode :: LiveNode blk m
+  }
+
+-- | Handlers for starting the node and shutting it down for each live interval,
+-- using the state of the previous run.
+data NodeLifecycle blk m = NodeLifecycle
+  { nlMinDuration :: Maybe DiffTime
+  -- ^ The minimum tick duration that triggers a node downtime.
+  -- If this is 'Nothing', downtimes are disabled.
+  , nlStart :: LiveIntervalResult blk -> m (LiveNode blk m)
+  -- ^ Start the node with prior state.
+  -- For the first start, this must be called with an empty 'lirPeerResults'
+  -- and the initial set of all peers in 'lirActive'.
+  , nlShutdown :: LiveNode blk m -> m (LiveIntervalResult blk)
+  }
+
+-- | Create a ChainDB and start a BlockRunner that operate on the peers'
+-- candidate fragments.
+mkChainDb ::
+  IOLike m =>
+  ( All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , ChainDB.SerialiseDiskConstraints blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , CanUpgradeLedgerTables LedgerState blk
+  ) =>
+  LiveResources blk m ->
+  m (ChainDB m blk, m (WithOrigin SlotNo))
+mkChainDb resources = do
+  atomically $ do
+    -- Reset only the non-persisted state of the ChainDB's file system mocks:
+    -- - GSM state and Ledger DB are discarded
+    -- - Immutable DB and Volatile DB are preserved for the next interval
+    void $ swapTMVar (nodeDBsGsm lrCdb) MockFS.empty
+    void $ swapTMVar (nodeDBsLgr lrCdb) MockFS.empty
+  chainDbArgs <- do
+    let args =
+          updateTracer
+            (mkTracer (traceWith lrTracer . TraceChainDBEvent))
+            ( fromMinimalChainDbArgs
+                MinimalChainDbArgs
+                  { mcdbTopLevelConfig = lrConfig
+                  , mcdbChunkInfo = lrChunkInfo
+                  , mcdbInitLedger = lrInitLedger
+                  , mcdbRegistry = lrRegistry
+                  , mcdbNodeDBs = lrCdb
+                  }
+            )
+    pure $
+      args
+        { ChainDB.cdbsArgs =
+            (ChainDB.cdbsArgs args)
+              { cdbsLoE = traverse readTVarIO lrLoEVar
+              }
+        }
+  (_, (chainDB, internal)) <-
+    allocate
+      lrRegistry
+      (\_ -> ChainDB.openDBInternal chainDbArgs False)
+      (ChainDB.closeDB . fst)
+  let ChainDB.Internal{intCopyToImmutableDB, intAddBlockRunner} = internal
+  void $ forkLinkedThread lrRegistry "AddBlockRunner" (void intAddBlockRunner)
+  pure (chainDB, intCopyToImmutableDB)
+ where
+  LiveResources{lrRegistry, lrTracer, lrConfig, lrCdb, lrLoEVar, lrChunkInfo, lrInitLedger} = resources
+
+-- | Allocate all the resources that depend on the results of previous live
+-- intervals, the ChainDB and its persisted state.
+restoreNode ::
+  ( IOLike m
+  , All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , ChainDB.SerialiseDiskConstraints blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , CanUpgradeLedgerTables LedgerState blk
+  ) =>
+  LiveResources blk m ->
+  LiveIntervalResult blk ->
+  m (LiveNode blk m)
+restoreNode resources LiveIntervalResult{lirPeerResults, lirActive} = do
+  lnStateViewTracers <- stateViewTracersWithInitial lirPeerResults
+  (lnChainDb, lnCopyToImmDb) <- mkChainDb resources
+  lnStateTracer <- lrSTracer resources lnChainDb
+  pure
+    LiveNode
+      { lnChainDb
+      , lnStateViewTracers
+      , lnStateTracer
+      , lnCopyToImmDb
+      , lnPeers = lirActive
+      }
+
+-- | Allocate resources with 'restoreNode' and pass them to the callback that
+-- starts the node's threads.
+lifecycleStart ::
+  forall m blk.
+  ( IOLike m
+  , All Top (HardForkIndices blk)
+  , LedgerSupportsProtocol blk
+  , StateSupportsPerasEpochContext blk
+  , ChainDB.SerialiseDiskConstraints blk
+  , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsPeras blk
+  , InspectLedger blk
+  , ConvertRawHash blk
+  , CanUpgradeLedgerTables LedgerState blk
+  ) =>
+  (LiveInterval blk m -> m ()) ->
+  LiveResources blk m ->
+  LiveIntervalResult blk ->
+  m (LiveNode blk m)
+lifecycleStart start liResources liResult = do
+  trace (TraceSchedulerEvent TraceNodeStartupStart)
+  liNode <- restoreNode liResources liResult
+  start LiveInterval{liResources, liResult, liNode}
+  chain <- atomically (ChainDB.getCurrentChain (lnChainDb liNode))
+  trace (TraceSchedulerEvent (TraceNodeStartupComplete chain))
+  pure liNode
+ where
+  trace = traceWith (lrTracer liResources)
+
+-- | Shut down the node by killing all its threads after extracting the
+-- persistent state used to restart the node later.
+lifecycleStop ::
+  (IOLike m, GetHeader blk, Typeable blk) =>
+  LiveResources blk m ->
+  LiveNode blk m ->
+  m (LiveIntervalResult blk)
+lifecycleStop resources LiveNode{lnStateViewTracers, lnCopyToImmDb, lnPeers} = do
+  -- Trigger writing the immutable tip to the MockFS in our TVar for restoring in 'startNode'
+  immutableTip <- lnCopyToImmDb
+  trace (TraceSchedulerEvent (TraceNodeShutdownStart immutableTip))
+  -- Remember which peers were still running before shutdown
+  lirPeerResults <- svtGetPeerSimulatorResults lnStateViewTracers
+  let disconnectedPeers = Set.fromList (psePeerId <$> lirPeerResults)
+      lirActive = lnPeers Set.\\ disconnectedPeers
+  -- Killing the peer overview threads should hopefully clean up all connections promptly
+  releaseAll lrRegistry
+  -- Reset the resources in TVars that were allocated by the simulator
+  atomically $ do
+    cschcRemoveAllHandles psrHandles
+    case lrLoEVar of
+      LoEEnabled var -> modifyTVar var (const (AF.Empty AF.AnchorGenesis))
+      LoEDisabled -> pure ()
+  trace (TraceSchedulerEvent TraceNodeShutdownComplete)
+  pure LiveIntervalResult{lirActive, lirPeerResults}
+ where
+  trace = traceWith lrTracer
+  LiveResources
+    { lrRegistry
+    , lrTracer
+    , lrPeerSim = PeerSimulatorResources{psrHandles}
+    , lrLoEVar
+    } = resources

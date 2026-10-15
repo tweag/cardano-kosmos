@@ -1,0 +1,366 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Ouroboros.Consensus.Shelley.Eras
+  ( -- * Eras based on the Shelley ledger
+    ShelleyEra
+  , AllegraEra
+  , MaryEra
+  , AlonzoEra
+  , BabbageEra
+  , ConwayEra
+  , DijkstraEra
+
+    -- * Shelley-based era
+  , ConwayEraGovDict (..)
+  , ShelleyBasedEra (..)
+
+    -- * Convenience functions
+  , isBeforeConway
+
+    -- * Re-exports
+  , StandardCrypto
+  ) where
+
+import Cardano.Binary (FromCBOR, ToCBOR)
+import Cardano.Ledger.Allegra (AllegraEra)
+import Cardano.Ledger.Allegra.Translation ()
+import Cardano.Ledger.Alonzo (AlonzoEra, ApplyTxError (AlonzoApplyTxError))
+import Cardano.Ledger.Alonzo.Core as Core
+import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
+import qualified Cardano.Ledger.Api as L
+import Cardano.Ledger.Babbage (ApplyTxError (BabbageApplyTxError), BabbageEra)
+import qualified Cardano.Ledger.Babbage.Rules as Babbage
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
+import Cardano.Ledger.Conway (ApplyTxError (ConwayApplyTxError), ConwayEra)
+import qualified Cardano.Ledger.Conway.Governance as CG
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import qualified Cardano.Ledger.Conway.Rules as SL
+  ( ConwayLedgerPredFailure (..)
+  )
+import qualified Cardano.Ledger.Conway.State as CG
+import Cardano.Ledger.Dijkstra (ApplyTxError (DijkstraApplyTxError), DijkstraEra)
+import qualified Cardano.Ledger.Dijkstra.Rules as Dijkstra
+import qualified Cardano.Ledger.Dijkstra.Rules as SL
+  ( DijkstraLedgerPredFailure (..)
+  )
+import Cardano.Ledger.Mary (MaryEra)
+import Cardano.Ledger.Shelley (ShelleyEra)
+import qualified Cardano.Ledger.Shelley.API as SL
+import qualified Cardano.Ledger.Shelley.LedgerState as SL
+import qualified Cardano.Ledger.Shelley.Rules as SL
+import qualified Cardano.Ledger.Shelley.Transition as SL
+import Control.Monad.Except
+import Control.State.Transition (PredicateFailure)
+import Data.Data (Proxy (Proxy))
+import Data.List.NonEmpty (NonEmpty ((:|)))
+import qualified Data.List.NonEmpty as NE
+import Data.Text (Text)
+import Lens.Micro
+import NoThunks.Class (NoThunks)
+import Ouroboros.Consensus.Ledger.SupportsMempool
+  ( WhetherToIntervene (..)
+  )
+import Ouroboros.Consensus.Peras.Params
+  ( PerasEnabled
+  , PerasRoundLength
+  , dijkstraPerasRoundLength
+  , pattern NoPerasEnabled
+  )
+import Ouroboros.Consensus.Protocol.TPraos (StandardCrypto)
+
+{-------------------------------------------------------------------------------
+  Era polymorphism
+-------------------------------------------------------------------------------}
+
+-- | Consensus often needs some more functionality than the ledger currently
+-- provides.
+--
+-- Either the functionality shouldn't or can't live in the ledger, in which case
+-- it can be part and remain part of 'ShelleyBasedEra'. Or, the functionality
+-- /should/ live in the ledger, but hasn't yet been added to the ledger, or it
+-- hasn't yet been propagated to this repository, in which case it can be added
+-- to this class until that is the case.
+--
+-- If this class becomes redundant, We can move it to ledger and re-export it
+-- from here.
+--
+-- TODO Currently we include some constraints on the update state which are
+-- needed to determine the hard fork point. In the future this should be
+-- replaced with an appropriate API - see
+-- https://github.com/IntersectMBO/ouroboros-network/issues/2890
+class
+  ( Core.EraBlockBody era
+  , Core.EraGov era
+  , SL.ApplyTx era
+  , SL.ApplyTick era
+  , SL.EraTransition era
+  , SL.EraForecast era
+  , NoThunks (SL.StashedAVVMAddresses era)
+  , EncCBOR (SL.StashedAVVMAddresses era)
+  , DecCBOR (SL.StashedAVVMAddresses era)
+  , Show (SL.StashedAVVMAddresses era)
+  , Eq (SL.StashedAVVMAddresses era)
+  , DecCBOR (PredicateFailure (EraRule "LEDGER" era))
+  , EncCBOR (PredicateFailure (EraRule "LEDGER" era))
+  , DecCBOR (PredicateFailure (EraRule "UTXOW" era))
+  , EncCBOR (PredicateFailure (EraRule "UTXOW" era))
+  , Eq (PredicateFailure (EraRule "BBODY" era))
+  , Show (PredicateFailure (EraRule "BBODY" era))
+  , NoThunks (Core.TranslationContext era)
+  , ToCBOR (Core.TranslationContext era)
+  , FromCBOR (Core.TranslationContext era)
+  ) =>
+  ShelleyBasedEra era
+  where
+  applyShelleyBasedTx ::
+    SL.Globals ->
+    SL.LedgerEnv era ->
+    SL.LedgerState era ->
+    WhetherToIntervene ->
+    Core.Tx TopTx era ->
+    Except
+      (SL.ApplyTxError era)
+      ( SL.LedgerState era
+      , SL.ValidatedTx era
+      )
+
+  -- | Whether the era has an instance of 'CG.ConwayEraGov'
+  getConwayEraGovDict :: proxy era -> Maybe (ConwayEraGovDict era)
+
+  mkEraMkMempoolApplyTxError ::
+    proxy era -> Maybe (Text -> SL.ApplyTxError era)
+
+  -- | Retrieve the optionally enabled Peras round length of this epoch.
+  --
+  -- Defaults to 'NoPerasEnabled' for eras that don't explictily support Peras.
+  getShelleyEraPerasRoundLength :: proxy era -> PerasEnabled PerasRoundLength
+  getShelleyEraPerasRoundLength _ = NoPerasEnabled
+
+data ConwayEraGovDict era where
+  ConwayEraGovDict :: (CG.ConwayEraGov era, CG.ConwayEraCertState era) => ConwayEraGovDict era
+
+isBeforeConway :: forall era. L.Era era => Proxy era -> Bool
+isBeforeConway _ =
+  L.eraProtVerLow @era < L.eraProtVerLow @L.ConwayEra
+
+-- | The default implementation of 'applyShelleyBasedTx', a thin wrapper around
+-- 'SL.applyTx'
+defaultApplyShelleyBasedTx ::
+  ShelleyBasedEra era =>
+  SL.Globals ->
+  SL.LedgerEnv era ->
+  SL.LedgerState era ->
+  WhetherToIntervene ->
+  Core.Tx TopTx era ->
+  Except
+    (SL.ApplyTxError era)
+    ( SL.LedgerState era
+    , SL.ValidatedTx era
+    )
+defaultApplyShelleyBasedTx globals ledgerEnv mempoolState _wti tx =
+  liftEither $
+    SL.applyTxWithFullValidation
+      globals
+      ledgerEnv
+      mempoolState
+      tx
+
+defaultGetConwayEraGovDict :: proxy era -> Maybe (ConwayEraGovDict era)
+defaultGetConwayEraGovDict _ = Nothing
+
+instance ShelleyBasedEra ShelleyEra where
+  applyShelleyBasedTx = defaultApplyShelleyBasedTx
+
+  getConwayEraGovDict = defaultGetConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+instance ShelleyBasedEra AllegraEra where
+  applyShelleyBasedTx = defaultApplyShelleyBasedTx
+
+  getConwayEraGovDict = defaultGetConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+instance ShelleyBasedEra MaryEra where
+  applyShelleyBasedTx = defaultApplyShelleyBasedTx
+
+  getConwayEraGovDict = defaultGetConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+instance ShelleyBasedEra AlonzoEra where
+  applyShelleyBasedTx = applyAlonzoBasedTx
+
+  getConwayEraGovDict = defaultGetConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+instance ShelleyBasedEra BabbageEra where
+  applyShelleyBasedTx = applyAlonzoBasedTx
+
+  getConwayEraGovDict = defaultGetConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+instance ShelleyBasedEra ConwayEra where
+  applyShelleyBasedTx = applyAlonzoBasedTx
+
+  getConwayEraGovDict _ = Just ConwayEraGovDict
+
+  mkEraMkMempoolApplyTxError _prx =
+    Just $ \txt -> ConwayApplyTxError (NE.singleton (Conway.ConwayMempoolFailure txt))
+
+instance ShelleyBasedEra DijkstraEra where
+  applyShelleyBasedTx = applyAlonzoBasedTx
+
+  getConwayEraGovDict _ = Just ConwayEraGovDict
+
+  -- TODO we'll need to change the mini protocol (backwards-incompatibly?) to
+  -- use MempoolFailure type family instead of just PredicateFailure type
+  -- family
+  mkEraMkMempoolApplyTxError _prx = Nothing
+
+  getShelleyEraPerasRoundLength _ = dijkstraPerasRoundLength
+
+applyAlonzoBasedTx ::
+  forall era.
+  ( AlonzoEraTx era
+  , ShelleyBasedEra era
+  , SupportsTwoPhaseValidation era
+  ) =>
+  Globals ->
+  SL.LedgerEnv era ->
+  SL.LedgerState era ->
+  WhetherToIntervene ->
+  Core.Tx TopTx era ->
+  Except
+    (SL.ApplyTxError era)
+    ( SL.LedgerState era
+    , SL.ValidatedTx era
+    )
+applyAlonzoBasedTx globals ledgerEnv mempoolState wti tx = do
+  (mempoolState', vtx) <-
+    (`catchError` handler) $
+      defaultApplyShelleyBasedTx
+        globals
+        ledgerEnv
+        mempoolState
+        wti
+        intervenedTx
+  pure (mempoolState', vtx)
+ where
+  intervenedTx = case wti of
+    DoNotIntervene -> tx & Core.isPhase2ValidTxL .~ L.Phase2Valid
+    Intervene -> tx
+
+  handler e = case (wti, e) of
+    (DoNotIntervene, err)
+      | isIncorrectClaimedFlag (Proxy @era) err ->
+          -- rectify the flag and include the transaction
+          --
+          -- This either lets the ledger punish the script author for sending
+          -- a bad script or else prevents our peer's buggy script validator
+          -- from preventing inclusion of a valid script.
+          --
+          -- TODO 'applyTx' et al needs to include a return value indicating
+          -- whether we took this branch; it's a reason to disconnect from
+          -- the peer who sent us the incorrect flag (ie Issue #3276)
+          defaultApplyShelleyBasedTx
+            globals
+            ledgerEnv
+            mempoolState
+            wti
+            (tx & Core.isPhase2ValidTxL .~ L.Phase2Invalid)
+    _ -> throwError e
+
+-- reject the transaction, protecting the local wallet
+
+class SupportsTwoPhaseValidation era where
+  -- NOTE: this class won't be needed once https://github.com/IntersectMBO/cardano-ledger/issues/4167 is implemented.
+  isIncorrectClaimedFlag :: proxy era -> SL.ApplyTxError era -> Bool
+
+instance SupportsTwoPhaseValidation AlonzoEra where
+  isIncorrectClaimedFlag _ (AlonzoApplyTxError (err :| [])) = case err of
+    SL.UtxowFailure
+      ( Alonzo.ShelleyInAlonzoUtxowPredFailure
+          ( SL.UtxoFailure
+              ( Alonzo.UtxosFailure
+                  ( Alonzo.ValidationTagMismatch
+                      _isValid
+                      _validationErrs
+                    )
+                )
+            )
+        ) -> True
+    _ -> False
+  isIncorrectClaimedFlag _ _ = False
+
+instance SupportsTwoPhaseValidation BabbageEra where
+  isIncorrectClaimedFlag _ (BabbageApplyTxError (err :| [])) = case err of
+    SL.UtxowFailure
+      ( Babbage.AlonzoInBabbageUtxowPredFailure
+          ( Alonzo.ShelleyInAlonzoUtxowPredFailure
+              ( SL.UtxoFailure
+                  ( Babbage.AlonzoInBabbageUtxoPredFailure
+                      ( Alonzo.UtxosFailure
+                          ( Alonzo.ValidationTagMismatch
+                              _isValid
+                              _validationErrs
+                            )
+                        )
+                    )
+                )
+            )
+        ) -> True
+    SL.UtxowFailure
+      ( Babbage.UtxoFailure
+          ( Babbage.AlonzoInBabbageUtxoPredFailure
+              ( Alonzo.UtxosFailure
+                  ( Alonzo.ValidationTagMismatch
+                      _isValid
+                      _validationErrs
+                    )
+                )
+            )
+        ) -> True
+    _ -> False
+  isIncorrectClaimedFlag _ _ = False
+
+instance SupportsTwoPhaseValidation ConwayEra where
+  isIncorrectClaimedFlag _ (ConwayApplyTxError (err :| [])) = case err of
+    SL.ConwayUtxowFailure
+      ( Conway.UtxoFailure
+          ( Conway.UtxosFailure
+              ( Conway.ValidationTagMismatch
+                  _isValid
+                  _validationErrs
+                )
+            )
+        ) -> True
+    _ -> False
+  isIncorrectClaimedFlag _ _ = False
+
+instance SupportsTwoPhaseValidation DijkstraEra where
+  isIncorrectClaimedFlag _ (DijkstraApplyTxError (err :| [])) = case err of
+    Dijkstra.LedgerFailure
+      ( SL.DijkstraUtxowFailure
+          ( Dijkstra.UtxoFailure
+              ( Dijkstra.UtxosFailure
+                  ( Conway.ValidationTagMismatch
+                      _isValid
+                      _validationErrs
+                    )
+                )
+            )
+        ) -> True
+    _ -> False
+  isIncorrectClaimedFlag _ _ = False

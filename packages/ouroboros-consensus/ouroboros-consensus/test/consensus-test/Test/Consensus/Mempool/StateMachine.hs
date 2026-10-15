@@ -1,0 +1,1186 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MonoLocalBinds #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
+
+-- | See 'MakeAtomic'.
+module Test.Consensus.Mempool.StateMachine (tests) where
+
+import Cardano.Slotting.Slot
+import Control.Arrow (second)
+import Control.Concurrent.Class.MonadSTM.Strict.TChan
+import Control.Monad (when)
+import Control.Monad.Class.MonadTimer.SI (MonadTimer)
+import Control.Monad.Except (Except, runExcept)
+import Control.Tracer (nullTracer)
+import qualified Control.Tracer as CT (Tracer, mkTracer, traceWith)
+import qualified Data.Foldable as Foldable
+import Data.Function (on)
+import qualified Data.List.NonEmpty as NE
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
+import qualified Data.Measure as Measure
+import Data.Proxy
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.TreeDiff
+import qualified Data.TreeDiff.OMap as TD
+import GHC.Generics
+import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.HeaderValidation
+import Ouroboros.Consensus.Ledger.Abstract hiding (TxIn, TxOut)
+import Ouroboros.Consensus.Ledger.SupportsMempool
+import Ouroboros.Consensus.Ledger.SupportsProtocol
+  ( LedgerSupportsProtocol
+  )
+import qualified Ouroboros.Consensus.Ledger.Tables.Basics as Ledger
+import Ouroboros.Consensus.Ledger.Tables.Utils
+import Ouroboros.Consensus.Mempool
+import Ouroboros.Consensus.Mempool.Impl.Common (MempoolLedgerDBView (..), tickLedgerState)
+import Ouroboros.Consensus.Mempool.TxSeq
+import Ouroboros.Consensus.Mock.Ledger.Address
+import Ouroboros.Consensus.Mock.Ledger.Block
+import Ouroboros.Consensus.Mock.Ledger.State
+import Ouroboros.Consensus.Mock.Ledger.UTxO (Expiry, Tx, TxIn, TxOut)
+import qualified Ouroboros.Consensus.Mock.Ledger.UTxO as Mock
+import Ouroboros.Consensus.Storage.LedgerDB.Forker
+import Ouroboros.Consensus.Util
+import Ouroboros.Consensus.Util.Condense (condense)
+import Ouroboros.Consensus.Util.IOLike hiding (bracket)
+import Ouroboros.Network.Block (genesisPoint)
+import Test.Cardano.Ledger.TreeDiff ()
+import Test.Consensus.Mempool.Util
+  ( TestBlock
+  , applyTxToLedger
+  , bumpTip
+  , genTxs
+  , genValidTxs
+  , testInitLedger
+  , testLedgerConfigNoSizeLimits
+  )
+import Test.QuickCheck
+import Test.QuickCheck.Monadic
+import Test.StateMachine hiding ((:>))
+import Test.StateMachine.DotDrawing
+import Test.StateMachine.Types (History (..), HistoryEvent (..))
+import qualified Test.StateMachine.Types as QC
+import qualified Test.StateMachine.Types.Rank2 as Rank2
+import Test.Tasty
+import Test.Tasty.HUnit (assertBool, testCase)
+import Test.Tasty.QuickCheck
+import Test.Util.Orphans.ToExpr ()
+import qualified Test.Util.QuickCheck as QC
+import Test.Util.ToExpr ()
+
+{-------------------------------------------------------------------------------
+  Datatypes
+-------------------------------------------------------------------------------}
+
+-- | The model
+data Model blk r = Model
+  { modelMempoolIntermediateState :: !(TickedLedgerState blk ValuesMK)
+  -- ^ The current tip on the mempool
+  , modelMempoolBase :: !(LedgerState blk ValuesMK)
+  -- ^ The (unticked) ledger state the mempool is currently applied on top of,
+  -- i.e. the tip it last synced to. Needed to re-derive the mempool after a
+  -- 'RemoveTxs', which re-applies the kept txs on this same base rather than
+  -- syncing to a new one.
+  , modelTxs :: ![(GenTx blk, TicketNo)]
+  , modelAllValidTxs :: ![(GenTx blk, TicketNo)]
+  -- ^ The current list of transactions
+  , modelCurrentSize :: !(TxMeasure blk)
+  -- ^ The current size of the mempool
+  , modelCapacity :: !(TxMeasure blk)
+  , modelLastSeenTicketNo :: !TicketNo
+  -- ^ Last seen ticket number
+  --
+  -- This indicates how many transactions have ever been added to the mempool.
+  , modelConfig :: !(LedgerCfg LedgerState blk)
+  , --  * LedgerDB
+
+    modelLedgerDBTip :: !(LedgerState blk ValuesMK)
+  -- ^ The current tip on the ledgerdb
+  , modelLedgerDBOtherStates :: !(Set (LedgerState blk ValuesMK))
+  -- ^ The old states which are still on the LedgerDB.
+  , modelIsSyncing :: !Bool
+  }
+
+-- | The commands used by QSM
+--
+-- We divide them in 'Action' which are the ones that we on purpose perform on
+-- the mempool, and 'Event's which happen by external triggers. This is a mere
+-- convenience, in the eyes of QSM they are the same thing.
+data Command blk r
+  = Action !(Action blk r)
+  | Event !(Event blk r)
+  deriving Generic1
+  deriving (Rank2.Functor, Rank2.Foldable, Rank2.Traversable)
+
+-- | Actions on the mempool
+data Action blk r
+  = -- | Add some transactions to the mempool
+    TryAddTxs ![GenTx blk]
+  | -- | Unconditionally sync with the ledger db
+    SyncLedger
+  | -- | Force-remove transactions (as the forge loop does on a rejected block).
+    RemoveTxs ![GenTxId blk]
+  | -- | Ask for the current snapshot
+    GetSnapshot
+  -- TODO: maybe add 'GetSnapshotFor (Point blk)', but this requires to keep
+  -- track of some more states to make it meaningful.
+  deriving Generic1
+  deriving (Rank2.Functor, Rank2.Foldable, Rank2.Traversable, CommandNames)
+
+-- | Events external to the mempool
+data Event blk r
+  = ChangeLedger
+      !(LedgerState blk ValuesMK)
+  deriving Generic1
+  deriving (Rank2.Functor, Rank2.Foldable, Rank2.Traversable, CommandNames)
+
+instance CommandNames (Command blk) where
+  cmdName (Action action) = cmdName action
+  cmdName (Event event) = cmdName event
+
+  cmdNames :: forall r. Proxy (Command blk r) -> [String]
+  cmdNames _ =
+    cmdNames (Proxy @(Action blk r))
+      ++ cmdNames (Proxy @(Event blk r))
+
+-- | Wether or not this test must be atomic.
+--
+-- The reason behind this data type is that 'TryAddTxs' is on its nature prone
+-- to race-conditions. And that is OK with us. For example take the following
+-- sequence of commands:
+--
+-- @@@
+--  TryAddTxs [Tx1, Tx2] || GetSnapshot
+-- @@@
+--
+-- If we happen to hit the following interleaving:
+--
+-- @@@
+--  AddTx Tx1; GetSnapshot; AddTx Tx2
+-- @@@
+--
+-- the model will never be able to reproduce the result of the snapshot.
+--
+-- So in order to do a meaningful testing, what we do is:
+--
+-- 1. Run a sequential test of actions ensuring that the responses of the model
+--    and SUT match on 'GetSnaphsot'. This provides us with assurance that the
+--    model works as expected on single-threaded/sequential scenarios.
+--
+-- 2. Run a parallel test where 'TryAddTxs' is unitary (i.e. use the 'Atomic'
+--    modifier) ensuring that the responses of the model and SUT match on
+--    'GetSnaphsot'. This ensures that there are no race conditions on this
+--    case, or rephrased, that the operations on the mempool remain atomic even
+--    if executed on separate threads.
+--
+-- 3. Run a parallel test where 'TryAddTxs' is not unitary (using the
+--    'NonAtomic' modifier) and **NOT** checking the responses of the model
+--    versus the SUT. This ensures that there are no deadlocks and no
+--    errors/exceptions thrown when running in parallel.
+--
+-- We believe that these test cover all the interesting cases and provide enough
+-- assurance on the implementation of the Mempool.
+data MakeAtomic = Atomic | NonAtomic | DontCare
+
+generator ::
+  ( Arbitrary (LedgerState blk ValuesMK)
+  , UnTick blk
+  , StandardHash blk
+  , GetTip (LedgerState blk)
+  , HasTxId (GenTx blk)
+  ) =>
+  MakeAtomic ->
+  -- | Transaction generator based on an state
+  (Int -> LedgerState blk ValuesMK -> Gen [GenTx blk]) ->
+  Model blk Symbolic ->
+  Maybe (Gen (Command blk Symbolic))
+generator ma gTxs model =
+  Just $
+    frequency $
+      [
+        ( 100
+        , Action . TryAddTxs <$> case ma of
+            Atomic -> do
+              gTxs 1 . unTick $ modelMempoolIntermediateState
+            _ -> do
+              n <- getPositive <$> arbitrary
+              gTxs n . unTick $ modelMempoolIntermediateState
+        )
+      , (10, pure $ Action SyncLedger)
+      ,
+        ( 10
+        , do
+            ls <-
+              oneof
+                ( [ arbitrary
+                      `suchThat` ( not
+                                     . flip
+                                       elem
+                                       ( getTip modelLedgerDBTip
+                                           `Set.insert` Set.map
+                                             getTip
+                                             modelLedgerDBOtherStates
+                                       )
+                                     . getTip
+                                 )
+                  ]
+                    ++ (if Set.null modelLedgerDBOtherStates then [] else [elements (Set.toList modelLedgerDBOtherStates)])
+                )
+                `suchThat` (not . (== (getTip modelLedgerDBTip)) . getTip)
+            pure $ Event $ ChangeLedger ls
+        )
+      , (10, pure $ Action GetSnapshot)
+      ]
+        -- Only remove when there is something to remove; races with SyncLedger.
+        ++ [ (10, Action . RemoveTxs <$> (sublistOf (map (txId . fst) modelTxs) `suchThat` (not . null)))
+           | not (null modelTxs)
+           ]
+ where
+  Model
+    { modelMempoolIntermediateState
+    , modelLedgerDBTip
+    , modelLedgerDBOtherStates
+    , modelTxs
+    } = model
+
+data Response blk r
+  = -- | Nothing to tell
+    Void
+  | -- | Return the contents of a snapshot
+    GotSnapshot ![(GenTx blk, TicketNo)]
+  | AddResult ![MempoolAddTxResult blk]
+  | Synced !(Point blk, [(GenTx blk, TicketNo)])
+  deriving Generic1
+  deriving (Rank2.Functor, Rank2.Foldable, Rank2.Traversable)
+
+{-------------------------------------------------------------------------------
+  Model side
+-------------------------------------------------------------------------------}
+
+initModel ::
+  ( LedgerSupportsMempool blk
+  , ValidateEnvelope blk
+  ) =>
+  LedgerConfig blk ->
+  TxMeasure blk ->
+  LedgerState blk ValuesMK ->
+  Model blk r
+initModel cfg capacity initialState =
+  Model
+    { modelMempoolIntermediateState = ticked
+    , modelMempoolBase = initialState
+    , modelLedgerDBOtherStates = Set.empty
+    , modelLedgerDBTip = initialState
+    , modelTxs = []
+    , modelCurrentSize = Measure.zero
+    , modelAllValidTxs = []
+    , modelLastSeenTicketNo = zeroTicketNo
+    , modelCapacity = capacity
+    , modelConfig = cfg
+    , modelIsSyncing = False
+    }
+ where
+  ticked = tick cfg initialState
+
+mock ::
+  Model blk Symbolic ->
+  Command blk Symbolic ->
+  GenSym (Response blk Symbolic)
+mock model = \case
+  Action (TryAddTxs _) -> pure $ AddResult []
+  Action SyncLedger -> pure $ Synced (genesisPoint, [])
+  Action (RemoveTxs _) -> pure Void
+  Action GetSnapshot -> pure $ GotSnapshot $ modelTxs model
+  Event (ChangeLedger _) -> pure Void
+
+{-------------------------------------------------------------------------------
+  Transitions
+-------------------------------------------------------------------------------}
+
+doSync ::
+  ( ValidateEnvelope blk
+  , LedgerSupportsMempool blk
+  , Eq (TickedLedgerState blk ValuesMK)
+  ) =>
+  Model blk r ->
+  Model blk r
+doSync model =
+  if st == st'
+    then model
+    else
+      let
+        (validTxs, _tk, newSize, st'') =
+          foldTxs modelConfig zeroTicketNo modelCapacity Measure.zero st' $ map (second Just) modelTxs
+       in
+        model
+          { modelMempoolIntermediateState = st''
+          , modelMempoolBase = modelLedgerDBTip
+          , modelTxs = validTxs
+          , modelCurrentSize = newSize
+          }
+ where
+  st' = tick modelConfig modelLedgerDBTip
+
+  Model
+    { modelMempoolIntermediateState = st
+    , modelLedgerDBTip
+    , modelTxs
+    , modelCapacity
+    , modelConfig
+    } = model
+
+doChangeLedger ::
+  (StandardHash blk, GetTip (LedgerState blk)) =>
+  Model blk r ->
+  LedgerState blk ValuesMK ->
+  Model blk r
+doChangeLedger model l' =
+  model
+    { modelLedgerDBTip = l'
+    , modelLedgerDBOtherStates =
+        Set.insert modelLedgerDBTip modelLedgerDBOtherStates
+    }
+ where
+  Model
+    { modelLedgerDBTip
+    , modelLedgerDBOtherStates
+    } = model
+
+doTryAddTxs ::
+  ( LedgerSupportsMempool blk
+  , ValidateEnvelope blk
+  ) =>
+  Model blk r ->
+  [GenTx blk] ->
+  Model blk r
+doTryAddTxs model [] = model
+doTryAddTxs model txs =
+  case Foldable.find
+    ((castPoint (getTip st) ==) . getTip)
+    (Set.insert modelLedgerDBTip modelLedgerDBOtherStates) of
+    Nothing -> error "Impossible!"
+    Just _ ->
+      let nextTicket = succ $ modelLastSeenTicketNo model
+          (validTxs, tk, newSize, st'') =
+            foldTxs cfg nextTicket modelCapacity modelCurrentSize st $ map (,Nothing) txs
+          modelTxs' = modelTxs ++ validTxs
+       in model
+            { modelMempoolIntermediateState = st''
+            , modelTxs = modelTxs'
+            , modelAllValidTxs = modelAllValidTxs ++ validTxs
+            , modelLastSeenTicketNo = pred tk
+            , modelCurrentSize = newSize
+            }
+ where
+  Model
+    { modelMempoolIntermediateState = st
+    , modelTxs
+    , modelAllValidTxs
+    , modelCurrentSize
+    , modelLedgerDBOtherStates
+    , modelLedgerDBTip
+    , modelConfig = cfg
+    , modelCapacity
+    } = model
+
+-- | Force-remove the given transactions, then re-derive the mempool by
+-- re-applying the /kept/ txs against the current base (mirrors
+-- 'removeTxsEvenIfValid'/'pureRemoveTxs': the base is unchanged, only the txs
+-- shrink).
+doRemoveTxs ::
+  ( LedgerSupportsMempool blk
+  , ValidateEnvelope blk
+  , HasTxId (GenTx blk)
+  ) =>
+  Model blk r ->
+  [GenTxId blk] ->
+  Model blk r
+doRemoveTxs model ids =
+  let toRemove = Set.fromList ids
+      kept = filter ((`Set.notMember` toRemove) . txId . fst) modelTxs
+      (validTxs, _tk, newSize, st'') =
+        foldTxs modelConfig zeroTicketNo modelCapacity Measure.zero (tick modelConfig modelMempoolBase) $
+          map (second Just) kept
+   in model
+        { modelMempoolIntermediateState = st''
+        , modelTxs = validTxs
+        , modelCurrentSize = newSize
+        }
+ where
+  Model
+    { modelMempoolBase
+    , modelTxs
+    , modelConfig
+    , modelCapacity
+    } = model
+
+transition ::
+  ( Eq (TickedLedgerState blk ValuesMK)
+  , LedgerSupportsMempool blk
+  , HasTxId (GenTx blk)
+  , ToExpr (GenTx blk)
+  , ValidateEnvelope blk
+  , ToExpr (Command blk r)
+  ) =>
+  Model blk r ->
+  Command blk r ->
+  Response blk r ->
+  Model blk r
+transition model cmd resp = case (cmd, resp) of
+  (Action (TryAddTxs txs), AddResult _res) -> (doTryAddTxs model txs){modelIsSyncing = False}
+  (Event (ChangeLedger l), Void) -> (doChangeLedger model l){modelIsSyncing = False}
+  (Action GetSnapshot, GotSnapshot{}) -> model{modelIsSyncing = False}
+  (Action SyncLedger, Synced{}) -> (doSync model){modelIsSyncing = True}
+  (Action (RemoveTxs ids), Void) -> (doRemoveTxs model ids){modelIsSyncing = False}
+  _ ->
+    error $
+      "mismatched command "
+        <> show cmd
+        <> " and response "
+        <> show resp
+
+{-------------------------------------------------------------------------------
+  Ledger helper functions
+-------------------------------------------------------------------------------}
+
+-- | Apply a list of transactions short-circuiting if the mempool gets full.
+-- Emulates almost exactly the behaviour of 'implTryTryAddTxs'.
+foldTxs ::
+  forall blk.
+  ( LedgerSupportsMempool blk
+  , BasicEnvelopeValidation blk
+  ) =>
+  LedgerConfig blk ->
+  TicketNo ->
+  TxMeasure blk ->
+  TxMeasure blk ->
+  TickedLedgerState blk ValuesMK ->
+  [(GenTx blk, Maybe TicketNo)] ->
+  ( [(GenTx blk, TicketNo)]
+  , TicketNo
+  , TxMeasure blk
+  , TickedLedgerState blk ValuesMK
+  )
+foldTxs cfg nextTk capacity initialFilled initialState =
+  go ([], nextTk, initialFilled, initialState)
+ where
+  go (acc, tk, curSize, st) [] =
+    ( reverse acc
+    , tk
+    , curSize
+    , st
+    )
+  go (acc, tk, curSize, st) ((tx, txtk) : next) =
+    let slot = case getTipSlot st of
+          Origin -> minimumPossibleSlotNo (Proxy @blk)
+          At v -> v + 1
+     in case runExcept $ (,) <$> txMeasureFull cfg st tx <*> applyTx cfg DoNotIntervene slot tx st of
+          Left{} ->
+            go
+              ( acc
+              , tk
+              , curSize
+              , st
+              )
+              next
+          Right (txsz, (st', vtx))
+            | ( curSize Measure.<= curSize `Measure.plus` txsz
+                  -- Overflow
+                  && curSize `Measure.plus` txsz Measure.<= capacity
+              ) ->
+                -- fits
+
+                go
+                  ( (txForgetValidated vtx, fromMaybe tk txtk) : acc
+                  , succ tk
+                  , curSize `Measure.plus` txsz
+                  , applyDiffs st st'
+                  )
+                  next
+            | otherwise ->
+                go
+                  ( acc
+                  , tk
+                  , curSize
+                  , st
+                  )
+                  next
+
+txMeasureFull ::
+  LedgerSupportsMempool blk =>
+  LedgerConfig blk ->
+  TickedLedgerState blk ValuesMK ->
+  GenTx blk ->
+  Except (ApplyTxErr blk) (TxMeasure blk)
+txMeasureFull cfg st tx =
+  TxMeasure
+    <$> txMeasurePhase1 cfg (forgetLedgerTables st) tx
+    <*> txMeasurePhase2 cfg st tx
+
+tick ::
+  ( ValidateEnvelope blk
+  , LedgerSupportsMempool blk
+  ) =>
+  LedgerConfig blk ->
+  LedgerState blk ValuesMK ->
+  TickedLedgerState blk ValuesMK
+tick cfg st = applyDiffs st ticked
+ where
+  ticked =
+    snd
+      . tickLedgerState cfg
+      . ForgeInUnknownSlot
+      . forgetLedgerTables
+      $ st
+
+{-------------------------------------------------------------------------------
+  SUT side
+-------------------------------------------------------------------------------}
+
+-- | The System Under Test
+data SUT m blk
+  = SUT
+      -- | A Mempool
+      !(Mempool m blk)
+      -- | Emulates a ledger db to the extent needed by the ledger interface.
+      !(StrictTVar m (MockedLedgerDB blk))
+  deriving Generic
+
+deriving instance
+  ( NoThunks (Mempool m blk)
+  , NoThunks (StrictTVar m (MockedLedgerDB blk))
+  , IOLike m
+  ) =>
+  NoThunks (SUT m blk)
+
+-- | A very minimal mock of the ledger db.
+--
+-- The ledger interface will serve the values from this datatype.
+data MockedLedgerDB blk = MockedLedgerDB
+  { ldbTip :: !(LedgerState blk ValuesMK)
+  -- ^ The current LedgerDB tip
+  , reachableTips :: !(Set (LedgerState blk ValuesMK))
+  -- ^ States which are still reachable in the LedgerDB
+  }
+  deriving Generic
+
+-- | Create a ledger interface and provide the tvar to modify it when switching
+-- ledgers.
+newLedgerInterface ::
+  ( NoThunks (MockedLedgerDB blk)
+  , LedgerSupportsMempool blk
+  , IOLike m
+  ) =>
+  LedgerState blk ValuesMK ->
+  m (LedgerInterface m blk, StrictTVar m (MockedLedgerDB blk))
+newLedgerInterface initialLedger = do
+  t <- newTVarIO $ MockedLedgerDB initialLedger Set.empty
+  pure
+    ( LedgerInterface
+        { getCurrentLedgerState = do
+            st <- ldbTip <$> readTVar t
+            pure $
+              MempoolLedgerDBView
+                (forgetLedgerTables st)
+                ( pure $
+                    Right $
+                      ReadOnlyForker
+                        { roforkerClose = pure ()
+                        , roforkerReadStatistics = pure $ Statistics 0
+                        , roforkerReadTables = pure . ltliftA2 restrictValuesMK (projectLedgerTables st)
+                        , roforkerRangeReadTables = const $ pure (emptyLedgerTables, Nothing)
+                        , roforkerGetLedgerState = pure $ forgetLedgerTables st
+                        }
+                )
+        }
+    , t
+    )
+
+-- | Make a SUT
+mkSUT ::
+  forall m blk.
+  ( NoThunks (MockedLedgerDB blk)
+  , IOLike m
+  , MonadTimer m
+  , LedgerSupportsProtocol blk
+  , LedgerSupportsMempool blk
+  , HasTxId (GenTx blk)
+  ) =>
+  LedgerConfig blk ->
+  LedgerState blk ValuesMK ->
+  m (SUT m blk, CT.Tracer m String)
+mkSUT cfg initialLedger = do
+  (lif, t) <- newLedgerInterface initialLedger
+  trcrChan <- atomically newTChan :: m (StrictTChan m (Either String (TraceEventMempool blk)))
+  let trcr =
+        CT.mkTracer $ -- Dbg.traceShowM @(Either String (TraceEventMempool blk))
+          atomically . writeTChan trcrChan
+  mempool <-
+    openMempoolWithoutSyncThread
+      lif
+      cfg
+      (MempoolCapacityBytesOverride $ unIgnoringOverflow $ tmPhase1 txMaxBytes')
+      (Nothing :: Maybe MempoolTimeoutConfig)
+      (CT.mkTracer $ CT.traceWith trcr . Right)
+  pure (SUT mempool t, CT.mkTracer $ atomically . writeTChan trcrChan . Left)
+
+semantics ::
+  ( LedgerSupportsMempool blk
+  , ValidateEnvelope blk
+  , IOLike m
+  ) =>
+  CT.Tracer m String ->
+  Command blk Concrete ->
+  StrictTVar m (SUT m blk) ->
+  m (Response blk Concrete)
+semantics trcr cmd r = do
+  SUT m t <- atomically $ readTVar r
+  case cmd of
+    Action (TryAddTxs txs) -> do
+      AddResult <$> mapM (addTx m AddTxForRemotePeer) txs
+    Action SyncLedger -> do
+      snap <- testSyncWithLedger m
+      pure (Synced (snapshotPoint snap, [(txForgetValidated tt, tk) | (tt, tk, _) <- snapshotTxs snap]))
+    Action (RemoveTxs ids) -> do
+      case NE.nonEmpty ids of
+        Nothing -> pure ()
+        Just neids -> removeTxsEvenIfValid m neids
+      pure Void
+    Action GetSnapshot -> do
+      txs <- snapshotTxs <$> atomically (getSnapshot m)
+      pure $ GotSnapshot [(txForgetValidated vtx, tk) | (vtx, tk, _) <- txs]
+    Event (ChangeLedger l') -> do
+      CT.traceWith trcr $ "ChangingLedger to " <> show (getTip l')
+      atomically $ do
+        MockedLedgerDB ledgerTip oldReachableTips <- readTVar t
+        if getTip l' == getTip ledgerTip
+          then
+            pure ()
+          else
+            writeTVar t (MockedLedgerDB l' (Set.insert ledgerTip oldReachableTips))
+        pure Void
+
+{-------------------------------------------------------------------------------
+  Conditions
+-------------------------------------------------------------------------------}
+
+precondition :: Model blk Symbolic -> Command blk Symbolic -> Logic
+-- precondition cfg Model {modelCurrentSize} (Action (TryAddTxs txs)) =
+--   Boolean $ not (null txs) && modelCurrentSize > 0 && sum (map tSize rights $ init txs) < modelCurrentSize
+precondition m (Action SyncLedger) = Boolean $ not (modelIsSyncing m)
+precondition _ (Action (RemoveTxs ids)) = Boolean $ not (null ids)
+precondition _ _ = Top
+
+postcondition ::
+  ( LedgerSupportsMempool blk
+  , Eq (GenTx blk)
+  , HasTxId (GenTx blk)
+  , --  , Show (TickedLedgerState blk ValuesMK)
+    UnTick blk
+  , ValidateEnvelope blk
+  , ToExpr (Command blk Concrete)
+  , ToExpr (GenTx blk)
+  , Show (Ledger.TxIn blk)
+  , Show (Ledger.TxOut blk)
+  ) =>
+  Model blk Concrete ->
+  Command blk Concrete ->
+  Response blk Concrete ->
+  Logic
+postcondition model (Action GetSnapshot) (GotSnapshot txs) =
+  Annotate "Mismatch getting snapshot" $
+    Annotate (show $ modelAllValidTxs model) $
+      modelTxs model .== txs
+postcondition model c@(Action (TryAddTxs txs)) r@(AddResult res) =
+  let model' = transition model c r
+   in Annotate "Mismatch result adding transaction" $
+        Annotate (show (modelTxs model', zip txs res)) $
+          Boolean $
+            and
+              [ tx `elem` map fst (modelTxs model')
+              | (tx, res') <- zip txs res
+              , case res' of MempoolTxAdded{} -> True; _ -> False
+              ]
+postcondition model c@(Action SyncLedger) r@(Synced (_, txs)) =
+  let model' = transition model c r
+   in Annotate "Mismatch revalidating transactions in Sync" $
+        Annotate (show (modelTxs model', txs)) $
+          modelTxs model' .== txs
+postcondition _ _ _ = Top
+
+noPostcondition ::
+  Model blk Concrete ->
+  Command blk Concrete ->
+  Response blk Concrete ->
+  Logic
+noPostcondition _ _ _ = Top
+
+shrinker ::
+  Model blk Symbolic ->
+  Command blk Symbolic ->
+  [Command blk Symbolic]
+shrinker _ (Action (TryAddTxs txs)) =
+  Action . TryAddTxs <$> shrinkList shrinkNothing txs
+shrinker _ (Action (RemoveTxs ids)) =
+  Action . RemoveTxs <$> filter (not . null) (shrinkList shrinkNothing ids)
+shrinker _ _ = []
+
+{-------------------------------------------------------------------------------
+  State Machine
+-------------------------------------------------------------------------------}
+
+sm ::
+  ( LedgerSupportsMempool blk
+  , IOLike m
+  , ValidateEnvelope blk
+  ) =>
+  StateMachine (Model blk) (Command blk) m (Response blk) ->
+  CT.Tracer m String ->
+  StrictTVar m (SUT m blk) ->
+  StateMachine (Model blk) (Command blk) m (Response blk)
+sm sm0 trcr ior = sm0{QC.semantics = \c -> semantics trcr c ior}
+
+smUnused ::
+  ( blk ~ TestBlock
+  , Monad m
+  ) =>
+  LedgerConfig blk ->
+  LedgerState blk ValuesMK ->
+  TxMeasure blk ->
+  MakeAtomic ->
+  (Int -> LedgerState blk ValuesMK -> Gen [GenTx blk]) ->
+  StateMachine (Model blk) (Command blk) m (Response blk)
+smUnused cfg initialState capacity ma gTxs =
+  StateMachine
+    { QC.initModel = initModel cfg capacity initialState
+    , QC.transition = transition
+    , QC.precondition = precondition
+    , QC.postcondition =
+        case ma of
+          NonAtomic -> noPostcondition
+          Atomic -> postcondition
+          DontCare -> postcondition
+    , QC.invariant = Nothing
+    , QC.generator = generator ma gTxs
+    , QC.shrinker = shrinker
+    , QC.semantics = undefined
+    , QC.mock = mock
+    , QC.cleanup = noCleanup
+    }
+
+{-------------------------------------------------------------------------------
+  Properties
+-------------------------------------------------------------------------------}
+
+prop_mempoolSequential ::
+  forall blk.
+  blk ~ TestBlock =>
+  LedgerConfig blk ->
+  TxMeasure blk ->
+  -- | Initial state
+  LedgerState blk ValuesMK ->
+  -- | Transaction generator
+  (Int -> LedgerState blk ValuesMK -> Gen [GenTx blk]) ->
+  Property
+prop_mempoolSequential cfg capacity initialState gTxs = forAllCommands sm0 Nothing $
+  \cmds ->
+    monadicIO
+      ( do
+          (sut, trcr) <- run $ mkSUT cfg initialState
+          ior <- run $ newTVarIO sut
+          let sm' = sm sm0 trcr ior
+          (hist, model, res) <- runCommands sm' cmds
+          prettyCommands sm0 hist
+            $ checkCommandNames cmds
+            $ tabulate
+              "Command sequence length"
+              [QC.lengthCommands cmds `bucketiseBy` 10]
+            $ tabulate
+              "Maximum ticket number"
+              [(\(TicketNo t) -> t) (modelLastSeenTicketNo model) `bucketiseBy` 5]
+            $ tabulate
+              "Number of txs to add"
+              [ length txs `bucketiseBy` 10
+              | (_, Invocation (Action (TryAddTxs txs)) _) <- unHistory hist
+              ]
+            $ res === Ok
+      )
+ where
+  sm0 = smUnused cfg initialState capacity DontCare gTxs
+
+  bucketiseBy v n =
+    let
+      l = (v `div` n) * n
+     in
+      "[" <> show l <> "-" <> show (l + n) <> ")"
+
+prop_mempoolParallel ::
+  blk ~ TestBlock =>
+  LedgerConfig blk ->
+  TxMeasure blk ->
+  LedgerState blk ValuesMK ->
+  MakeAtomic ->
+  (Int -> LedgerState blk ValuesMK -> Gen [GenTx blk]) ->
+  Property
+prop_mempoolParallel cfg capacity initialState ma gTxs = forAllParallelCommandsNTimes sm0 Nothing 10 $
+  \cmds -> monadicIO $ do
+    (sut, trcr) <- run $ mkSUT cfg initialState
+    ior <- run $ newTVarIO sut
+    let sm' = sm sm0 trcr ior
+    res <- runParallelCommands sm' cmds
+    prettyParallelCommandsWithOpts
+      cmds
+      (Just (GraphOptions "./mempoolParallel.png" Png))
+      res
+ where
+  sm0 = smUnused cfg initialState capacity ma gTxs
+
+-- | A regression test for one specific interleaving that random parallel
+-- testing is very unlikely to hit, so we reproduce it deterministically: while a
+-- mempool sync is in flight, the forge loop 'removeTxsEvenIfValid' drops a tx. A
+-- sync snapshots the mempool, revalidates /off the lock/, then commits; if a
+-- removal lands in that window a naive sync commits its now-stale snapshot and
+-- /resurrects/ the removed tx.
+--
+-- This function interleaves 'semantics' and 'transition' in a very atypical way.
+-- Normally one calls a QSM search function and it handles all of this, but the
+-- point here is to reach the rare interleaving deterministically, so there is no
+-- random search:
+--
+-- >        [X1]        -- TryAddTxs [x]
+-- >         |
+-- >        [X2]        -- ChangeLedger base1
+-- >       /    \
+-- >    [L1]    [R1]    -- L1: SyncLedger      R1: RemoveTxs [x]
+-- >     |       |
+-- >     |      [R2]    -- R2: SyncLedger
+-- >       \    /
+-- >        [X3]        -- GetSnapshot
+--
+-- Each node is an action this function performs:
+--
+--   * Each @X*@ is a 'step' (defined below): both a 'semantics' and a
+--     'transition' call, so it mutates the SUT (the real mempool) /and/ advances
+--     the model's pure state.
+--   * @L1@ is only a 'semantics' call — it does not touch the model.
+--   * @R1@ and @R2@ are only 'transition' calls — they do not touch the SUT.
+--   * @X3@ is a final 'step', the 'GetSnapshot' query, so we can check the model
+--     and the SUT still agree.
+--
+-- Crucially, @L1@ does /two/ things: its 'SyncLedger' /implicitly/ invokes
+-- 'interposeRemoval'. So @L1@ does to the SUT exactly what @R1@+@R2@ do to the
+-- model — but @L1@'s implicit 'RemoveTxs' is carefully arranged to happen
+-- \"during\" @L1@'s explicit 'SyncLedger', i.e. inside the sync's off-lock read,
+-- after its snapshot and before its commit. The tip change to @base1@ ('bumpTip')
+-- keeps @x@ valid, so the only thing that can drop it is that removal — and a
+-- correct sync must not bring it back.
+prop_removeDuringSyncSM :: IO ()
+prop_removeDuringSyncSM = do
+  let cfg = testLedgerConfigNoSizeLimits
+      capacity = txMaxBytes'
+      base0 = testInitLedger
+      base1 = bumpTip base0
+
+  (txs, _) <- generate $ genValidTxs 1 base0
+  assertBool "expected a valid tx" (not (null txs))
+  let x = head txs
+      xid = txId x
+
+  -- Reference to the mempool, filled once it exists so the ledger interface can
+  -- reach back into it to interpose the removal.
+  mempoolRef <- newEmptyMVar
+  removed <- newTVarIO False
+  ldb <- newTVarIO $ MockedLedgerDB base0 Set.empty
+  let interposeRemoval st =
+        -- Fire exactly once, and only in the sync's snapshot read: only the sync
+        -- serves 'base1' (setup reads serve 'base0', and the removal's own read
+        -- uses the stored 'base0' forker).
+        when (getTip st == getTip base1) $ do
+          firstTime <- atomically $ do
+            done <- readTVar removed
+            writeTVar removed True
+            pure (not done)
+          when firstTime $ do
+            mempool <- readMVar mempoolRef
+            removeTxsEvenIfValid mempool (NE.fromList [xid])
+      readTables st keys = do
+        interposeRemoval st
+        pure (ltliftA2 restrictValuesMK (projectLedgerTables st) keys)
+      ledgerInterface =
+        LedgerInterface
+          { getCurrentLedgerState = do
+              st <- ldbTip <$> readTVar ldb
+              pure $
+                MempoolLedgerDBView
+                  (forgetLedgerTables st)
+                  ( pure $
+                      Right $
+                        ReadOnlyForker
+                          { roforkerClose = pure ()
+                          , roforkerReadStatistics = pure $ Statistics 0
+                          , roforkerReadTables = readTables st
+                          , roforkerRangeReadTables = const $ pure (emptyLedgerTables, Nothing)
+                          , roforkerGetLedgerState = pure $ forgetLedgerTables st
+                          }
+                  )
+          }
+  mempool <-
+    openMempoolWithoutSyncThread
+      ledgerInterface
+      cfg
+      (MempoolCapacityBytesOverride $ unIgnoringOverflow $ tmPhase1 capacity)
+      (Nothing :: Maybe MempoolTimeoutConfig)
+      nullTracer
+  putMVar mempoolRef mempool
+  sutVar <- newTVarIO (SUT mempool ldb)
+
+  let model0 = initModel cfg capacity base0
+      -- Run one command through the state machine: execute it via 'semantics',
+      -- check its 'postcondition' against the model, and return the model
+      -- advanced by 'transition'.
+      step model cmd = do
+        resp <- semantics nullTracer cmd sutVar
+        assertBool ("postcondition violated by " <> show cmd) $
+          boolean (postcondition model cmd resp)
+        pure (transition model cmd resp)
+
+  -- X1, X2: add x, then move the ledger tip so the sync does real work without
+  -- invalidating x ('ChangeLedger' goes through 'semantics', which writes the
+  -- same mocked ledger db the interface reads).
+  model1 <- step model0 (Action (TryAddTxs [x]))
+  model2 <- step model1 (Event (ChangeLedger base1))
+
+  -- L1: the sync runs to completion, and 'interposeRemoval' drops x during its
+  -- off-lock read.
+  syncResp <- semantics nullTracer (Action SyncLedger) sutVar
+
+  -- R1, R2: mirror L1 on the model — remove, then sync, the only sensible
+  -- linearization.
+  let model3 = transition model2 (Action (RemoveTxs [xid])) Void
+      model4 = transition model3 (Action SyncLedger) syncResp
+
+  -- X3: the snapshot must match the model, i.e. x is gone. Pre-fix the sync
+  -- resurrects x and this 'postcondition' fails.
+  _ <- step model4 (Action GetSnapshot)
+  pure ()
+
+-- | See 'MakeAtomic' on the reasoning behind having these tests.
+tests :: TestTree
+tests =
+  testGroup
+    "QSM"
+    [ testCase "removal is not undone by a concurrent sync" prop_removeDuringSyncSM
+    , testProperty "sequential" $
+        QC.withNumTests 1000 $
+          prop_mempoolSequential testLedgerConfigNoSizeLimits txMaxBytes' testInitLedger $
+            \i -> fmap (fmap fst . fst) . genTxs i
+    , testGroup
+        "parallel"
+        [ -- Restrict the length of the command list for QSM parallel testing.
+          -- More commands require exponentially more memory to explore.
+          localOption (QuickCheckMaxSize 40) $
+            testProperty "atomic" $
+              QC.withNumTests 1000 $
+                prop_mempoolParallel testLedgerConfigNoSizeLimits txMaxBytes' testInitLedger Atomic $
+                  \i -> fmap (fmap fst . fst) . genTxs i
+        , testProperty "non atomic" $
+            QC.withNumTests 10 $
+              prop_mempoolParallel testLedgerConfigNoSizeLimits txMaxBytes' testInitLedger NonAtomic $
+                \i -> fmap (fmap fst . fst) . genTxs i
+        ]
+    ]
+
+{-------------------------------------------------------------------------------
+  Instances
+-------------------------------------------------------------------------------}
+
+-- | The 'TestBlock' txMaxBytes is fixed to a very high number. We use this
+-- local declaration to have a mempool that sometimes fill but still don't make
+-- it configurable.
+txMaxBytes' :: TxMeasure TestBlock
+txMaxBytes' = TxMeasure (IgnoringOverflow $ ByteSize32 maxBound) TrivialTxMeasurePhase2
+
+instance
+  (StandardHash blk, GetTip (LedgerState blk)) =>
+  Eq (LedgerState blk ValuesMK)
+  where
+  (==) = (==) `on` getTip
+
+instance
+  (UnTick blk, StandardHash blk, GetTip (LedgerState blk)) =>
+  Eq (TickedLedgerState blk ValuesMK)
+  where
+  (==) = (==) `on` (getTip . unTick)
+
+instance
+  (StandardHash blk, GetTip (LedgerState blk)) =>
+  Ord (LedgerState blk ValuesMK)
+  where
+  compare = compare `on` getTip
+
+instance (Eq (Validated (GenTx blk)), m ~ TxMeasure blk, Eq m) => Eq (TxSeq m (Validated (GenTx blk))) where
+  s1 == s2 = toList s1 == toList s2
+
+instance NoThunks (Mempool IO TestBlock) where
+  showTypeOf _ = showTypeOf (Proxy @(Mempool IO TestBlock))
+  wNoThunks _ _ = return Nothing
+
+instance
+  ( ToExpr (GenTx blk)
+  , ToExpr (LedgerState blk ValuesMK)
+  , ToExpr (TickedLedgerState blk ValuesMK)
+  , LedgerSupportsMempool blk
+  ) =>
+  ToExpr (Model blk r)
+  where
+  toExpr model =
+    Rec "Model" $
+      TD.fromList
+        [ ("mempoolTip", toExpr $ modelMempoolIntermediateState model)
+        , ("ledgerTip", toExpr $ modelLedgerDBTip model)
+        , ("txs", toExpr $ modelTxs model)
+        , ("size", toExpr $ unByteSize32 $ txMeasureByteSize $ modelCurrentSize model)
+        , ("capacity", toExpr $ unByteSize32 $ txMeasureByteSize $ modelCapacity model)
+        , ("lastTicket", toExpr $ modelLastSeenTicketNo model)
+        ]
+
+instance
+  ( ToExpr (GenTx blk)
+  , ToExpr (TickedLedgerState blk ValuesMK)
+  , ToExpr (LedgerState blk ValuesMK)
+  , LedgerSupportsMempool blk
+  ) =>
+  Show (Model blk r)
+  where
+  show = show . toExpr
+
+instance ToExpr (Action TestBlock r) where
+  toExpr (TryAddTxs txs) =
+    App "TryAddTxs" $
+      [ App
+          ( take 8 (tail $ init $ show txid)
+              <> " "
+              <> filter (/= '"') (show [(take 8 (tail $ init $ show a), b) | (a, b) <- Set.toList txins])
+              <> " ->> "
+              <> filter (/= '"') (show [(condense a, b) | (_, (a, b)) <- Map.toList txouts])
+              <> ""
+          )
+          []
+      | SimpleGenTx tx txid <- txs
+      , let txins = Mock.txIns tx
+      , let txouts = Mock.txOuts tx
+      ]
+  toExpr SyncLedger = App "SyncLedger" []
+  toExpr GetSnapshot = App "GetSnapshot" []
+  toExpr (RemoveTxs ids) =
+    App "RemoveTxs" [App (take 8 (tail $ init $ show i)) [] | i <- ids]
+
+instance ToExpr (LedgerState blk ValuesMK) => ToExpr (Event blk r) where
+  toExpr (ChangeLedger ls) =
+    App "ChangeLedger" [toExpr ls]
+
+instance ToExpr (Command TestBlock r) where
+  toExpr (Action act) = toExpr act
+  toExpr (Event ev) = toExpr ev
+
+instance ToExpr (Command blk r) => Show (Command blk r) where
+  show =
+    -- unwords . take 2 . words .
+    show . toExpr
+
+instance
+  ( ToExpr (GenTx blk)
+  , LedgerSupportsMempool blk
+  ) =>
+  ToExpr (Response blk r)
+  where
+  toExpr Void = App "Void" []
+  toExpr (GotSnapshot s) =
+    App
+      "GotSnapshot"
+      [Lst [toExpr s]]
+  toExpr (AddResult res) =
+    App "AddResult" $
+      [ Lst $
+          map
+            ( (flip App []) . \case
+                MempoolTxAdded{} -> "OK"
+                MempoolTxRejected{} -> "NO"
+            )
+            res
+      ]
+  toExpr (Synced res) =
+    App "Synced" [App (show res) []]
+
+instance
+  ( ToExpr (GenTx blk)
+  , LedgerSupportsMempool blk
+  ) =>
+  Show (Response blk r)
+  where
+  show =
+    -- unwords . take 2 . words .
+    show . toExpr
+
+deriving instance NoThunks (LedgerState blk ValuesMK) => NoThunks (MockedLedgerDB blk)
+
+instance Arbitrary (LedgerState TestBlock ValuesMK) where
+  arbitrary = do
+    n <- getPositive <$> arbitrary
+    (txs, _) <- genValidTxs n testInitLedger
+    case runExcept $ repeatedlyM (flip (applyTxToLedger testLedgerConfigNoSizeLimits)) txs testInitLedger of
+      Left _ -> error "Must not happen"
+      Right st -> pure st
+
+instance ToExpr (TickedLedgerState TestBlock ValuesMK) where
+  toExpr (TickedSimpleLedgerState st) = App "Ticked" [toExpr st]
+
+instance ToExpr (LedgerState TestBlock ValuesMK) where
+  toExpr (SimpleLedgerState st tbs) =
+    App "LedgerState" $
+      [ Lst
+          [ toExpr (pointSlot $ mockTip st, pointHash $ mockTip st)
+          , toExpr tbs
+          ]
+      ]
+
+instance ToExpr Addr where
+  toExpr a = App (show a) []
+
+deriving instance ToExpr (GenTx TestBlock)
+deriving instance ToExpr Tx
+deriving instance ToExpr Expiry
+
+instance ToExpr (LedgerTables TestBlock ValuesMK) where
+  toExpr (LedgerTables (ValuesMK v)) = Lst [toExpr (condense txin, condense txout) | (txin, txout) <- Map.toList v]
+
+instance ToExpr (ValuesMK TxIn TxOut) where
+  toExpr (ValuesMK m) = App "Values" [toExpr m]
+
+class UnTick blk where
+  unTick :: forall mk. TickedLedgerState blk mk -> LedgerState blk mk
+
+instance UnTick TestBlock where
+  unTick = getTickedSimpleLedgerState

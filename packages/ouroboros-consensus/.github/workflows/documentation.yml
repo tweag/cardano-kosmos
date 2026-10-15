@@ -1,0 +1,59 @@
+name: Documentation
+
+# Limit concurrent runs of this workflow within a single PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+  merge_group:
+
+jobs:
+  # https://docusaurus.io/docs/deployment#triggering-deployment-with-github-actions
+  #
+  # We test the website build on pull requests, without building any static
+  # assets (pdfs, haddocks), and without deploying the website to github-pages.
+  # The build should still succeed regardless, and serves as a check before we
+  # deploy the documentation website on the default branch.
+  test-deploy-documentation:
+    name: Test documentation deployment
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./docs/website
+    strategy:
+       fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installs the Yarn shim, which provisions the exact version named by the
+      # "packageManager" field of docs/website/package.json. Must run before
+      # setup-node, whose "cache: yarn" probes the active Yarn to locate its
+      # cache folder; the runner's default Yarn is Classic 1.x, which differs.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: yarn
+          cache-dependency-path: './docs/website/yarn.lock'
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - name: Build PDFs (Consensus report)
+        run: |
+          nix build -L .#consensus-pdfs
+          cp -r --no-preserve=mode,ownership result/ static/pdfs
+
+      - name: Install dependencies
+        run: |
+          yarn --version
+          yarn install --immutable
+      - name: Test build website
+        run: yarn build

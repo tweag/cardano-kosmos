@@ -1,0 +1,18 @@
+-- cabal-allow-newer
+if impl(ghc >=9.14)
+  allow-newer:
+    , canonical-json:containers
+    , cborg-json:base
+    , cborg:base
+    , cborg:containers
+    , compact:base
+    , dependent-map:containers
+    , dictionary-sharing:containers
+    , latex-svg-image:base
+    , safe-wild-cards:template-haskell
+    , serdoc-core:template-haskell
+    , serialise:base
+    , serialise:containers
+    , serialise:time
+    , tdigest:base
+    , with-utf8:base

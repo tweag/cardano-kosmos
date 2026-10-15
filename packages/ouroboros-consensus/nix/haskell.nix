@@ -1,0 +1,172 @@
+inputs: final: prev:
+
+let
+  inherit (prev) lib;
+  fs = lib.fileset;
+  inherit (final) haskell-nix;
+  # We're restricting the source closure for the Haskell project to avoid unnecessary reruns of builds and tests.
+  # NOTE(bladyjoker): Add any files needed for the Haskell compilation here.
+  ouroborosConsensusSrc = fs.toSource {
+    root = ./..;
+    fileset = fs.unions [
+      ../LICENSE
+      ../NOTICE
+      ../cabal
+      ../cabal.project
+      ../golden
+      ../ouroboros-consensus
+      ../ouroboros-consensus-cardano
+      ../ouroboros-consensus-diffusion
+      ../ouroboros-consensus-protocol
+      ../ouroboros-consensus.cabal
+      ../tracing
+    ];
+  };
+  forAllProjectPackages = cfg: args@{ config, lib, ... }: {
+    options.packages = lib.genAttrs config.package-keys (_:
+      lib.mkOption {
+        type = lib.types.submodule ({ config, lib, ... }:
+          lib.mkIf config.package.isProject (cfg args)
+        );
+      });
+  };
+  forAllPackages = cfg: args@{ config, lib, ... }: {
+    options.packages = lib.genAttrs config.package-keys (_:
+      lib.mkOption {
+        type = lib.types.submodule ({ ... }: cfg args);
+      });
+  };
+  hsPkgs = haskell-nix.cabalProject {
+    src = ouroborosConsensusSrc;
+    compiler-nix-name = "ghc967";
+    flake.variants = {
+      ghc914 = { compiler-nix-name = lib.mkForce "ghc9141"; };
+    };
+    inputMap = {
+      "https://chap.intersectmbo.org/" = inputs.CHaP;
+    };
+    modules = [
+      (forAllProjectPackages ({ ... }: {
+        ghcOptions = [ "-Werror" ];
+      }))
+      {
+        # disable haddocks for cardano-diffusion due to https://gitlab.haskell.org/ghc/ghc/-/issues/25739,
+        # and cardano-diffusion uses `type data` which triggers the bug.
+        # FIXME: we can remove that once ghc9123 is available
+        packages.cardano-diffusion.doHaddock = false;
+        packages.ouroboros-network.doHaddock = false;
+        # disable haddocks some ledger packages as well because of https://gitlab.haskell.org/ghc/ghc/-/issues/25739.
+        # FIXME: we can remove that once ghc9123 is available
+        packages.cardano-ledger-allegra.components.library.doHaddock = false;
+        packages.cardano-ledger-alonzo.components.library.doHaddock = false;
+        packages.cardano-ledger-babbage.components.library.doHaddock = false;
+        packages.cardano-ledger-binary.components.library.doHaddock = false;
+        packages.cardano-ledger-conway.components.library.doHaddock = false;
+        packages.cardano-ledger-core.components.library.doHaddock = false;
+        packages.cardano-ledger-dijkstra.components.library.doHaddock = false;
+        packages.cardano-ledger-mary.components.library.doHaddock = false;
+        packages.cardano-ledger-shelley.components.library.doHaddock = false;
+        # Options related to tasty and tasty-golden. The golden files live
+        # outside their test component's hs-source-dirs, so each one has to be
+        # listed here; otherwise haskell.nix prunes it out of the component
+        # source and tasty-golden creates it and passes instead of comparing.
+        packages.ouroboros-consensus.components.tests = lib.mapAttrs
+          (_: golden: {
+            testFlags = lib.mkForce [ "--no-create --hide-successes" ];
+            extraSrcFiles = [ "${golden}/**/*" ];
+          })
+          {
+            byron-test = "ouroboros-consensus-cardano/golden/byron";
+            shelley-test = "ouroboros-consensus-cardano/golden/shelley";
+            cardano-test = "ouroboros-consensus-cardano/golden/cardano";
+            tracing-test = "golden/tracing";
+          };
+      }
+      ({ pkgs, lib, ... }: lib.mkIf pkgs.stdenv.hostPlatform.isWindows {
+        # https://github.com/input-output-hk/haskell.nix/issues/2332
+        packages.basement.configureFlags = [ "--hsc2hs-option=--cflag=-Wno-int-conversion" ];
+        # We can't cross-compile the ruby gem `cddlc` so we decided to skip this
+        # test on Windows in Hydra.
+        packages.ouroboros-consensus.components.tests.cardano-test.preCheck = ''
+          export DISABLE_CDDLC=1
+        '';
+      })
+      ({ pkgs, ... }: lib.mkIf (!pkgs.stdenv.hostPlatform.isWindows) {
+        # Tools for CBOR/CDDL tests:
+        packages.ouroboros-consensus.components.tests.cardano-test = {
+          build-tools =
+            [ pkgs.cddlc pkgs.cuddle ];
+          extraSrcFiles = [ "ouroboros-consensus-cardano/cddl/**/*" ];
+        };
+      })
+    ];
+    flake.variants = {
+      noAsserts = {
+        src = lib.mkForce (final.applyPatches {
+          name = "consensus-src-no-asserts";
+          src = ouroborosConsensusSrc;
+          postPatch = ''echo > cabal/asserts.cabal'';
+        });
+      };
+      profiled = {
+        modules = [{
+          enableLibraryProfiling = true;
+          enableProfiling = true;
+          # https://well-typed.com/blog/2023/03/prof-late/
+          profilingDetail = "late";
+        }];
+      };
+      ipe = {
+        compilerSelection = lib.mkForce (p:
+          lib.mapAttrs (_: ghc: ghc.override { enableIPE = true; })
+            p.haskell-nix.compiler);
+        modules = [
+          (forAllPackages ({ ... }: {
+            ghcOptions = [ "-finfo-table-map" "-fdistinct-constructor-tables" ];
+          }))
+        ];
+      };
+    };
+  };
+in
+{
+  inherit hsPkgs;
+
+  cabal-docspec-check = final.stdenv.mkDerivation {
+    name = "cabal-docspec-check";
+
+    src = fs.toSource {
+      root = ./..;
+      fileset = fs.unions [
+        (fs.fileFilter (f: f.hasExt "cabal" || f.hasExt "hs") ./..)
+      ];
+    };
+
+    nativeBuildInputs = [
+      final.fd
+      final.cabal-docspec
+      (hsPkgs.shellFor {
+        withHoogle = false;
+        exactDeps = true;
+        packages = _: [ ];
+        additional = (ps: [ ps.latex-svg-image ] ++ lib.filter (p: p ? components.library)
+          (lib.attrValues (haskell-nix.haskellLib.selectProjectPackages ps)));
+      }).ghc
+      final.texliveFull
+    ];
+
+    # `cabal-docspec` doesn't use XDG, so we need to trick it with a fake
+    # `$CABAL_DIR`
+    #
+    # `--no-cabal-plan` now parses its arg as a package name (no dots/slashes),
+    # then uses it verbatim as the .cabal path, so we symlink the file under a
+    # dot-free name that doesn't clash with the existing `ouroboros-consensus/`
+    # dir
+    buildPhase = ''
+      export CABAL_DIR=$(mktemp -d)
+      touch $CABAL_DIR/config $out
+      ln -s ouroboros-consensus.cabal consensus-docspec
+      cabal-docspec --no-cabal-plan consensus-docspec
+    '';
+  };
+}

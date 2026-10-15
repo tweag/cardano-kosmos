@@ -1,0 +1,419 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.Dijkstra.Arbitrary (
+  genNonEmptyAccountBalanceIntervals,
+  genSmallDijkstraTxsBlockBody,
+  genSmallDijkstraCertBlockBody,
+) where
+
+import Cardano.Ledger.Allegra.Scripts (
+  pattern RequireTimeExpire,
+  pattern RequireTimeStart,
+ )
+import Cardano.Ledger.Alonzo.Plutus.Context (ContextError)
+import Cardano.Ledger.BaseTypes (StrictMaybe (..))
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.Dijkstra (ApplyTxError (DijkstraApplyTxError), DijkstraEra)
+import Cardano.Ledger.Dijkstra.BlockBody (PerasCert (..))
+import Cardano.Ledger.Dijkstra.Core
+import Cardano.Ledger.Dijkstra.Genesis (DijkstraGenesis (..))
+import Cardano.Ledger.Dijkstra.PParams (
+  DijkstraPParams,
+  UpgradeDijkstraPParams (..),
+ )
+import Cardano.Ledger.Dijkstra.Rules
+import Cardano.Ledger.Dijkstra.Scripts
+import Cardano.Ledger.Dijkstra.Transition (TransitionConfig (..))
+import Cardano.Ledger.Dijkstra.Tx (DijkstraTx (..), Tx (..))
+import Cardano.Ledger.Dijkstra.TxBody (TxBody (..))
+import Cardano.Ledger.Dijkstra.TxCert
+import Cardano.Ledger.Dijkstra.TxInfo (DijkstraContextError)
+import Cardano.Ledger.Plutus (Language (..))
+import Cardano.Ledger.Shelley.Scripts (pattern RequireSignature)
+import Data.Functor.Identity (Identity)
+import qualified Data.Map.Strict as Map
+import qualified Data.OMap.Strict as OMap
+import qualified Data.Sequence.Strict as SSeq
+import Data.Typeable (Typeable)
+import Generic.Random (genericArbitraryU)
+import Lens.Micro ((&), (.~))
+import Test.Cardano.Ledger.Allegra.Arbitrary (maxTimelockDepth)
+import Test.Cardano.Ledger.Alonzo.Arbitrary (genValidCostModel)
+import Test.Cardano.Ledger.Common
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Shelley.Arbitrary (sizedNativeScriptGens)
+
+instance Arbitrary (DijkstraPParams Identity DijkstraEra) where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (DijkstraPParams StrictMaybe DijkstraEra) where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (TxBody SubTx DijkstraEra) where
+  arbitrary =
+    DijkstraSubTxBody
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> scale (`div` 15) arbitrary
+      <*> arbitrary
+      <*> scale (`div` 15) arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+instance Arbitrary (TxBody TopTx DijkstraEra) where
+  arbitrary =
+    DijkstraTxBody
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> scale (`div` 15) arbitrary
+      <*> arbitrary
+      <*> scale (`div` 15) arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> (choose (0, 4) >>= \n -> OMap.fromFoldable <$> vectorOf n arbitrary)
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+instance Arbitrary (UpgradeDijkstraPParams Identity DijkstraEra) where
+  arbitrary =
+    UpgradeDijkstraPParams
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> genValidCostModel PlutusV4
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+instance Arbitrary DijkstraGenesis where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (TransitionConfig DijkstraEra) where
+  arbitrary = DijkstraTransitionConfig <$> arbitrary <*> arbitrary
+
+instance
+  (forall a b. (Arbitrary a, Arbitrary b) => Arbitrary (f a b)) =>
+  Arbitrary (DijkstraPlutusPurpose f DijkstraEra)
+  where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (DijkstraNativeScript DijkstraEra) where
+  arbitrary = sizedDijkstraNativeScript maxTimelockDepth
+
+sizedDijkstraNativeScript ::
+  DijkstraEraScript era =>
+  Int ->
+  Gen (NativeScript era)
+sizedDijkstraNativeScript 0 = RequireSignature <$> arbitrary
+sizedDijkstraNativeScript n =
+  oneof $
+    sizedNativeScriptGens n sizedDijkstraNativeScript
+      <> [ RequireTimeStart <$> arbitrary
+         , RequireTimeExpire <$> arbitrary
+         , RequireGuard <$> arbitrary
+         ]
+
+instance (Arbitrary (TxBody l DijkstraEra), Typeable l) => Arbitrary (Tx l DijkstraEra) where
+  arbitrary =
+    fmap MkDijkstraTx . withSTxBothLevels @l $ \case
+      -- Per CIP-0167, Dijkstra transactions should always have isPhase2Valid = Phase2Valid
+      -- The isPhase2Valid flag is omitted in serialization and defaults to Phase2Valid
+      STopTx -> DijkstraTx <$> arbitrary <*> arbitrary <*> pure Phase2Valid <*> arbitrary
+      SSubTx -> DijkstraSubTx <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance Era era => Arbitrary (DijkstraTxCert era) where
+  arbitrary =
+    oneof
+      [ DijkstraTxCertDeleg <$> arbitrary
+      , DijkstraTxCertPool <$> arbitrary
+      , DijkstraTxCertGov <$> arbitrary
+      ]
+
+instance Arbitrary DijkstraDelegCert where
+  arbitrary = DijkstraRegDelegCert <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance
+  ( EraPParams era
+  , Arbitrary (PlutusPurpose AsItem era)
+  , Arbitrary (PlutusPurpose AsIx era)
+  , Arbitrary (PParamsHKD Identity era)
+  , Arbitrary (PParamsHKD StrictMaybe era)
+  , Arbitrary (TxCert era)
+  , Arbitrary (TxOut era)
+  , Arbitrary (ContextError era)
+  ) =>
+  Arbitrary (DijkstraContextError era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "LEDGERS" era))
+  ) =>
+  Arbitrary (DijkstraBbodyPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "UTXOW" era))
+  , Arbitrary (PredicateFailure (EraRule "ENTITIES" era))
+  , Arbitrary (PredicateFailure (EraRule "GOV" era))
+  , Arbitrary (PredicateFailure (EraRule "SUBLEDGERS" era))
+  ) =>
+  Arbitrary (DijkstraLedgerPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "CERTS" era))
+  ) =>
+  Arbitrary (EntitiesPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( EraTxOut era
+  , Arbitrary (Value era)
+  , Arbitrary (TxOut era)
+  , Arbitrary (PredicateFailure (EraRule "UTXOS" era))
+  ) =>
+  Arbitrary (DijkstraUtxoPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "UTXO" era))
+  , Arbitrary (TxCert era)
+  , Arbitrary (PlutusPurpose AsItem era)
+  , Arbitrary (PlutusPurpose AsIx era)
+  ) =>
+  Arbitrary (DijkstraUtxowPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance Era era => Arbitrary (DijkstraGovCertPredFailure era) where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PParamsHKD StrictMaybe era)
+  ) =>
+  Arbitrary (DijkstraGovPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  Arbitrary (PredicateFailure (EraRule "SUBLEDGER" era)) =>
+  Arbitrary (DijkstraSubLedgersPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Arbitrary (PredicateFailure (EraRule "SUBGOV" era))
+  , Arbitrary (PredicateFailure (EraRule "SUBENTITIES" era))
+  , Arbitrary (PredicateFailure (EraRule "SUBUTXOW" era))
+  ) =>
+  Arbitrary (DijkstraSubLedgerPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  Arbitrary (PredicateFailure (EraRule "SUBCERTS" era)) =>
+  Arbitrary (SubEntitiesPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Arbitrary (PredicateFailure (EraRule "SUBDELEG" era))
+  , Arbitrary (PredicateFailure (EraRule "SUBPOOL" era))
+  , Arbitrary (PredicateFailure (EraRule "SUBGOVCERT" era))
+  ) =>
+  Arbitrary (DijkstraSubCertPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  Arbitrary (PredicateFailure (EraRule "SUBCERT" era)) =>
+  Arbitrary (DijkstraSubCertsPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (DijkstraPoolPredFailure era) where
+  arbitrary = genericArbitraryU
+  shrink = genericShrink
+
+instance
+  Arbitrary (Conway.ConwayDelegPredFailure era) =>
+  Arbitrary (DijkstraSubDelegPredFailure era)
+  where
+  arbitrary = DijkstraSubDelegPredFailure <$> arbitrary
+
+instance
+  Arbitrary (DijkstraGovPredFailure era) =>
+  Arbitrary (DijkstraSubGovPredFailure era)
+  where
+  arbitrary = DijkstraSubGovPredFailure <$> arbitrary
+
+instance
+  Arbitrary (DijkstraGovCertPredFailure era) =>
+  Arbitrary (DijkstraSubGovCertPredFailure era)
+  where
+  arbitrary = DijkstraSubGovCertPredFailure <$> arbitrary
+
+instance
+  Arbitrary (DijkstraPoolPredFailure era) =>
+  Arbitrary (DijkstraSubPoolPredFailure era)
+  where
+  arbitrary = DijkstraSubPoolPredFailure <$> arbitrary
+
+instance
+  ( EraTxOut era
+  , Arbitrary (Value era)
+  , Arbitrary (TxOut era)
+  ) =>
+  Arbitrary (DijkstraSubUtxoPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  ( Era era
+  , Arbitrary (PredicateFailure (EraRule "SUBUTXO" era))
+  , Arbitrary (TxCert era)
+  , Arbitrary (PlutusPurpose AsItem era)
+  , Arbitrary (PlutusPurpose AsIx era)
+  ) =>
+  Arbitrary (DijkstraSubUtxowPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary PerasCert where
+  arbitrary = PerasCert <$> arbitrary
+
+instance
+  ( EraBlockBody era
+  , AlonzoEraTx era
+  , Arbitrary (Tx TopTx era)
+  , SafeToHash (TxWits era)
+  ) =>
+  Arbitrary (DijkstraBlockBody era)
+  where
+  arbitrary =
+    DijkstraBlockBody
+      <$> arbitrary
+      <*> arbitrary
+      <*> arbitrary
+
+-- | Generate the "TxsRB" form of a Dijkstra block body: a few transactions are
+-- present and no Leios certificate is attached. Transaction count and per-tx
+-- size are kept small so the round-trip is fast under shrinking.
+genSmallDijkstraTxsBlockBody ::
+  ( AlonzoEraTx era
+  , Arbitrary (Tx TopTx era)
+  ) =>
+  Gen (DijkstraBlockBody era)
+genSmallDijkstraTxsBlockBody =
+  DijkstraBlockBody
+    <$> genFewTxs
+    <*> pure SNothing
+    <*> arbitrary
+  where
+    genFewTxs = sized $ \sz -> do
+      numTxs <-
+        frequency
+          [ (99, choose (1, max 1 $ sz `div` 20))
+          , (1, pure 0)
+          ]
+      SSeq.fromList <$> vectorOf numTxs (scale (`div` numTxs) genTxInBlock)
+    -- In a block the `is_valid` flag is set by the block producer, so unlike in
+    -- submitted transactions it can be `False`.
+    genTxInBlock = do
+      tx <- arbitrary
+      isPhase2Valid <- arbitrary
+      pure $ tx & isPhase2ValidTxL .~ isPhase2Valid
+
+-- | Generate the "CertRB" form of a Dijkstra block body: a Leios certificate is
+-- present and the transaction sequence is empty (per CIP-164, a CertRB never
+-- carries Dijkstra-era transactions). The Peras certificate is also omitted so
+-- the wire form is minimal.
+genSmallDijkstraCertBlockBody ::
+  AlonzoEraTx era =>
+  Gen (DijkstraBlockBody era)
+genSmallDijkstraCertBlockBody =
+  DijkstraBlockBody mempty
+    <$> (SJust <$> arbitrary)
+    <*> pure SNothing
+
+deriving newtype instance Arbitrary (ApplyTxError DijkstraEra)
+
+instance Arbitrary (DijkstraMempoolPredFailure DijkstraEra) where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary (AccountBalanceIntervals era) where
+  arbitrary = genericArbitraryU
+  shrink = genericShrink
+
+genNonEmptyAccountBalanceIntervals :: Gen (AccountBalanceIntervals era)
+genNonEmptyAccountBalanceIntervals = AccountBalanceIntervals . Map.fromList . getNonEmpty <$> arbitrary
+
+instance Arbitrary (AccountBalanceInterval era) where
+  arbitrary = genericArbitraryU
+  shrink = genericShrink

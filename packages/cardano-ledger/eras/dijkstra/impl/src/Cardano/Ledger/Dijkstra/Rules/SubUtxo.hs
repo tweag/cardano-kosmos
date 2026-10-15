@@ -1,0 +1,329 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE EmptyDataDeriving #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Dijkstra.Rules.SubUtxo (
+  SUBUTXO,
+  DijkstraSubUtxoPredFailure (..),
+  DijkstraSubUtxoEvent (..),
+  SubUtxoEnv (..),
+) where
+
+import qualified Cardano.Ledger.Allegra.Rules as Allegra
+import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
+import qualified Cardano.Ledger.Babbage.Rules as Babbage
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+  sizedValue,
+ )
+import Cardano.Ledger.Binary.Coders
+import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.Governance
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.Dijkstra.Era (
+  DijkstraEra,
+  SUBUTXO,
+ )
+import Cardano.Ledger.Dijkstra.Rules.Utxo (
+  DijkstraUtxoPredFailure (..),
+  conwayToDijkstraUtxoPredFailure,
+ )
+import Cardano.Ledger.Dijkstra.TxBody (DijkstraEraTxBody)
+import Cardano.Ledger.Rules.ValidationMode
+import Cardano.Ledger.Shelley.LedgerState (UTxOState, utxosDonationL, utxosUtxo)
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.State
+import Cardano.Ledger.TxIn (TxIn)
+import Control.DeepSeq (NFData)
+import Control.Monad.Trans.Reader (asks)
+import Control.State.Transition.Extended
+import Data.List.NonEmpty (NonEmpty)
+import Data.Set.NonEmpty (NonEmptySet)
+import Data.Word (Word32)
+import GHC.Generics (Generic)
+import Lens.Micro
+
+data SubUtxoEnv era = SubUtxoEnv
+  { sueSlot :: SlotNo
+  , suePParams :: PParams era
+  , sueCertState :: CertState era
+  , sueOriginalUtxo :: UTxO era
+  , sueTopTxIsPhase2Valid :: IsPhase2Valid
+  }
+
+data DijkstraSubUtxoPredFailure era
+  = -- | The bad transaction inputs
+    SubBadInputsUTxO (NonEmptySet TxIn)
+  | SubOutsideValidityIntervalUTxO
+      -- | transaction's validity interval
+      ValidityInterval
+      -- | current slot
+      SlotNo
+  | SubMaxTxSizeUTxO (Mismatch RelLTEQ Word32)
+  | SubInputSetEmptyUTxO
+  | -- | the set of addresses with incorrect network IDs
+    SubWrongNetwork
+      -- | the expected network id
+      Network
+      -- | the set of addresses with incorrect network IDs
+      (NonEmptySet Addr)
+  | -- | list of supplied bad transaction outputs
+    SubOutputBootAddrAttrsTooBig (NonEmpty (TxOut era))
+  | -- | list of supplied bad transaction output triples (actualSize,PParameterMaxValue,TxOut)
+    SubOutputTooBigUTxO (NonEmpty (Int, Int, TxOut era))
+  | -- | Wrong Network ID in body
+    SubWrongNetworkInTxBody
+      (Mismatch RelEQ Network)
+  | -- | slot number outside consensus forecast range
+    SubOutsideForecast SlotNo
+  | -- | list of supplied transaction outputs that are too small,
+    -- together with the minimum value for the given output.
+    SubBabbageOutputTooSmallUTxO (NonEmpty (TxOut era, Coin))
+  deriving (Generic)
+
+deriving stock instance
+  ( Era era
+  , Eq (Value era)
+  , Eq (TxOut era)
+  , Eq (Script era)
+  , Eq TxIn
+  ) =>
+  Eq (DijkstraSubUtxoPredFailure era)
+
+deriving stock instance
+  ( Era era
+  , Ord (Value era)
+  , Ord (TxOut era)
+  , Ord (Script era)
+  , Ord TxIn
+  ) =>
+  Ord (DijkstraSubUtxoPredFailure era)
+
+deriving stock instance
+  ( Era era
+  , Show (Value era)
+  , Show (TxOut era)
+  , Show (Script era)
+  , Show TxIn
+  ) =>
+  Show (DijkstraSubUtxoPredFailure era)
+
+instance
+  ( Era era
+  , NFData (Value era)
+  , NFData (TxOut era)
+  ) =>
+  NFData (DijkstraSubUtxoPredFailure era)
+
+type instance EraRuleFailure "SUBUTXO" DijkstraEra = DijkstraSubUtxoPredFailure DijkstraEra
+
+type instance EraRuleEvent "SUBUTXO" DijkstraEra = DijkstraSubUtxoEvent DijkstraEra
+
+instance InjectRuleFailure "SUBUTXO" DijkstraSubUtxoPredFailure DijkstraEra
+
+instance InjectRuleFailure "SUBUTXO" DijkstraUtxoPredFailure DijkstraEra where
+  injectFailure = dijkstraUtxoToDijkstraSubUtxoPredFailure
+
+instance InjectRuleFailure "SUBUTXO" Conway.ConwayUtxoPredFailure DijkstraEra where
+  injectFailure = dijkstraUtxoToDijkstraSubUtxoPredFailure . conwayToDijkstraUtxoPredFailure
+
+instance InjectRuleFailure "SUBUTXO" Alonzo.AlonzoUtxoPredFailure DijkstraEra where
+  injectFailure =
+    dijkstraUtxoToDijkstraSubUtxoPredFailure
+      . conwayToDijkstraUtxoPredFailure
+      . Conway.alonzoToConwayUtxoPredFailure
+
+instance InjectRuleFailure "SUBUTXO" Babbage.BabbageUtxoPredFailure DijkstraEra where
+  injectFailure =
+    dijkstraUtxoToDijkstraSubUtxoPredFailure
+      . conwayToDijkstraUtxoPredFailure
+      . Conway.babbageToConwayUtxoPredFailure
+
+instance InjectRuleFailure "SUBUTXO" Allegra.AllegraUtxoPredFailure DijkstraEra where
+  injectFailure =
+    dijkstraUtxoToDijkstraSubUtxoPredFailure
+      . conwayToDijkstraUtxoPredFailure
+      . Conway.allegraToConwayUtxoPredFailure
+
+instance InjectRuleFailure "SUBUTXO" Shelley.ShelleyUtxoPredFailure DijkstraEra where
+  injectFailure =
+    dijkstraUtxoToDijkstraSubUtxoPredFailure
+      . conwayToDijkstraUtxoPredFailure
+      . Conway.allegraToConwayUtxoPredFailure
+      . Allegra.shelleyToAllegraUtxoPredFailure
+
+instance InjectRuleEvent "SUBUTXO" DijkstraSubUtxoEvent DijkstraEra
+
+data DijkstraSubUtxoEvent era
+  = TotalDeposits (SafeHash EraIndependentTxBody) Coin
+  | -- | The UTxOs consumed and created by a signal tx
+    TxUTxODiff
+      -- | UTxO consumed
+      (UTxO era)
+      -- | UTxO created
+      (UTxO era)
+  deriving (Generic)
+
+deriving instance (Era era, Eq (TxOut era)) => Eq (DijkstraSubUtxoEvent era)
+
+instance (Era era, NFData (TxOut era)) => NFData (DijkstraSubUtxoEvent era)
+
+instance
+  ( EraTx era
+  , EraStake era
+  , EraCertState era
+  , DijkstraEraTxBody era
+  , AlonzoEraTxWits era
+  , ConwayEraGov era
+  , EraRule "SUBUTXO" era ~ SUBUTXO era
+  , InjectRuleFailure "SUBUTXO" Shelley.ShelleyUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Allegra.AllegraUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Alonzo.AlonzoUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Babbage.BabbageUtxoPredFailure era
+  ) =>
+  STS (SUBUTXO era)
+  where
+  type State (SUBUTXO era) = UTxOState era
+  type Signal (SUBUTXO era) = StAnnTx SubTx era
+  type Environment (SUBUTXO era) = SubUtxoEnv era
+  type BaseM (SUBUTXO era) = ShelleyBase
+  type PredicateFailure (SUBUTXO era) = DijkstraSubUtxoPredFailure era
+  type Event (SUBUTXO era) = DijkstraSubUtxoEvent era
+
+  transitionRules = [dijkstraSubUtxoTransition @era]
+
+dijkstraSubUtxoTransition ::
+  forall era.
+  ( EraTx era
+  , EraStake era
+  , DijkstraEraTxBody era
+  , AlonzoEraTxWits era
+  , STS (EraRule "SUBUTXO" era)
+  , EraRule "SUBUTXO" era ~ SUBUTXO era
+  , InjectRuleFailure "SUBUTXO" Shelley.ShelleyUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Allegra.AllegraUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Alonzo.AlonzoUtxoPredFailure era
+  , InjectRuleFailure "SUBUTXO" Babbage.BabbageUtxoPredFailure era
+  ) =>
+  TransitionRule (EraRule "SUBUTXO" era)
+dijkstraSubUtxoTransition = do
+  TRC (SubUtxoEnv slot pp _ _ topTxIsPhase2Valid, utxoState, stAnnTx) <-
+    judgmentContext
+  let tx = stAnnTx ^. txStAnnTxG
+
+  let txBody = tx ^. bodyTxL
+
+  runTest $ Allegra.validateOutsideValidityIntervalUTxO slot txBody
+
+  sysSt <- liftSTS $ asks systemStart
+  ei <- liftSTS $ asks epochInfo
+  runTest $ Alonzo.validateOutsideForecast ei slot sysSt tx
+
+  let allSizedOutputs = txBody ^. allSizedOutputsTxBodyF
+  let allOutputs = fmap sizedValue allSizedOutputs
+  runTest $ Alonzo.validateOutputTooBigUTxO pp allOutputs
+
+  runTest $ Shelley.validateInputSetEmptyUTxO txBody
+
+  let inputs = txBody ^. inputsTxBodyL
+  runTest $ Shelley.validateBadInputsUTxO (utxosUtxo utxoState) inputs
+
+  runTestOnSignal $ Shelley.validateOutputBootAddrAttrsTooBig allOutputs
+
+  runTestOnSignal $ Babbage.validateOutputTooSmallUTxO pp allSizedOutputs
+
+  netId <- liftSTS $ asks networkId
+  runTestOnSignal $ Shelley.validateWrongNetwork netId allOutputs
+  runTestOnSignal $ Alonzo.validateWrongNetworkInTxBody netId txBody
+
+  case topTxIsPhase2Valid of
+    Phase2Valid ->
+      Shelley.updateUTxOAndInstantStake
+        txBody
+        (\a b -> tellEvent $ TxUTxODiff a b)
+        (utxoState & utxosDonationL <>~ txBody ^. treasuryDonationTxBodyL)
+    Phase2Invalid ->
+      pure utxoState
+
+instance
+  ( Era era
+  , EncCBOR (TxOut era)
+  ) =>
+  EncCBOR (DijkstraSubUtxoPredFailure era)
+  where
+  encCBOR =
+    encode . \case
+      SubBadInputsUTxO ins -> Sum (SubBadInputsUTxO @era) 0 !> To ins
+      SubOutsideValidityIntervalUTxO a b -> Sum SubOutsideValidityIntervalUTxO 1 !> To a !> To b
+      SubMaxTxSizeUTxO mm -> Sum SubMaxTxSizeUTxO 2 !> To mm
+      SubInputSetEmptyUTxO -> Sum SubInputSetEmptyUTxO 3
+      SubWrongNetwork right wrongs -> Sum (SubWrongNetwork @era) 4 !> To right !> To wrongs
+      SubOutputBootAddrAttrsTooBig outs -> Sum (SubOutputBootAddrAttrsTooBig @era) 6 !> To outs
+      SubOutputTooBigUTxO outs -> Sum (SubOutputTooBigUTxO @era) 7 !> To outs
+      SubWrongNetworkInTxBody mm -> Sum SubWrongNetworkInTxBody 8 !> To mm
+      SubOutsideForecast a -> Sum SubOutsideForecast 9 !> To a
+      SubBabbageOutputTooSmallUTxO x -> Sum SubBabbageOutputTooSmallUTxO 10 !> To x
+
+instance
+  ( Era era
+  , DecCBOR (TxOut era)
+  , EncCBOR (Value era)
+  , DecCBOR (Value era)
+  ) =>
+  DecCBOR (DijkstraSubUtxoPredFailure era)
+  where
+  decCBOR = decode . Summands "DijkstraSubUtxoPredFailure" $ \case
+    0 -> SumD SubBadInputsUTxO <! From
+    1 -> SumD SubOutsideValidityIntervalUTxO <! From <! From
+    2 -> SumD SubMaxTxSizeUTxO <! From
+    3 -> SumD SubInputSetEmptyUTxO
+    4 -> SumD SubWrongNetwork <! From <! From
+    6 -> SumD SubOutputBootAddrAttrsTooBig <! From
+    7 -> SumD SubOutputTooBigUTxO <! From
+    8 -> SumD SubWrongNetworkInTxBody <! From
+    9 -> SumD SubOutsideForecast <! From
+    10 -> SumD SubBabbageOutputTooSmallUTxO <! From
+    n -> Invalid n
+
+dijkstraUtxoToDijkstraSubUtxoPredFailure ::
+  DijkstraUtxoPredFailure era -> DijkstraSubUtxoPredFailure era
+dijkstraUtxoToDijkstraSubUtxoPredFailure = \case
+  UtxosFailure _ -> error "Impossible: `UtxosFailure` for SUBUTXO"
+  BadInputsUTxO x -> SubBadInputsUTxO x
+  OutsideValidityIntervalUTxO vi slotNo -> SubOutsideValidityIntervalUTxO vi slotNo
+  MaxTxSizeUTxO m -> SubMaxTxSizeUTxO m
+  InputSetEmptyUTxO -> SubInputSetEmptyUTxO
+  FeeTooSmallUTxO _ -> error "Impossible: `FeeTooSmallUTxO` for SUBUTXO"
+  ValueNotConservedUTxO _ -> error "Impossible: `ValueNotConservedUTxO` for SUBUTXO"
+  WrongNetwork x y -> SubWrongNetwork x y
+  OutputBootAddrAttrsTooBig xs -> SubOutputBootAddrAttrsTooBig xs
+  OutputTooBigUTxO xs -> SubOutputTooBigUTxO xs
+  InsufficientCollateral _ _ -> error "Impossible: `InsufficientCollateral` for SUBUTXO"
+  ScriptsNotPaidUTxO _ -> error "Impossible: `ScriptsNotPaidUTxO` for SUBUTXO"
+  ExUnitsTooBigUTxO _ -> error "Impossible: `ExUnitsTooBigUTxO` for SUBUTXO"
+  CollateralContainsNonADA _ -> error "Impossible: `CollateralContainsNonADA` for SUBUTXO"
+  WrongNetworkInTxBody m -> SubWrongNetworkInTxBody m
+  OutsideForecast sno -> SubOutsideForecast sno
+  TooManyCollateralInputs _ -> error "Impossible: `TooManyCollateralInputs` for SUBUTXO"
+  NoCollateralInputs -> error "Impossible: `NoCollateralInputs` for SUBUTXO"
+  IncorrectTotalCollateralField _ _ -> error "Impossible: `IncorrectTotalCollateralField` for SUBUTXO"
+  BabbageOutputTooSmallUTxO outs -> SubBabbageOutputTooSmallUTxO outs
+  BabbageNonDisjointRefInputs _ -> error "Impossible: `BabbageNonDisjointRefInputs` for SUBUTXO"
+  PtrPresentInCollateralReturn _ -> error "Impossible: `PtrPresentInCollateralReturn` for SUBUTXO"
+  ValueNotConservedInLegacyMode _ -> error "Impossible: `ValueNotConservedInLegacyMode` for SUBUTXO"

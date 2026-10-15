@@ -1,0 +1,217 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE EmptyDataDeriving #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+#if __GLASGOW_HASKELL__ >= 910
+-- See https://gitlab.haskell.org/ghc/ghc/-/issues/27342
+{-# OPTIONS_GHC -fno-spec-eval #-}
+#endif
+
+module Cardano.Ledger.Dijkstra.Rules.Mempool (
+  MEMPOOL,
+  DijkstraMempoolPredFailure (..),
+  DijkstraMempoolEvent (..),
+) where
+
+import Cardano.Ledger.BaseTypes (ShelleyBase)
+import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
+import Cardano.Ledger.Binary.Coders (
+  Decode (..),
+  Encode (..),
+  decode,
+  encode,
+  (!>),
+  (<!),
+ )
+import Cardano.Ledger.Conway.Governance (ConwayEraGov)
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.Dijkstra.Core
+import Cardano.Ledger.Dijkstra.Era (
+  DijkstraEra,
+  LEDGER,
+  MEMPOOL,
+ )
+import Cardano.Ledger.Dijkstra.Rules.Ledger (
+  DijkstraLedgerEvent,
+  DijkstraLedgerPredFailure (..),
+  conwayToDijkstraLedgerPredFailure,
+ )
+import Cardano.Ledger.Dijkstra.Rules.SubLedgers (DijkstraSubLedgersPredFailure (..))
+import Cardano.Ledger.Dijkstra.Rules.Utxo (DijkstraUtxoPredFailure)
+import Cardano.Ledger.Dijkstra.State
+import Cardano.Ledger.Shelley.LedgerState
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Control.DeepSeq (NFData)
+import Control.State.Transition (
+  BaseM,
+  Environment,
+  Event,
+  PredicateFailure,
+  STS (..),
+  Signal,
+  State,
+  TRC (TRC),
+  TransitionRule,
+  judgmentContext,
+  transitionRules,
+  whenFailureFreeDefault,
+  (?!),
+ )
+import Control.State.Transition.Extended (Embed (..), trans)
+import qualified Data.Map.Strict as Map
+import Data.Text (Text)
+import GHC.Generics (Generic (..))
+import Lens.Micro ((^.))
+
+data DijkstraMempoolPredFailure era
+  = LedgerFailure (PredicateFailure (EraRule "LEDGER" era))
+  | MempoolFailure Text
+  | AllInputsAreSpent
+  deriving (Generic)
+
+type instance EraRuleFailure "MEMPOOL" DijkstraEra = DijkstraMempoolPredFailure DijkstraEra
+
+type instance EraRuleEvent "MEMPOOL" DijkstraEra = DijkstraMempoolEvent DijkstraEra
+
+instance InjectRuleFailure "MEMPOOL" DijkstraMempoolPredFailure DijkstraEra
+
+instance InjectRuleFailure "MEMPOOL" Conway.ConwayLedgerPredFailure DijkstraEra where
+  injectFailure = \case
+    Conway.ConwayMempoolFailure "All inputs are spent. Transaction has probably already been included" -> AllInputsAreSpent
+    Conway.ConwayMempoolFailure predFailureMessage -> MempoolFailure predFailureMessage
+    otherLedgerFailure -> LedgerFailure $ conwayToDijkstraLedgerPredFailure otherLedgerFailure
+
+instance InjectRuleFailure "MEMPOOL" DijkstraUtxoPredFailure DijkstraEra where
+  injectFailure = LedgerFailure . injectFailure
+
+deriving instance
+  Eq (PredicateFailure (EraRule "LEDGER" era)) =>
+  Eq (DijkstraMempoolPredFailure era)
+
+deriving instance
+  Ord (PredicateFailure (EraRule "LEDGER" era)) =>
+  Ord (DijkstraMempoolPredFailure era)
+
+deriving instance
+  Show (PredicateFailure (EraRule "LEDGER" era)) =>
+  Show (DijkstraMempoolPredFailure era)
+
+instance
+  ( Era era
+  , EncCBOR (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  EncCBOR (DijkstraMempoolPredFailure era)
+  where
+  encCBOR =
+    encode . \case
+      LedgerFailure x -> Sum (LedgerFailure @era) 1 !> To x
+      MempoolFailure t -> Sum MempoolFailure 2 !> To t
+      AllInputsAreSpent -> Sum AllInputsAreSpent 3
+
+instance
+  ( Era era
+  , DecCBOR (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  DecCBOR (DijkstraMempoolPredFailure era)
+  where
+  decCBOR = decode . Summands "DijkstraMempoolPredFailure" $ \case
+    1 -> SumD (LedgerFailure @era) <! From
+    2 -> SumD MempoolFailure <! From
+    3 -> SumD AllInputsAreSpent
+    n -> Invalid n
+
+newtype DijkstraMempoolEvent era
+  = LedgerEvent (Event (EraRule "LEDGER" era))
+  deriving (Generic)
+
+deriving instance
+  Eq (Event (EraRule "LEDGER" era)) =>
+  Eq (DijkstraMempoolEvent era)
+
+instance
+  NFData (Event (EraRule "LEDGER" era)) =>
+  NFData (DijkstraMempoolEvent era)
+
+instance
+  ( EraTx era
+  , ConwayEraTxBody era
+  , ConwayEraGov era
+  , ConwayEraCertState era
+  , EraStake era
+  , EraCertState era
+  , Embed (EraRule "LEDGER" era) (MEMPOOL era)
+  , State (EraRule "LEDGER" era) ~ LedgerState era
+  , Eq (PredicateFailure (EraRule "CERTS" era))
+  , Eq (PredicateFailure (EraRule "GOV" era))
+  , Eq (PredicateFailure (EraRule "UTXOW" era))
+  , Eq (PredicateFailure (EraRule "SUBLEDGERS" era))
+  , Show (PredicateFailure (EraRule "CERTS" era))
+  , Show (PredicateFailure (EraRule "GOV" era))
+  , Show (PredicateFailure (EraRule "UTXOW" era))
+  , Show (PredicateFailure (EraRule "SUBLEDGERS" era))
+  , Environment (EraRule "LEDGER" era) ~ Shelley.LedgerEnv era
+  , Signal (EraRule "LEDGER" era) ~ StAnnTx TopTx era
+  , EraRuleFailure "SUBLEDGERS" era ~ DijkstraSubLedgersPredFailure era
+  ) =>
+  STS (MEMPOOL era)
+  where
+  type State (MEMPOOL era) = LedgerState era
+  type Signal (MEMPOOL era) = StAnnTx TopTx era
+  type Environment (MEMPOOL era) = Shelley.LedgerEnv era
+  type BaseM (MEMPOOL era) = ShelleyBase
+  type PredicateFailure (MEMPOOL era) = DijkstraMempoolPredFailure era
+  type Event (MEMPOOL era) = DijkstraMempoolEvent era
+
+  transitionRules = [mempoolTransition @era]
+
+mempoolTransition ::
+  forall era.
+  ( EraTx era
+  , Embed (EraRule "LEDGER" era) (MEMPOOL era)
+  , State (EraRule "LEDGER" era) ~ LedgerState era
+  , Environment (EraRule "LEDGER" era) ~ Shelley.LedgerEnv era
+  , Signal (EraRule "LEDGER" era) ~ StAnnTx TopTx era
+  ) =>
+  TransitionRule (MEMPOOL era)
+mempoolTransition = do
+  TRC trc@(_ledgerEnv, ledgerState, stAnnTx) <-
+    judgmentContext
+  let tx = stAnnTx ^. txStAnnTxG
+
+  -- This rule only gets invoked on transactions within the mempool.
+  -- Add checks here that sanitize undesired transactions.
+
+  -- Detect whether the transaction is probably a duplicate
+  let
+    inputs = tx ^. bodyTxL . inputsTxBodyL
+    UTxO utxo = ledgerState ^. utxoG
+    notAllSpent = any (`Map.member` utxo) inputs
+  notAllSpent
+    ?! AllInputsAreSpent
+
+  -- Continue with LEDGER rules if the transaction is not a duplicate,
+  whenFailureFreeDefault ledgerState $ do
+    trans @(EraRule "LEDGER" era) $ TRC trc
+
+instance
+  ( STS (LEDGER era)
+  , PredicateFailure (EraRule "LEDGER" era) ~ DijkstraLedgerPredFailure era
+  , Event (EraRule "LEDGER" era) ~ DijkstraLedgerEvent era
+  ) =>
+  Embed (LEDGER era) (MEMPOOL era)
+  where
+  wrapFailed = LedgerFailure
+  wrapEvent = LedgerEvent

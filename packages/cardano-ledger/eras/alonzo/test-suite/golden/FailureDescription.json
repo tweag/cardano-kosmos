@@ -1,0 +1,5 @@
+{
+    "description": "A description",
+    "error": "PlutusFailure",
+    "kind": "FailureDescription"
+}

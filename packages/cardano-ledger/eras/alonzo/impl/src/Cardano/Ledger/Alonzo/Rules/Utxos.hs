@@ -1,0 +1,418 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Alonzo.Rules.Utxos (
+  UTXOS,
+  AlonzoUtxosPredFailure (..),
+  lbl2Phase,
+  TagMismatchDescription (..),
+  validBegin,
+  validEnd,
+  invalidBegin,
+  invalidEnd,
+  UtxosEnv (..),
+  AlonzoUtxosEvent (..),
+  when2Phase,
+  FailureDescription (..),
+  scriptFailureToFailureDescription,
+) where
+
+import Cardano.Ledger.Alonzo.Core
+import Cardano.Ledger.Alonzo.Era (AlonzoEra, UTXOS)
+import Cardano.Ledger.Alonzo.Plutus.Context (EraPlutusContext)
+import Cardano.Ledger.Alonzo.Plutus.Evaluate (
+  CollectError (..),
+  evalPlutusScripts,
+ )
+import Cardano.Ledger.Alonzo.Rules.Ppup ()
+import Cardano.Ledger.Alonzo.State
+import Cardano.Ledger.Alonzo.UTxO (AlonzoEraUTxO (..), AlonzoScriptsNeeded)
+import Cardano.Ledger.BaseTypes (
+  ShelleyBase,
+  StrictMaybe,
+  kindObjectValue,
+ )
+import Cardano.Ledger.Binary (
+  DecCBOR (..),
+  EncCBOR (..),
+ )
+import Cardano.Ledger.Binary.Coders
+import qualified Cardano.Ledger.Binary.Plain as Plain
+import Cardano.Ledger.Plutus.Evaluate (
+  PlutusWithContext,
+  ScriptFailure (..),
+  ScriptResult (..),
+ )
+import Cardano.Ledger.Rules.ValidationMode (lblStatic)
+import qualified Cardano.Ledger.Shelley.LedgerState as Shelley
+import Cardano.Ledger.Shelley.PParams (Update)
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Shelley.TxCert (ShelleyTxCert)
+import Cardano.Slotting.Slot (SlotNo)
+import Control.DeepSeq (NFData)
+import Control.State.Transition.Extended
+import Data.Aeson (ToJSON (..), (.=))
+import qualified Data.Aeson as Aeson
+import Data.ByteString as BS (ByteString)
+import qualified Data.ByteString.Base64 as B64
+import Data.List (intercalate)
+import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
+import qualified Data.List.NonEmpty as NE
+import qualified Data.List.NonEmpty as NonEmpty
+import Data.Text (Text)
+import qualified Debug.Trace as Debug
+import GHC.Generics (Generic)
+import Lens.Micro
+import NoThunks.Class (NoThunks)
+
+--------------------------------------------------------------------------------
+-- The UTXOS transition system
+--------------------------------------------------------------------------------
+
+instance
+  ( AlonzoEraTx era
+  , AlonzoEraPParams era
+  , ShelleyEraTxBody era
+  , AlonzoEraUTxO era
+  , ScriptsNeeded era ~ AlonzoScriptsNeeded era
+  , AlonzoEraScript era
+  , TxCert era ~ ShelleyTxCert era
+  , EraGov era
+  , State (EraRule "PPUP" era) ~ ShelleyGovState era
+  , Embed (EraRule "PPUP" era) (UTXOS era)
+  , Environment (EraRule "PPUP" era) ~ Shelley.PpupEnv era
+  , Signal (EraRule "PPUP" era) ~ StrictMaybe (Update era)
+  , EncCBOR (PredicateFailure (EraRule "PPUP" era)) -- Serializing the PredicateFailure,
+  , Ord (EraRuleFailure "PPUP" era)
+  , Show (EraRuleFailure "PPUP" era)
+  , EraPlutusContext era
+  , EraCertState era
+  , EraStake era
+  ) =>
+  STS (UTXOS era)
+  where
+  type BaseM (UTXOS era) = ShelleyBase
+  type Environment (UTXOS era) = UtxosEnv era
+  type State (UTXOS era) = ShelleyGovState era
+  type Signal (UTXOS era) = StAnnTx TopTx era
+  type PredicateFailure (UTXOS era) = AlonzoUtxosPredFailure era
+  type Event (UTXOS era) = AlonzoUtxosEvent era
+  transitionRules = [utxosTransition]
+
+data UtxosEnv era = UtxosEnv
+  { ueSlot :: SlotNo
+  , uePParams :: PParams era
+  , ueCertState :: CertState era
+  }
+  deriving (Generic)
+
+data AlonzoUtxosEvent era
+  = AlonzoPpupToUtxosEvent (EraRuleEvent "PPUP" era)
+  | SuccessfulPlutusScriptsEvent (NonEmpty PlutusWithContext)
+  | FailedPlutusScriptsEvent (NonEmpty PlutusWithContext)
+  deriving (Generic)
+
+deriving instance Eq (EraRuleEvent "PPUP" era) => Eq (AlonzoUtxosEvent era)
+
+instance NFData (EraRuleEvent "PPUP" era) => NFData (AlonzoUtxosEvent era)
+
+instance
+  ( Era era
+  , STS (Shelley.PPUP era)
+  , EraRuleFailure "PPUP" era ~ Shelley.ShelleyPpupPredFailure era
+  , Event (EraRule "PPUP" era) ~ Event (Shelley.PPUP era)
+  , EraRuleEvent "PPUP" era ~ Shelley.PpupEvent era
+  ) =>
+  Embed (Shelley.PPUP era) (UTXOS era)
+  where
+  wrapFailed = UpdateFailure
+  wrapEvent = AlonzoPpupToUtxosEvent
+
+utxosTransition ::
+  forall era.
+  ( AlonzoEraTx era
+  , ShelleyEraTxBody era
+  , AlonzoEraUTxO era
+  , State (EraRule "PPUP" era) ~ ShelleyGovState era
+  , Environment (EraRule "PPUP" era) ~ Shelley.PpupEnv era
+  , Signal (EraRule "PPUP" era) ~ StrictMaybe (Update era)
+  , Embed (EraRule "PPUP" era) (UTXOS era)
+  , EraCertState era
+  ) =>
+  TransitionRule (UTXOS era)
+utxosTransition =
+  judgmentContext >>= \(TRC (_, _, stAnnTx)) -> do
+    let tx = stAnnTx ^. txStAnnTxG
+    case tx ^. isPhase2ValidTxL of
+      Phase2Valid -> alonzoEvalScriptsTxValid
+      Phase2Invalid -> alonzoEvalScriptsTxInvalid
+
+-- ===================================================================
+
+scriptsTransition ::
+  ( AlonzoEraUTxO era
+  , PredicateFailure sts ~ AlonzoUtxosPredFailure era
+  ) =>
+  StAnnTx TopTx era ->
+  (ScriptResult -> Rule sts ctx ()) ->
+  Rule sts ctx ()
+scriptsTransition stAnnTx action = do
+  let scriptsWithContext = plutusScriptsWithContextStAnnTx stAnnTx
+  failOnNonEmpty
+    (either (NonEmpty.filter isNotBadTranslation) (const []) scriptsWithContext)
+    CollectErrors
+  when2Phase $
+    whenFailureFree $
+      mapM_ (action . evalPlutusScripts) scriptsWithContext
+  where
+    -- BadTranslation was introduced in Babbage, thus we need to filter those failures out.
+    isNotBadTranslation = \case
+      BadTranslation {} -> False
+      _ -> True
+
+alonzoEvalScriptsTxValid ::
+  forall era.
+  ( AlonzoEraTx era
+  , AlonzoEraUTxO era
+  , ShelleyEraTxBody era
+  , Environment (EraRule "PPUP" era) ~ Shelley.PpupEnv era
+  , Signal (EraRule "PPUP" era) ~ StrictMaybe (Update era)
+  , Embed (EraRule "PPUP" era) (UTXOS era)
+  , State (EraRule "PPUP" era) ~ ShelleyGovState era
+  , EraCertState era
+  ) =>
+  TransitionRule (UTXOS era)
+alonzoEvalScriptsTxValid = do
+  TRC (UtxosEnv slot pp certState, pup, stAnnTx) <-
+    judgmentContext
+  let tx = stAnnTx ^. txStAnnTxG
+      txBody = tx ^. bodyTxL
+      genDelegs = certState ^. certDStateL . Shelley.dsGenDelegsL
+
+  () <- pure $! Debug.traceEvent validBegin ()
+
+  scriptsTransition stAnnTx $ \case
+    Fails _ps fs ->
+      failBecause $
+        ValidationTagMismatch
+          (tx ^. isPhase2ValidTxL)
+          (FailedUnexpectedly (scriptFailureToFailureDescription <$> fs))
+    Passes ps -> mapM_ (tellEvent . SuccessfulPlutusScriptsEvent) (nonEmpty ps)
+
+  () <- pure $! Debug.traceEvent validEnd ()
+
+  trans @(EraRule "PPUP" era) $
+    TRC (Shelley.PPUPEnv slot pp genDelegs, pup, txBody ^. updateTxBodyL)
+
+alonzoEvalScriptsTxInvalid ::
+  forall era.
+  ( AlonzoEraTx era
+  , AlonzoEraUTxO era
+  ) =>
+  TransitionRule (UTXOS era)
+alonzoEvalScriptsTxInvalid = do
+  TRC (UtxosEnv _slot _pp _, pup, stAnnTx) <- judgmentContext
+  let tx = stAnnTx ^. txStAnnTxG
+
+  () <- pure $! Debug.traceEvent invalidBegin ()
+
+  scriptsTransition stAnnTx $ \case
+    Passes _ps ->
+      failBecause $
+        ValidationTagMismatch (tx ^. isPhase2ValidTxL) PassedUnexpectedly
+    Fails ps fs -> do
+      mapM_ (tellEvent . SuccessfulPlutusScriptsEvent) (nonEmpty ps)
+      tellEvent (FailedPlutusScriptsEvent (scriptFailurePlutus <$> fs))
+
+  () <- pure $! Debug.traceEvent invalidEnd ()
+
+  pure pup
+
+-- =======================================
+-- Names for the events we will tell
+
+validBegin, validEnd, invalidBegin, invalidEnd :: String
+validBegin = intercalate "," ["[LEDGER][SCRIPTS_VALIDATION]", "BEGIN"]
+validEnd = intercalate "," ["[LEDGER][SCRIPTS_VALIDATION]", "END"]
+invalidBegin = intercalate "," ["[LEDGER][SCRIPTS_NOT_VALIDATE_TRANSITION]", "BEGIN"]
+invalidEnd = intercalate "," ["[LEDGER][SCRIPTS_NOT_VALIDATE_TRANSITION]", "END"]
+
+-- =============================================
+-- PredicateFailure data type for UTXOS
+
+data FailureDescription
+  = PlutusFailure Text BS.ByteString
+  deriving (Show, Eq, Ord, Generic, NoThunks)
+
+instance NFData FailureDescription
+
+instance EncCBOR FailureDescription where
+  -- This strange encoding results from the fact that 'FailureDescription'
+  -- used to have another constructor, which used key 0.
+  -- We must maintain the original serialization in order to not disrupt
+  -- the node-to-client protocol of the cardano node.
+  encCBOR (PlutusFailure s b) = encode $ Sum PlutusFailure 1 !> To s !> To b
+
+instance DecCBOR FailureDescription where
+  decCBOR = decode $ Summands "FailureDescription" $ \case
+    -- Note the lack of key 0. See the EncCBOR instance above for an explanation.
+    1 -> SumD PlutusFailure <! From <! From
+    n -> Invalid n
+
+instance ToJSON FailureDescription where
+  toJSON (PlutusFailure t _bs) =
+    kindObjectValue
+      "FailureDescription"
+      [ "error" .= Aeson.String "PlutusFailure"
+      , "description" .= t
+      -- Plutus context can be pretty big, therefore it's omitted in JSON
+      -- "reconstructionDetail" .= bs
+      ]
+
+scriptFailureToFailureDescription :: ScriptFailure -> FailureDescription
+scriptFailureToFailureDescription (ScriptFailure msg pwc) =
+  PlutusFailure msg (B64.encode $ Plain.serialize' pwc)
+
+data TagMismatchDescription
+  = PassedUnexpectedly
+  | FailedUnexpectedly (NonEmpty FailureDescription)
+  deriving (Show, Eq, Ord, Generic, NoThunks)
+
+instance NFData TagMismatchDescription
+
+instance EncCBOR TagMismatchDescription where
+  encCBOR PassedUnexpectedly = encode (Sum PassedUnexpectedly 0)
+  encCBOR (FailedUnexpectedly fs) = encode (Sum FailedUnexpectedly 1 !> To fs)
+
+instance DecCBOR TagMismatchDescription where
+  decCBOR = decode (Summands "TagMismatchDescription" dec)
+    where
+      dec 0 = SumD PassedUnexpectedly
+      dec 1 = SumD FailedUnexpectedly <! From
+      dec n = Invalid n
+
+instance ToJSON TagMismatchDescription where
+  toJSON = \case
+    PassedUnexpectedly ->
+      kindObjectValue
+        "TagMismatchDescription"
+        ["error" .= Aeson.String "PassedUnexpectedly"]
+    FailedUnexpectedly forReasons ->
+      kindObjectValue
+        "TagMismatchDescription"
+        [ "error" .= Aeson.String "FailedUnexpectedly"
+        , "reconstruction" .= forReasons
+        ]
+
+data AlonzoUtxosPredFailure era
+  = -- | The 'isPhase2Valid' tag on the transaction is incorrect. The tag given
+    --   here is that provided on the transaction (whereas evaluation of the
+    --   scripts gives the opposite.). The Text tries to explain why it failed.
+    ValidationTagMismatch IsPhase2Valid TagMismatchDescription
+  | -- | We could not find all the necessary inputs for a Plutus Script.
+    --         Previous PredicateFailure tests should make this impossible, but the
+    --         consequences of not detecting this means scripts get dropped, so things
+    --         might validate that shouldn't. So we double check in the function
+    --         collectTwoPhaseScriptInputs, it should find data for every Script.
+    CollectErrors (NonEmpty (CollectError era))
+  | UpdateFailure (EraRuleFailure "PPUP" era)
+  deriving
+    (Generic)
+
+type instance EraRuleFailure "UTXOS" AlonzoEra = AlonzoUtxosPredFailure AlonzoEra
+
+instance InjectRuleFailure "UTXOS" AlonzoUtxosPredFailure AlonzoEra
+
+instance InjectRuleFailure "UTXOS" Shelley.ShelleyPpupPredFailure AlonzoEra where
+  injectFailure = UpdateFailure
+
+instance
+  ( EraTxCert era
+  , AlonzoEraScript era
+  , EncCBOR (CollectError era)
+  , EncCBOR (EraRuleFailure "PPUP" era)
+  ) =>
+  EncCBOR (AlonzoUtxosPredFailure era)
+  where
+  encCBOR (ValidationTagMismatch v descr) = encode (Sum ValidationTagMismatch 0 !> To v !> To descr)
+  encCBOR (CollectErrors cs) =
+    encode (Sum (CollectErrors @era) 1 !> To cs)
+  encCBOR (UpdateFailure pf) = encode (Sum (UpdateFailure @era) 2 !> To pf)
+
+instance
+  ( EraTxCert era
+  , AlonzoEraScript era
+  , DecCBOR (CollectError era)
+  , DecCBOR (EraRuleFailure "PPUP" era)
+  ) =>
+  DecCBOR (AlonzoUtxosPredFailure era)
+  where
+  decCBOR = decode (Summands "AlonzoUtxosPredicateFailure" dec)
+    where
+      dec 0 = SumD ValidationTagMismatch <! From <! From
+      dec 1 = SumD (CollectErrors @era) <! From
+      dec 2 = SumD UpdateFailure <! From
+      dec n = Invalid n
+
+deriving stock instance
+  ( Show (CollectError era)
+  , Show (EraRuleFailure "PPUP" era)
+  ) =>
+  Show (AlonzoUtxosPredFailure era)
+
+deriving stock instance
+  ( Eq (CollectError era)
+  , Eq (EraRuleFailure "PPUP" era)
+  ) =>
+  Eq (AlonzoUtxosPredFailure era)
+
+deriving stock instance
+  ( Ord (CollectError era)
+  , Ord (EraRuleFailure "PPUP" era)
+  ) =>
+  Ord (AlonzoUtxosPredFailure era)
+
+instance
+  ( NFData (CollectError era)
+  , NFData (EraRuleFailure "PPUP" era)
+  ) =>
+  NFData (AlonzoUtxosPredFailure era)
+
+--------------------------------------------------------------------------------
+-- 2-phase checks
+--------------------------------------------------------------------------------
+
+-- $2-phase
+--
+-- Above and beyond 'static' checks (see 'Cardano.Ledger.Rules.ValidateMode') we
+-- additionally label 2-phase checks. This is to support a workflow where we
+-- validate a 'AlonzoTx'. We would like to trust the flag we have ourselves just
+-- computed rather than re-calculating it. However, all other checks should be
+-- computed as normal.
+
+-- | Indicates that this check depends only upon the signal to the transition,
+-- not the state or environment.
+lbl2Phase :: Label
+lbl2Phase = "2phase"
+
+-- | Construct a 2-phase predicate check.
+--
+--   Note that 2-phase predicate checks are by definition static.
+when2Phase :: Rule sts ctx () -> Rule sts ctx ()
+when2Phase = labeled $ lblStatic NE.:| [lbl2Phase]

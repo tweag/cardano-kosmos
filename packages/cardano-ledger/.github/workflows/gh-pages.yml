@@ -1,0 +1,68 @@
+name: Haddocks to GitHub Pages
+
+on:
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  haddocks:
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write     # to deploy to Pages
+      id-token: write  # to verify the deployment originates from an appropriate source
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Haskell
+      uses: input-output-hk/setup-haskell@v1
+      id: setup-haskell
+      with:
+        ghc-version: "9.10.3"
+        cabal-version: "3.12"
+
+    - name: Install system dependencies
+      uses: input-output-hk/actions/base@latest
+      with:
+        use-sodium-vrf: false # default is true
+
+    - name: Configure to use libsodium
+      run: |
+        cat >> cabal.project <<EOF
+        package cardano-crypto-praos
+          flags: -external-libsodium-vrf
+        EOF
+
+    - name: Cabal update
+      run: cabal update
+
+    - name: Build haddocks
+      run: scripts/haddocks.sh haddocks all
+
+    - name: Include benchmark pages
+      run: |
+        git ls-remote origin --heads benchmark-pages |
+          while read -r _SHA REFNAME; do
+            git fetch origin "$REFNAME"
+            if git diff --name-only FETCH_HEAD -- dev | grep -q .; then
+              git archive FETCH_HEAD dev | tar -xC haddocks
+            fi
+          done
+
+    - name: Add housekeeping files
+      run: echo cardano-ledger.cardano.intersectmbo.org >haddocks/CNAME
+
+    - name: Upload pages artifact
+      uses: actions/upload-pages-artifact@v5
+      with:
+        path: haddocks
+
+    - name: Deploy pages
+      id: deployment
+      uses: actions/deploy-pages@v5

@@ -1,0 +1,66 @@
+{-# LANGUAGE TypeApplications #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Main where
+
+import Cardano.Ledger.Block (Block (Block))
+import Cardano.Ledger.Core (Tx, TxBody, TxLevel (..))
+import Cardano.Ledger.Dijkstra (DijkstraEra)
+import Cardano.Ledger.Dijkstra.Rules ()
+import Cardano.Ledger.Plutus (SLanguage (..))
+import Cardano.Protocol.Crypto (StandardCrypto)
+import qualified Cardano.Protocol.Leios.BlockHeader as Leios
+import Data.Typeable (Proxy (..), typeRep)
+import qualified Test.Cardano.Base.QuickCheck as BaseQC
+import Test.Cardano.Ledger.Babbage.TxInfoSpec (txInfoSpec)
+import qualified Test.Cardano.Ledger.Babbage.TxInfoSpec as BabbageTxInfo
+import Test.Cardano.Ledger.Common
+import Test.Cardano.Ledger.Conway.Binary.RoundTrip (roundTripConwayCommonSpec)
+import Test.Cardano.Ledger.Core.Binary.RoundTrip (
+  roundTripAnnEraExpectation,
+  roundTripEraExpectation,
+ )
+import Test.Cardano.Ledger.Dijkstra.Arbitrary (genSmallDijkstraTxsBlockBody)
+import Test.Cardano.Ledger.Dijkstra.Binary.Annotator ()
+import qualified Test.Cardano.Ledger.Dijkstra.Binary.CddlSpec as Cddl
+import qualified Test.Cardano.Ledger.Dijkstra.Binary.Golden as GoldenBinary
+import Test.Cardano.Ledger.Dijkstra.Binary.RoundTrip ()
+import qualified Test.Cardano.Ledger.Dijkstra.GenesisSpec as GenesisSpec
+import qualified Test.Cardano.Ledger.Dijkstra.GoldenSpec as GoldenSpec
+import qualified Test.Cardano.Ledger.Dijkstra.Imp as Imp
+import Test.Cardano.Ledger.Dijkstra.ImpTest ()
+import qualified Test.Cardano.Ledger.Dijkstra.Plutus.PlutusSpec as PlutusSpec
+import qualified Test.Cardano.Ledger.Dijkstra.TxInfoSpec as DijkstraTxInfoSpec
+import Test.Cardano.Ledger.Era
+import Test.Cardano.Ledger.Shelley.JSON (roundTripJsonShelleyEraSpec)
+
+instance EraSpec DijkstraEra where
+  eraImpSpec = Imp.spec
+
+main :: IO ()
+main =
+  ledgerEraTestMain @DijkstraEra $ do
+    describe "RoundTrip" $ do
+      roundTripConwayCommonSpec @DijkstraEra
+      prop "Block (Leios.Header)" $
+        BaseQC.withNumTests 25 $
+          forAll (Block <$> arbitrary <*> genSmallDijkstraTxsBlockBody) $ \block ->
+            conjoin
+              [ roundTripEraExpectation @DijkstraEra @(Block (Leios.Header StandardCrypto) DijkstraEra) block
+              , roundTripAnnEraExpectation @DijkstraEra @(Block (Leios.Header StandardCrypto) DijkstraEra) block
+              ]
+    Cddl.spec
+    GenesisSpec.spec
+    GoldenSpec.spec
+    roundTripJsonShelleyEraSpec @DijkstraEra
+    describe "JSON" $ do
+      prop (show $ typeRep $ Proxy @(TxBody SubTx DijkstraEra)) $
+        roundTripAesonProperty @(TxBody SubTx DijkstraEra)
+      prop (show $ typeRep $ Proxy @(Tx SubTx DijkstraEra)) $
+        roundTripAesonProperty @(Tx SubTx DijkstraEra)
+    describe "TxInfo" $ do
+      BabbageTxInfo.spec @DijkstraEra
+      txInfoSpec @DijkstraEra SPlutusV3
+      DijkstraTxInfoSpec.spec @DijkstraEra
+    GoldenBinary.spec @DijkstraEra
+    PlutusSpec.spec

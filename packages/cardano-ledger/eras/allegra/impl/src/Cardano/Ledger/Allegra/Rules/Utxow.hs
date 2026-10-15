@@ -1,0 +1,93 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Allegra.Rules.Utxow (UTXOW) where
+
+import Cardano.Ledger.Allegra.Core
+import Cardano.Ledger.Allegra.Era (AllegraEra, UTXOW)
+import Cardano.Ledger.Allegra.Rules.Utxo (AllegraUtxoPredFailure, UTXO)
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Shelley.LedgerState (UTxOState)
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Shelley.UTxO (ShelleyScriptsNeeded)
+import Cardano.Ledger.State (
+  EraCertState (..),
+  EraUTxO (..),
+ )
+import Control.State.Transition.Extended
+
+type instance EraRuleFailure "UTXOW" AllegraEra = Shelley.ShelleyUtxowPredFailure AllegraEra
+
+instance InjectRuleFailure "UTXOW" Shelley.ShelleyUtxowPredFailure AllegraEra
+
+instance InjectRuleFailure "UTXOW" AllegraUtxoPredFailure AllegraEra where
+  injectFailure = Shelley.UtxoFailure
+
+instance InjectRuleFailure "UTXOW" Shelley.ShelleyUtxoPredFailure AllegraEra where
+  injectFailure = Shelley.UtxoFailure . injectFailure
+
+instance InjectRuleFailure "UTXOW" Shelley.ShelleyPpupPredFailure AllegraEra where
+  injectFailure = Shelley.UtxoFailure . injectFailure
+
+--------------------------------------------------------------------------------
+-- UTXOW STS
+--------------------------------------------------------------------------------
+
+instance
+  forall era.
+  ( EraTx era
+  , EraUTxO era
+  , ShelleyEraTxBody era
+  , ScriptsNeeded era ~ ShelleyScriptsNeeded era
+  , -- Allow UTXOW to call UTXO
+    Embed (EraRule "UTXO" era) (UTXOW era)
+  , Environment (EraRule "UTXO" era) ~ Shelley.UtxoEnv era
+  , State (EraRule "UTXO" era) ~ UTxOState era
+  , Signal (EraRule "UTXO" era) ~ StAnnTx TopTx era
+  , EraRule "UTXOW" era ~ UTXOW era
+  , InjectRuleFailure "UTXOW" Shelley.ShelleyUtxowPredFailure era
+  , EraCertState era
+  ) =>
+  STS (UTXOW era)
+  where
+  type State (UTXOW era) = UTxOState era
+  type Signal (UTXOW era) = StAnnTx TopTx era
+  type Environment (UTXOW era) = Shelley.UtxoEnv era
+  type BaseM (UTXOW era) = ShelleyBase
+  type PredicateFailure (UTXOW era) = Shelley.ShelleyUtxowPredFailure era
+  type Event (UTXOW era) = Shelley.ShelleyUtxowEvent era
+
+  transitionRules = [Shelley.transitionRulesUTXOW]
+
+  -- The Allegra Era uses the same PredicateFailure type
+  -- as Shelley, so the 'embed' function is identity
+  initialRules = []
+
+instance
+  ( Era era
+  , STS (UTXO era)
+  , PredicateFailure (EraRule "UTXO" era) ~ AllegraUtxoPredFailure era
+  , Event (EraRule "UTXO" era) ~ Event (UTXO era)
+  ) =>
+  Embed (UTXO era) (UTXOW era)
+  where
+  wrapFailed = Shelley.UtxoFailure
+  wrapEvent = Shelley.UtxoEvent
+
+instance
+  ( Era era
+  , STS (UTXOW era)
+  , PredicateFailure (EraRule "UTXOW" era) ~ Shelley.ShelleyUtxowPredFailure era
+  , Event (EraRule "UTXOW" era) ~ Event (UTXOW era)
+  ) =>
+  Embed (UTXOW era) (Shelley.LEDGER era)
+  where
+  wrapFailed = Shelley.UtxowFailure
+  wrapEvent = Shelley.UtxowEvent

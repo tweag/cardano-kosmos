@@ -1,0 +1,49 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.Conformance.ExecSpecRule.Conway.Gov () where
+
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Core (EraPParams (..))
+import Cardano.Ledger.Conway.Governance
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Control.State.Transition.Extended (TRC (..))
+import Lens.Micro ((&), (.~), (^.))
+import qualified MAlonzo.Code.Ledger.Conway.Foreign.API as Agda
+import Test.Cardano.Ledger.Conformance.ExecSpecRule.Core (
+  ExecSpecRule (ExecContext, runAgdaRule, translateInputs),
+  SpecTRC (SpecTRC),
+ )
+import Test.Cardano.Ledger.Conformance.SpecTranslate.Base (
+  SpecTranslate (toSpecRep),
+  askSpecTransM,
+  unComputationResult,
+  withCtxSpecTransM,
+ )
+import Test.Cardano.Ledger.Conformance.SpecTranslate.Conway ()
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.Cardano.Ledger.Conway.ImpTest ()
+
+instance ExecSpecRule "GOV" ConwayEra where
+  type ExecContext "GOV" ConwayEra = EnactState ConwayEra
+
+  runAgdaRule (SpecTRC env st sig) = unComputationResult $ Agda.govStep env st sig
+
+  translateInputs (TRC (env@Conway.GovEnv {Conway.gePParams}, st, sig)) = do
+    enactState <- askSpecTransM
+    let ctx =
+          enactState
+            & ensPrevGovActionIdsL .~ toPrevGovActionIds (st ^. pRootsL)
+            & ensProtVerL .~ (gePParams ^. ppProtocolVersionL)
+    agdaEnv <- withCtxSpecTransM ctx $ toSpecRep env
+    agdaSt <- withCtxSpecTransM () $ toSpecRep st
+    agdaSig <- withCtxSpecTransM () $ toSpecRep sig
+    pure $ SpecTRC agdaEnv agdaSt agdaSig

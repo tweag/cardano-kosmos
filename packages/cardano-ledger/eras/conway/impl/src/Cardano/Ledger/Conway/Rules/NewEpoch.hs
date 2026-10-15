@@ -1,0 +1,237 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE EmptyCase #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Conway.Rules.NewEpoch (
+  NEWEPOCH,
+  ConwayNewEpochEvent (..),
+) where
+
+import Cardano.Ledger.BaseTypes (
+  BlocksMade (BlocksMade),
+  ShelleyBase,
+  StrictMaybe (SJust, SNothing),
+ )
+import Cardano.Ledger.Coin (toDeltaCoin)
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.Era (ConwayEra, EPOCH, NEWEPOCH)
+import Cardano.Ledger.Conway.Governance (
+  ConwayEraGov,
+  ConwayGovState,
+  RatifyEnv (..),
+  RatifySignal (..),
+  RatifyState (..),
+  newEpochStateDRepPulsingStateL,
+  predictFuturePParams,
+  pulseDRepPulsingState,
+ )
+import Cardano.Ledger.Conway.Rules.Epoch (ConwayEpochEvent)
+import Cardano.Ledger.Conway.Rules.HardFork (ConwayHardForkEvent (..))
+import Cardano.Ledger.Credential (Credential)
+import Cardano.Ledger.Rewards (Reward)
+import Cardano.Ledger.Shelley.AdaPots (AdaPots (..), totalAdaPotsES)
+import Cardano.Ledger.Shelley.LedgerState
+import Cardano.Ledger.Shelley.Rewards (sumRewards)
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Cardano.Ledger.Slot (EpochNo (EpochNo))
+import Cardano.Ledger.State
+import qualified Cardano.Ledger.Val as Val
+import Control.DeepSeq (NFData)
+import Control.Exception (assert)
+import Control.State.Transition
+import Data.Default (Default (..))
+import qualified Data.Map.Strict as Map
+import Data.Set (Set)
+import Data.Void (Void)
+import GHC.Generics (Generic)
+import Lens.Micro ((%~), (&), (^.))
+
+data ConwayNewEpochEvent era
+  = DeltaRewardEvent !(Event (EraRule "RUPD" era))
+  | RestrainedRewards
+      !EpochNo
+      !(Map.Map (Credential Staking) (Set Reward))
+      !(Set (Credential Staking))
+  | TotalRewardEvent
+      !EpochNo
+      !(Map.Map (Credential Staking) (Set Reward))
+  | EpochEvent !(Event (EraRule "EPOCH" era))
+  | TotalAdaPotsEvent !AdaPots
+  deriving (Generic)
+
+type instance EraRuleEvent "NEWEPOCH" ConwayEra = ConwayNewEpochEvent ConwayEra
+
+deriving instance
+  ( Eq (Event (EraRule "EPOCH" era))
+  , Eq (Event (EraRule "RUPD" era))
+  ) =>
+  Eq (ConwayNewEpochEvent era)
+
+instance
+  ( NFData (Event (EraRule "EPOCH" era))
+  , NFData (Event (EraRule "RUPD" era))
+  ) =>
+  NFData (ConwayNewEpochEvent era)
+
+instance
+  ( EraTxOut era
+  , ConwayEraGov era
+  , EraStake era
+  , EraCertState era
+  , Embed (EraRule "EPOCH" era) (NEWEPOCH era)
+  , Event (EraRule "RUPD" era) ~ Shelley.RupdEvent
+  , Environment (EraRule "EPOCH" era) ~ ()
+  , State (EraRule "EPOCH" era) ~ EpochState era
+  , Signal (EraRule "EPOCH" era) ~ EpochNo
+  , Default (EpochState era)
+  , Default (StashedAVVMAddresses era)
+  , Signal (EraRule "RATIFY" era) ~ RatifySignal era
+  , State (EraRule "RATIFY" era) ~ RatifyState era
+  , Environment (EraRule "RATIFY" era) ~ RatifyEnv era
+  , GovState era ~ ConwayGovState era
+  , Eq (PredicateFailure (EraRule "RATIFY" era))
+  , Show (PredicateFailure (EraRule "RATIFY" era))
+  , Eq (PredicateFailure (NEWEPOCH era))
+  , Show (PredicateFailure (NEWEPOCH era))
+  ) =>
+  STS (NEWEPOCH era)
+  where
+  type State (NEWEPOCH era) = NewEpochState era
+  type Signal (NEWEPOCH era) = EpochNo
+  type Environment (NEWEPOCH era) = ()
+  type BaseM (NEWEPOCH era) = ShelleyBase
+  type PredicateFailure (NEWEPOCH era) = Void
+  type Event (NEWEPOCH era) = ConwayNewEpochEvent era
+
+  initialRules =
+    [ pure $
+        NewEpochState
+          (EpochNo 0)
+          (BlocksMade Map.empty)
+          (BlocksMade Map.empty)
+          def
+          SNothing
+          def
+          def
+    ]
+
+  transitionRules = [newEpochTransition]
+
+newEpochTransition ::
+  forall era.
+  ( EraTxOut era
+  , ConwayEraGov era
+  , EraCertState era
+  , Embed (EraRule "EPOCH" era) (NEWEPOCH era)
+  , Environment (EraRule "EPOCH" era) ~ ()
+  , State (EraRule "EPOCH" era) ~ EpochState era
+  , Signal (EraRule "EPOCH" era) ~ EpochNo
+  , Default (StashedAVVMAddresses era)
+  , Event (EraRule "RUPD" era) ~ Shelley.RupdEvent
+  , Signal (EraRule "RATIFY" era) ~ RatifySignal era
+  , State (EraRule "RATIFY" era) ~ RatifyState era
+  , Environment (EraRule "RATIFY" era) ~ RatifyEnv era
+  , GovState era ~ ConwayGovState era
+  , Eq (PredicateFailure (EraRule "RATIFY" era))
+  , Show (PredicateFailure (EraRule "RATIFY" era))
+  , Eq (PredicateFailure (NEWEPOCH era))
+  , Show (PredicateFailure (NEWEPOCH era))
+  ) =>
+  TransitionRule (NEWEPOCH era)
+newEpochTransition = do
+  TRC
+    ( _
+      , nes@(NewEpochState eL _ bcur es0 ru _ _)
+      , eNo
+      ) <-
+    judgmentContext
+  if eNo /= succ eL
+    then
+      pure $
+        nes
+          & newEpochStateDRepPulsingStateL %~ pulseDRepPulsingState
+          & newEpochStateGovStateL %~ predictFuturePParams
+    else do
+      es1 <- case ru of -- Here is where we extract the result of Reward pulsing.
+        SNothing -> pure es0
+        SJust p@(Pulsing _ _) -> do
+          (ans, event) <- liftSTS (completeRupd p)
+          tellReward (DeltaRewardEvent (Shelley.RupdEvent eNo event))
+          updateRewards es0 eNo ans
+        SJust (Complete ru') -> updateRewards es0 eNo ru'
+      es2 <- trans @(EraRule "EPOCH" era) $ TRC ((), es1, eNo)
+      let adaPots = totalAdaPotsES es2
+      tellEvent $ TotalAdaPotsEvent adaPots
+      let pd' = ssStakeMarkPoolDistr (esSnapshots es0)
+      -- See `Shelley.NEWEPOCH` for details on the implementation
+      pure $
+        nes
+          { nesEL = eNo
+          , nesBprev = bcur
+          , nesBcur = BlocksMade mempty
+          , nesEs = es2
+          , nesRu = SNothing
+          , nesPd = pd'
+          }
+
+-- | tell a RupdEvent as a DeltaRewardEvent only if the map is non-empty
+tellReward ::
+  Event (EraRule "RUPD" era) ~ Shelley.RupdEvent =>
+  ConwayNewEpochEvent era ->
+  Rule (NEWEPOCH era) rtype ()
+tellReward (DeltaRewardEvent (Shelley.RupdEvent _ m)) | Map.null m = pure ()
+tellReward x = tellEvent x
+
+updateRewards ::
+  (EraGov era, EraCertState era) =>
+  EpochState era ->
+  EpochNo ->
+  RewardUpdate ->
+  Rule (NEWEPOCH era) 'Transition (EpochState era)
+updateRewards es e ru'@(RewardUpdate dt dr rs_ df _) = do
+  let totRs = sumRewards (es ^. prevPParamsEpochStateL . ppProtocolVersionL) rs_
+   in assert (Val.isZero (dt <> dr <> toDeltaCoin totRs <> df)) (pure ())
+  let !(!es', filtered) = applyRUpdFiltered ru' es
+  tellEvent $ RestrainedRewards e (frShelleyIgnored filtered) (frUnregistered filtered)
+  -- This event (which is only generated once per epoch) must be generated even if the
+  -- map is empty (db-sync depends on it).
+  tellEvent $ TotalRewardEvent e (frRegistered filtered)
+  pure es'
+
+instance
+  ( STS (NEWEPOCH era)
+  , Event (EraRule "NEWEPOCH" era) ~ ConwayNewEpochEvent era
+  , PredicateFailure (EraRule "NEWEPOCH" era) ~ PredicateFailure (NEWEPOCH era)
+  ) =>
+  Embed (NEWEPOCH era) (Shelley.TICK era)
+  where
+  wrapFailed = \case {}
+  wrapEvent = Shelley.TickNewEpochEvent
+
+instance
+  ( STS (EPOCH era)
+  , Event (EraRule "EPOCH" era) ~ ConwayEpochEvent era
+  ) =>
+  Embed (EPOCH era) (NEWEPOCH era)
+  where
+  wrapFailed = \case {}
+  wrapEvent = EpochEvent
+
+instance InjectRuleEvent "NEWEPOCH" ConwayEpochEvent ConwayEra where
+  injectEvent = EpochEvent
+
+instance InjectRuleEvent "NEWEPOCH" ConwayHardForkEvent ConwayEra where
+  injectEvent = EpochEvent . injectEvent

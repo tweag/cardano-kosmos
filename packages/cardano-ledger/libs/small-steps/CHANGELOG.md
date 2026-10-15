@@ -1,0 +1,49 @@
+# Version history for `small-steps`
+
+## 1.2.0.0
+
+* Add `withJudgmentContext`
+* Add an `Ord` constraint to the `PredicateFailure` type in the `STS` class
+
+## 1.1.4.0
+
+*
+
+### `testlib`
+
+* Add `closureWith`
+
+## 1.1.3.0
+
+* Add `failOnNonEmptyMap` and `failureOnNonEmptyMap`
+* Add `failOnNonEmptySet` and `failureOnNonEmptySet`
+
+## 1.1.2.0
+
+* Add `whenFailureFreeDefault`
+
+## 1.1.1.0
+
+* Add `STSResult` and `applySTSOptsResult`
+
+## 1.1.0.1
+
+*
+
+## 1.1.0.0
+
+* Change `applySTSOptsEither`, `Extended.applySTS`, `Simple.applySTS`
+  to use `NonEmpty (PredicateFailure _)` instead of `[PredicateFailure _]`
+
+### `testlib`
+
+* Change `invalidSignalsAreGenerated`, `Trace`, `checkTrace`, `applySTSTest`, `traceFromInitState`, `forAllTraceFromInitState`,`onlyValidSignalsAreGeneratedFromInitState` to use `NonEmpty (PredicateFailure _)` instead of `[PredicateFailure _]`
+* Moved `small-steps-test` library here (`small-steps:testlib`) as sublibrary
+
+## 1.0.1.0
+
+* Add `failOnJust`, `failOnNonEmpty`, `failureOnJust`, `failureOnNonEmpty`
+
+## 1.0.0.0
+
+* First properly versioned release

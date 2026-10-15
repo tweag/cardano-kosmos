@@ -1,0 +1,745 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE NoStarIsType #-}
+
+module Cardano.Ledger.Binary.Decoding.DecCBOR (
+  DecCBOR (..),
+  fromByronCBOR,
+  decodeScriptContextFromData,
+  decodeIntegralRational,
+  maxLeiosCertSignersBytes,
+
+  -- *** Network
+  decodeIPv4,
+  decodeIPv6,
+) where
+
+import qualified Cardano.Binary as Plain (Decoder)
+import Cardano.Crypto.DSIGN.Class (
+  DSIGNAlgorithm,
+  SigDSIGN,
+  SignKeyDSIGN,
+  SignedDSIGN,
+  VerKeyDSIGN,
+ )
+import Cardano.Crypto.Hash.Class (Hash, HashAlgorithm, PackedBytes, hashFromPackedBytes)
+import Cardano.Crypto.KES.Class (KESAlgorithm, SigKES, VerKeyKES)
+import Cardano.Crypto.PackedBytes (packByteString)
+import Cardano.Crypto.VRF.Class (
+  CertVRF,
+  CertifiedVRF (..),
+  OutputVRF (..),
+  SignKeyVRF,
+  VRFAlgorithm,
+  VerKeyVRF,
+  sizeOutputVRF,
+ )
+import Cardano.Crypto.VRF.Mock (MockVRF)
+import qualified Cardano.Crypto.VRF.Praos as Praos
+import Cardano.Crypto.VRF.Simple (SimpleVRF)
+import Cardano.Ledger.Binary.Decoding.Decoder
+import Cardano.Ledger.Binary.Version (Version, byronProtVer, natVersion)
+import Cardano.Slotting.Block (BlockNo (..))
+import Cardano.Slotting.Slot (
+  EpochInterval (..),
+  EpochNo (..),
+  EpochSize (..),
+  SlotInterval (..),
+  SlotNo (..),
+  WithOrigin (..),
+ )
+import Cardano.Slotting.Time (SystemStart (..))
+import Codec.CBOR.ByteArray.Sliced (SlicedByteArray, fromByteArray)
+import Codec.CBOR.Term (Term (..))
+import Codec.Serialise as Serialise (Serialise (decode))
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import GHC.TypeLits (KnownNat)
+#if MIN_VERSION_bytestring(0,11,1)
+import Data.ByteString.Short (ShortByteString(SBS))
+#else
+import Data.ByteString.Short.Internal (ShortByteString(SBS))
+#endif
+import Cardano.Base.IP (IPv4, IPv6, toIPv4w, toIPv6w)
+import Cardano.Crypto.Leios (
+  BitField (..),
+  LeiosCert (..),
+  LeiosCommittee (..),
+  LeiosSeat (..),
+  maxLeiosCommitteeSize,
+ )
+import Control.Monad (when)
+import Data.Binary.Get (Get, getWord32le, runGetOrFail)
+import Data.Fixed (Fixed (..))
+import Data.Int (Int16, Int32, Int64, Int8)
+import qualified Data.IntMap as IntMap
+import Data.List.NonEmpty (NonEmpty)
+import qualified Data.Map.Strict as Map
+import qualified Data.Maybe.Strict as SMaybe
+import qualified Data.Primitive.ByteArray as Prim
+import Data.Ratio ((%))
+import qualified Data.Sequence as Seq
+import qualified Data.Sequence.Strict as SSeq
+import qualified Data.Set as Set
+import Data.Tagged (Tagged (Tagged))
+import qualified Data.Text as T
+import Data.Time.Clock (UTCTime (..))
+import Data.Typeable (Proxy (..), Typeable, typeRep)
+import qualified Data.VMap as VMap
+import qualified Data.Vector as V
+import qualified Data.Vector.Primitive as VP
+import qualified Data.Vector.Storable as VS
+import qualified Data.Vector.Strict as VStrict
+import qualified Data.Vector.Unboxed as VU
+import Data.Void (Void)
+import Data.Word (Word16, Word32, Word64, Word8)
+import Numeric.Natural (Natural)
+import qualified PlutusLedgerApi.V1 as PV1
+import qualified PlutusLedgerApi.V2 as PV2
+import qualified PlutusLedgerApi.V3 as PV3
+import qualified PlutusLedgerApi.V4 as PV4
+import Prelude hiding (decodeFloat)
+
+class Typeable a => DecCBOR a where
+  decCBOR :: Decoder s a
+
+  -- | Validate decoding of a Haskell value, without the need to actually construct
+  -- it. Could be slightly faster than `decCBOR`, however it should respect this law:
+  --
+  -- > dropCBOR (proxy :: Proxy a) = () <$ (decCBOR :: Decoder s a)
+  dropCBOR :: Proxy a -> Decoder s ()
+  dropCBOR _ = () <$ decCBOR @a
+
+  label :: Proxy a -> T.Text
+  label = T.pack . show . typeRep
+
+instance DecCBOR Version where
+  decCBOR = decodeVersion
+  {-# INLINE decCBOR #-}
+
+-- | Convert a versioned `DecCBOR` instance to a plain `Plain.Decoder` using Byron protocol
+-- version and empty `BSL.ByteString`.
+fromByronCBOR :: DecCBOR a => Plain.Decoder s a
+fromByronCBOR = toPlainDecoder Nothing byronProtVer decCBOR
+{-# INLINE fromByronCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Primitive types
+--------------------------------------------------------------------------------
+
+instance DecCBOR () where
+  decCBOR = decodeNull
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Bool where
+  decCBOR = decodeBool
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Numeric data
+--------------------------------------------------------------------------------
+
+instance DecCBOR Integer where
+  decCBOR = decodeInteger
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Natural where
+  decCBOR = decodeNatural
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Word where
+  decCBOR = decodeWord
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Word8 where
+  decCBOR = decodeWord8
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Word16 where
+  decCBOR = decodeWord16
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Word32 where
+  decCBOR = decodeWord32
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Word64 where
+  decCBOR = decodeWord64
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Int where
+  decCBOR = decodeInt
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Int8 where
+  decCBOR = decodeInt8
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Int16 where
+  decCBOR = decodeInt16
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Int32 where
+  decCBOR = decodeInt32
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Int64 where
+  decCBOR = decodeInt64
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Float where
+  decCBOR = decodeFloat
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Double where
+  decCBOR = decodeDouble
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Rational where
+  decCBOR = decodeRational
+  {-# INLINE decCBOR #-}
+
+deriving newtype instance Typeable p => DecCBOR (Fixed p)
+
+instance DecCBOR Void where
+  decCBOR = cborError DecoderErrorVoid
+
+instance DecCBOR Term where
+  decCBOR = decodeTerm
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Network
+--------------------------------------------------------------------------------
+
+-- | Convert a `Get` monad from @binary@ package into a `Decoder`
+binaryGetDecoder ::
+  -- | Name of the function or type for error reporting
+  T.Text ->
+  -- | Deserializer for the @binary@ package
+  Get a ->
+  Decoder s a
+binaryGetDecoder name getter = do
+  bs <- decCBOR
+  case runGetOrFail getter (BSL.fromStrict bs) of
+    Left (_, _, err) -> cborError $ DecoderErrorCustom name (T.pack err)
+    Right (leftOver, _, ha)
+      | BSL.null leftOver -> pure ha
+      | otherwise ->
+          cborError $ DecoderErrorLeftover name (BSL.toStrict leftOver)
+{-# INLINE binaryGetDecoder #-}
+
+decodeIPv4 :: Decoder s IPv4
+decodeIPv4 =
+  toIPv4w <$> binaryGetDecoder "decodeIPv4" getWord32le
+{-# INLINE decodeIPv4 #-}
+
+getHostAddress6 :: Get (Word32, Word32, Word32, Word32)
+getHostAddress6 = do
+  !w1 <- getWord32le
+  !w2 <- getWord32le
+  !w3 <- getWord32le
+  !w4 <- getWord32le
+  return (w1, w2, w3, w4)
+{-# INLINE getHostAddress6 #-}
+
+decodeIPv6 :: Decoder s IPv6
+decodeIPv6 =
+  toIPv6w <$> binaryGetDecoder "decodeIPv6" getHostAddress6
+{-# INLINE decodeIPv6 #-}
+
+instance DecCBOR IPv4 where
+  decCBOR = decodeIPv4
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR IPv6 where
+  decCBOR = decodeIPv6
+  {-# INLINE decCBOR #-}
+
+decodeIntegralRational :: forall a s. (DecCBOR a, Integral a) => Decoder s Rational
+decodeIntegralRational = do
+  assertTag 30
+  values <- decodeList (decCBOR @a)
+  case values of
+    [n, d] -> do
+      when (d == 0) $ fail "Denominator cannot be zero"
+      pure $! toInteger n % toInteger d
+    xs ->
+      cborError $ DecoderErrorSizeMismatch "Rational" 2 (length xs)
+
+--------------------------------------------------------------------------------
+-- Tagged
+--------------------------------------------------------------------------------
+
+instance (Typeable s, DecCBOR a) => DecCBOR (Tagged s a) where
+  decCBOR = Tagged <$> decCBOR
+  {-# INLINE decCBOR #-}
+  dropCBOR _ = dropCBOR (Proxy @a)
+
+--------------------------------------------------------------------------------
+-- Containers
+--------------------------------------------------------------------------------
+
+-- | Decode a tuple-shaped CBOR list of fixed arity. Starting at protocol
+-- version 12 we additionally accept indefinite-length list encoding.
+decodeTuple :: Int -> Decoder s a -> Decoder s a
+decodeTuple n body =
+  ifDecoderVersionAtLeast
+    (natVersion @12)
+    (decodeRecordNamed "Tuple" (const n) body)
+    (decodeListLenOf n *> body)
+{-# INLINE decodeTuple #-}
+
+instance (DecCBOR a, DecCBOR b) => DecCBOR (a, b) where
+  decCBOR = decodeTuple 2 $ do
+    !x <- decCBOR
+    !y <- decCBOR
+    pure (x, y)
+  dropCBOR _ =
+    decodeTuple 2 $
+      dropCBOR (Proxy @a) <* dropCBOR (Proxy @b)
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, DecCBOR b, DecCBOR c) => DecCBOR (a, b, c) where
+  decCBOR = decodeTuple 3 $ do
+    !x <- decCBOR
+    !y <- decCBOR
+    !z <- decCBOR
+    pure (x, y, z)
+  dropCBOR _ =
+    decodeTuple 3 $
+      dropCBOR (Proxy @a)
+        <* dropCBOR (Proxy @b)
+        <* dropCBOR (Proxy @c)
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, DecCBOR b, DecCBOR c, DecCBOR d) => DecCBOR (a, b, c, d) where
+  decCBOR = decodeTuple 4 $ do
+    !a <- decCBOR
+    !b <- decCBOR
+    !c <- decCBOR
+    !d <- decCBOR
+    pure (a, b, c, d)
+  dropCBOR _ =
+    decodeTuple 4 $
+      dropCBOR (Proxy @a)
+        <* dropCBOR (Proxy @b)
+        <* dropCBOR (Proxy @c)
+        <* dropCBOR (Proxy @d)
+  {-# INLINE decCBOR #-}
+
+instance
+  (DecCBOR a, DecCBOR b, DecCBOR c, DecCBOR d, DecCBOR e) =>
+  DecCBOR (a, b, c, d, e)
+  where
+  decCBOR = decodeTuple 5 $ do
+    !a <- decCBOR
+    !b <- decCBOR
+    !c <- decCBOR
+    !d <- decCBOR
+    !e <- decCBOR
+    pure (a, b, c, d, e)
+  dropCBOR _ =
+    decodeTuple 5 $
+      dropCBOR (Proxy @a)
+        <* dropCBOR (Proxy @b)
+        <* dropCBOR (Proxy @c)
+        <* dropCBOR (Proxy @d)
+        <* dropCBOR (Proxy @e)
+  {-# INLINE decCBOR #-}
+
+instance
+  (DecCBOR a, DecCBOR b, DecCBOR c, DecCBOR d, DecCBOR e, DecCBOR f) =>
+  DecCBOR (a, b, c, d, e, f)
+  where
+  decCBOR = decodeTuple 6 $ do
+    !a <- decCBOR
+    !b <- decCBOR
+    !c <- decCBOR
+    !d <- decCBOR
+    !e <- decCBOR
+    !f <- decCBOR
+    pure (a, b, c, d, e, f)
+  dropCBOR _ =
+    decodeTuple 6 $
+      dropCBOR (Proxy @a)
+        <* dropCBOR (Proxy @b)
+        <* dropCBOR (Proxy @c)
+        <* dropCBOR (Proxy @d)
+        <* dropCBOR (Proxy @e)
+        <* dropCBOR (Proxy @f)
+  {-# INLINE decCBOR #-}
+
+instance
+  ( DecCBOR a
+  , DecCBOR b
+  , DecCBOR c
+  , DecCBOR d
+  , DecCBOR e
+  , DecCBOR f
+  , DecCBOR g
+  ) =>
+  DecCBOR (a, b, c, d, e, f, g)
+  where
+  decCBOR = decodeTuple 7 $ do
+    !a <- decCBOR
+    !b <- decCBOR
+    !c <- decCBOR
+    !d <- decCBOR
+    !e <- decCBOR
+    !f <- decCBOR
+    !g <- decCBOR
+    pure (a, b, c, d, e, f, g)
+  dropCBOR _ =
+    decodeTuple 7 $
+      dropCBOR (Proxy @a)
+        <* dropCBOR (Proxy @b)
+        <* dropCBOR (Proxy @c)
+        <* dropCBOR (Proxy @d)
+        <* dropCBOR (Proxy @e)
+        <* dropCBOR (Proxy @f)
+        <* dropCBOR (Proxy @g)
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR BS.ByteString where
+  decCBOR = decodeBytes
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR T.Text where
+  decCBOR = decodeString
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR BSL.ByteString where
+  decCBOR = BSL.fromStrict <$> decCBOR
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR ShortByteString where
+  decCBOR = do
+    BA (Prim.ByteArray ba) <- decodeByteArray
+    pure $ SBS ba
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR ByteArray where
+  decCBOR = decodeByteArray
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Prim.ByteArray where
+  decCBOR = unBA <$> decodeByteArray
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR SlicedByteArray where
+  decCBOR = fromByteArray . unBA <$> decodeByteArray
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR a => DecCBOR [a] where
+  decCBOR = decodeList decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, DecCBOR b) => DecCBOR (Either a b) where
+  decCBOR = decodeEither (decCBOR >>= \a -> a `seq` pure a) (decCBOR >>= \a -> a `seq` pure a)
+  {-# INLINE decCBOR #-}
+  dropCBOR _ = () <$ decodeEither (dropCBOR (Proxy :: Proxy a)) (dropCBOR (Proxy :: Proxy b))
+
+instance DecCBOR a => DecCBOR (NonEmpty a) where
+  decCBOR = decodeNonEmptyList decCBOR
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR a => DecCBOR (Maybe a) where
+  decCBOR = decodeMaybe decCBOR
+  {-# INLINE decCBOR #-}
+  dropCBOR _ = () <$ decodeMaybe (dropCBOR (Proxy @a))
+
+instance DecCBOR a => DecCBOR (SMaybe.StrictMaybe a) where
+  decCBOR = decodeStrictMaybe decCBOR
+  {-# INLINE decCBOR #-}
+  dropCBOR _ = () <$ decodeStrictMaybe (dropCBOR (Proxy @a))
+
+instance DecCBOR a => DecCBOR (SSeq.StrictSeq a) where
+  decCBOR = decodeStrictSeq decCBOR
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR a => DecCBOR (Seq.Seq a) where
+  decCBOR = decodeSeq decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (Ord a, DecCBOR a) => DecCBOR (Set.Set a) where
+  decCBOR = decodeSet decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (Ord k, DecCBOR k, DecCBOR v) => DecCBOR (Map.Map k v) where
+  decCBOR = decodeMap decCBOR decCBOR
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR v => DecCBOR (IntMap.IntMap v) where
+  decCBOR = decodeIntMap decCBOR
+  {-# INLINE decCBOR #-}
+
+instance
+  ( Ord k
+  , DecCBOR k
+  , DecCBOR a
+  , Typeable kv
+  , Typeable av
+  , VMap.Vector kv k
+  , VMap.Vector av a
+  ) =>
+  DecCBOR (VMap.VMap kv av k a)
+  where
+  decCBOR = decodeVMap decCBOR decCBOR
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR a => DecCBOR (V.Vector a) where
+  decCBOR = decodeVector decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, VP.Prim a) => DecCBOR (VP.Vector a) where
+  decCBOR = decodeVector decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, VS.Storable a) => DecCBOR (VS.Vector a) where
+  decCBOR = decodeVector decCBOR
+  {-# INLINE decCBOR #-}
+
+instance (DecCBOR a, VU.Unbox a) => DecCBOR (VU.Vector a) where
+  decCBOR = decodeVector decCBOR
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Time
+--------------------------------------------------------------------------------
+
+instance DecCBOR UTCTime where
+  decCBOR = decodeUTCTime
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Crypto
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- DSIGN
+--------------------------------------------------------------------------------
+
+instance DSIGNAlgorithm v => DecCBOR (VerKeyDSIGN v) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DSIGNAlgorithm v => DecCBOR (SignKeyDSIGN v) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DSIGNAlgorithm v => DecCBOR (SigDSIGN v) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance (DSIGNAlgorithm v, Typeable a) => DecCBOR (SignedDSIGN v a) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Hash
+--------------------------------------------------------------------------------
+
+instance KnownNat n => DecCBOR (PackedBytes n) where
+  decCBOR = decCBOR >>= packByteString
+  {-# INLINE decCBOR #-}
+
+instance (HashAlgorithm h, Typeable a) => DecCBOR (Hash h a) where
+  decCBOR = hashFromPackedBytes <$> decCBOR
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- KES
+--------------------------------------------------------------------------------
+
+instance KESAlgorithm k => DecCBOR (VerKeyKES k) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance KESAlgorithm k => DecCBOR (SigKES k) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- VRF
+--------------------------------------------------------------------------------
+
+instance DecCBOR (VerKeyVRF SimpleVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (SignKeyVRF SimpleVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (CertVRF SimpleVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (VerKeyVRF MockVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (SignKeyVRF MockVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (CertVRF MockVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Praos.Proof where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Praos.SignKey where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR Praos.VerKey where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (VerKeyVRF Praos.PraosVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (SignKeyVRF Praos.PraosVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR (CertVRF Praos.PraosVRF) where
+  decCBOR = decodeFixedSized
+  {-# INLINE decCBOR #-}
+
+instance VRFAlgorithm v => DecCBOR (OutputVRF v) where
+  decCBOR = do
+    ba <- decCBOR
+    whenDecoderVersionAtLeast (natVersion @12) $ do
+      let
+        len = fromIntegral @Int @Word $ Prim.sizeofByteArray ba
+        vrfOutputLen = sizeOutputVRF (Proxy :: Proxy v)
+      when (len /= vrfOutputLen) $
+        fail $
+          "OutputVRF is expected to be " <> show vrfOutputLen <> " bytes, but received " <> show len
+    pure $ OutputVRF ba
+  {-# INLINE decCBOR #-}
+
+instance (VRFAlgorithm v, Typeable a) => DecCBOR (CertifiedVRF v a) where
+  decCBOR =
+    (ifDecoderVersionAtLeast $ natVersion @12)
+      ( decodeRecordNamed "CertifiedVRF" (const 2) $
+          CertifiedVRF
+            <$> decCBOR
+            <*> decodeFixedSized
+      )
+      ( CertifiedVRF
+          <$ enforceSize "CertifiedVRF" 2
+          <*> decCBOR
+          <*> decodeFixedSized
+      )
+  {-# INLINE decCBOR #-}
+
+--------------------------------------------------------------------------------
+-- Slotting
+--------------------------------------------------------------------------------
+
+instance DecCBOR SlotNo where
+  decCBOR = fromPlainDecoder Serialise.decode
+  {-# INLINE decCBOR #-}
+
+instance (Serialise.Serialise t, Typeable t) => DecCBOR (WithOrigin t) where
+  decCBOR = fromPlainDecoder Serialise.decode
+  {-# INLINE decCBOR #-}
+
+deriving instance DecCBOR SlotInterval
+
+deriving instance DecCBOR EpochNo
+
+deriving instance DecCBOR EpochSize
+
+deriving instance DecCBOR SystemStart
+
+instance DecCBOR BlockNo where
+  decCBOR = fromPlainDecoder decode
+  {-# INLINE decCBOR #-}
+
+deriving instance DecCBOR EpochInterval
+
+--------------------------------------------------------------------------------
+-- Plutus
+--------------------------------------------------------------------------------
+
+instance DecCBOR PV1.Data where
+  decCBOR = fromPlainDecoder decode
+  {-# INLINE decCBOR #-}
+
+instance DecCBOR PV1.ScriptContext where
+  decCBOR = decCBOR >>= decodeScriptContextFromData
+
+instance DecCBOR PV2.ScriptContext where
+  decCBOR = decCBOR >>= decodeScriptContextFromData
+
+instance DecCBOR PV3.ScriptContext where
+  decCBOR = decCBOR >>= decodeScriptContextFromData
+
+instance DecCBOR PV4.ScriptContext where
+  decCBOR = decCBOR >>= decodeScriptContextFromData
+
+decodeScriptContextFromData :: (PV3.FromData a, MonadFail m) => PV3.Data -> m a
+decodeScriptContextFromData scriptContextData =
+  case PV3.fromData scriptContextData of
+    Nothing -> fail $ "ScriptContext cannot be decoded from Data: " <> show scriptContextData
+    Just scriptContext -> pure scriptContext
+
+--------------------------------------------------------------------------------
+-- Leios
+--------------------------------------------------------------------------------
+
+-- | Ceiling on a certificate's signers bitfield, for want of the committee that
+-- would pin its length exactly: enough bits for the largest committee a
+-- 'Cardano.Crypto.Leios.LeiosSeatId' can address.
+-- 'Cardano.Crypto.Leios.verifyLeiosCert' does the exact check.
+maxLeiosCertSignersBytes :: Int
+maxLeiosCertSignersBytes = (maxLeiosCommitteeSize + 7) `div` 8
+
+instance DecCBOR BitField where
+  decCBOR = BitField <$> decCBOR
+
+instance DecCBOR LeiosCert where
+  decCBOR =
+    decodeRecordNamed "LeiosCert" (const 2) $
+      LeiosCert
+        <$> decodeSigners
+        <*> decCBOR
+    where
+      decodeSigners = do
+        signers <- decCBOR
+        let numBytes = Prim.sizeofByteArray (bitFieldBytes signers)
+        when (numBytes > maxLeiosCertSignersBytes) $
+          fail $
+            "LeiosCert signers of "
+              <> show numBytes
+              <> " bytes exceeds the maximum of "
+              <> show maxLeiosCertSignersBytes
+        pure signers
+
+instance DecCBOR LeiosSeat where
+  decCBOR = decodeRecordNamed "LeiosSeat" (const 2) $ LeiosSeat <$> decCBOR <*> decCBOR
+
+-- | Straight to the constructor: 'mkLeiosCommittee' takes proofs of possession,
+-- which a seated committee no longer carries.
+instance DecCBOR LeiosCommittee where
+  decCBOR = UnsafeLeiosCommittee . VStrict.fromList <$> decCBOR

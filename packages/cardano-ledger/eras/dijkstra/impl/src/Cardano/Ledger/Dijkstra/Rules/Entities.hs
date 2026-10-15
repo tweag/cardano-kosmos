@@ -1,0 +1,517 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Dijkstra.Rules.Entities (
+  EntitiesEnv (..),
+  EntitiesPredFailure (..),
+  EntitiesEvent (..),
+  validateWrongNetworkInDirectDeposit,
+  validateMissingAccountsInDirectDeposits,
+  validateAccountBalanceIntervals,
+  validateStartingAccountBalanceIntervals,
+) where
+
+import Cardano.Ledger.Address (DirectDeposits (..), accountAddressCredentialL)
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
+import Cardano.Ledger.Binary.Coders
+import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.Governance (
+  Committee,
+  GovActionPurpose (..),
+  GovActionState,
+  GovPurposeId,
+ )
+import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.Conway.State
+import Cardano.Ledger.Dijkstra.Era (DijkstraEra, ENTITIES)
+import Cardano.Ledger.Dijkstra.Rules.Certs ()
+import Cardano.Ledger.Dijkstra.Rules.GovCert (DijkstraGovCertPredFailure)
+import Cardano.Ledger.Dijkstra.Rules.Pool (DijkstraPoolPredFailure)
+import Cardano.Ledger.Dijkstra.Scripts (AccountBalanceInterval (..), AccountBalanceIntervals (..))
+import Cardano.Ledger.Dijkstra.TxBody
+import Cardano.Ledger.Dijkstra.UTxO (DijkstraEraUTxO (..))
+import Cardano.Ledger.Rules.ValidationMode (Test, runTest)
+import qualified Cardano.Ledger.Shelley.Rules as Shelley
+import Control.DeepSeq (NFData)
+import Control.Monad (unless, when)
+import Control.Monad.Trans.Reader (asks)
+import Control.State.Transition.Extended
+import Data.Foldable
+import Data.Map.NonEmpty (NonEmptyMap)
+import qualified Data.Map.NonEmpty as NEM
+import qualified Data.Map.Strict as Map
+import Data.Sequence (Seq)
+import qualified Data.Sequence.Strict as StrictSeq
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.Set.NonEmpty (NonEmptySet)
+import GHC.Generics (Generic)
+import Lens.Micro
+
+data EntitiesEnv era = EntitiesEnv
+  { eeCurrentEpoch :: EpochNo
+  , eePParams :: PParams era
+  , eeCurrentCommittee :: StrictMaybe (Committee era)
+  , eeCommitteeProposals :: Map.Map (GovPurposeId 'CommitteePurpose) (GovActionState era)
+  , eeOriginalAccounts :: Accounts era
+  }
+  deriving (Generic)
+
+deriving instance
+  (EraPParams era, Eq (Committee era), Eq (GovActionState era), Eq (Accounts era)) =>
+  Eq (EntitiesEnv era)
+
+deriving instance
+  (EraPParams era, Show (Committee era), Show (GovActionState era), Show (Accounts era)) =>
+  Show (EntitiesEnv era)
+
+instance
+  (EraPParams era, NFData (Committee era), NFData (GovActionState era), NFData (Accounts era)) =>
+  NFData (EntitiesEnv era)
+
+instance
+  ( EraPParams era
+  , EncCBOR (Committee era)
+  , EncCBOR (GovActionState era)
+  , EncCBOR (Accounts era)
+  ) =>
+  EncCBOR (EntitiesEnv era)
+  where
+  encCBOR x@(EntitiesEnv _ _ _ _ _) =
+    let EntitiesEnv {..} = x
+     in encode $
+          Rec EntitiesEnv
+            !> To eeCurrentEpoch
+            !> To eePParams
+            !> To eeCurrentCommittee
+            !> To eeCommitteeProposals
+            !> To eeOriginalAccounts
+
+data EntitiesPredFailure era
+  = CertsFailure (PredicateFailure (EraRule "CERTS" era))
+  | WithdrawalAddressesWithWrongNetwork
+      -- | Expected network id
+      Network
+      -- | Withdrawal account addresses with wrong network id
+      (NonEmptySet AccountAddress)
+  | WithdrawalAccountsMissing Withdrawals
+  | WithdrawalAccountsMissingFromOriginal Withdrawals
+  | WithdrawalAmountsInexactInLegacyMode (NonEmptyMap AccountAddress (Mismatch RelEQ Coin))
+  | WithdrawalAmountsExceedingOriginalBalance (NonEmptyMap AccountAddress (Mismatch RelLTEQ Coin))
+  | DirectDepositAddressesWithWrongNetwork
+      -- | Expected network id
+      Network
+      -- | Direct-deposit account addresses with wrong network id
+      (NonEmptySet AccountAddress)
+  | DirectDepositAccountsMissing DirectDeposits
+  | WrongNetworkInAccountBalanceIntervals Network (NonEmptySet AccountAddress)
+  | MissingAccountsInAccountBalanceIntervals (NonEmptyMap AccountAddress (AccountBalanceInterval era))
+  | BalancesOutsideAccountBalanceIntervals
+      (NonEmptyMap AccountAddress (Coin, AccountBalanceInterval era))
+  | WrongNetworkInStartingAccountBalanceIntervals Network (NonEmptySet AccountAddress)
+  | MissingAccountsInStartingAccountBalanceIntervals
+      (NonEmptyMap AccountAddress (AccountBalanceInterval era))
+  | BalancesOutsideStartingAccountBalanceIntervals
+      (NonEmptyMap AccountAddress (Coin, AccountBalanceInterval era))
+  deriving (Generic)
+
+deriving stock instance
+  Eq (PredicateFailure (EraRule "CERTS" era)) => Eq (EntitiesPredFailure era)
+
+deriving stock instance
+  Ord (PredicateFailure (EraRule "CERTS" era)) => Ord (EntitiesPredFailure era)
+
+deriving stock instance
+  Show (PredicateFailure (EraRule "CERTS" era)) => Show (EntitiesPredFailure era)
+
+instance
+  NFData (PredicateFailure (EraRule "CERTS" era)) =>
+  NFData (EntitiesPredFailure era)
+
+instance
+  ( Era era
+  , EncCBOR (PredicateFailure (EraRule "CERTS" era))
+  ) =>
+  EncCBOR (EntitiesPredFailure era)
+  where
+  encCBOR =
+    encode . \case
+      CertsFailure x -> Sum (CertsFailure @era) 0 !> To x
+      WithdrawalAddressesWithWrongNetwork x y -> Sum (WithdrawalAddressesWithWrongNetwork @era) 1 !> To x !> To y
+      WithdrawalAccountsMissing x -> Sum (WithdrawalAccountsMissing @era) 2 !> To x
+      WithdrawalAccountsMissingFromOriginal x -> Sum (WithdrawalAccountsMissingFromOriginal @era) 3 !> To x
+      WithdrawalAmountsInexactInLegacyMode x -> Sum (WithdrawalAmountsInexactInLegacyMode @era) 4 !> To x
+      WithdrawalAmountsExceedingOriginalBalance x -> Sum (WithdrawalAmountsExceedingOriginalBalance @era) 5 !> To x
+      DirectDepositAddressesWithWrongNetwork x y -> Sum (DirectDepositAddressesWithWrongNetwork @era) 6 !> To x !> To y
+      DirectDepositAccountsMissing x -> Sum (DirectDepositAccountsMissing @era) 7 !> To x
+      WrongNetworkInAccountBalanceIntervals x y -> Sum (WrongNetworkInAccountBalanceIntervals @era) 8 !> To x !> To y
+      MissingAccountsInAccountBalanceIntervals x -> Sum (MissingAccountsInAccountBalanceIntervals @era) 9 !> To x
+      BalancesOutsideAccountBalanceIntervals x -> Sum (BalancesOutsideAccountBalanceIntervals @era) 10 !> To x
+      WrongNetworkInStartingAccountBalanceIntervals x y -> Sum (WrongNetworkInStartingAccountBalanceIntervals @era) 11 !> To x !> To y
+      MissingAccountsInStartingAccountBalanceIntervals x -> Sum (MissingAccountsInStartingAccountBalanceIntervals @era) 12 !> To x
+      BalancesOutsideStartingAccountBalanceIntervals x -> Sum (BalancesOutsideStartingAccountBalanceIntervals @era) 13 !> To x
+
+instance
+  ( Era era
+  , DecCBOR (PredicateFailure (EraRule "CERTS" era))
+  ) =>
+  DecCBOR (EntitiesPredFailure era)
+  where
+  decCBOR = decode . Summands "EntitiesPredFailure" $ \case
+    0 -> SumD CertsFailure <! From
+    1 -> SumD WithdrawalAddressesWithWrongNetwork <! From <! From
+    2 -> SumD WithdrawalAccountsMissing <! From
+    3 -> SumD WithdrawalAccountsMissingFromOriginal <! From
+    4 -> SumD WithdrawalAmountsInexactInLegacyMode <! From
+    5 -> SumD WithdrawalAmountsExceedingOriginalBalance <! From
+    6 -> SumD DirectDepositAddressesWithWrongNetwork <! From <! From
+    7 -> SumD DirectDepositAccountsMissing <! From
+    8 -> SumD WrongNetworkInAccountBalanceIntervals <! From <! From
+    9 -> SumD MissingAccountsInAccountBalanceIntervals <! From
+    10 -> SumD BalancesOutsideAccountBalanceIntervals <! From
+    11 -> SumD WrongNetworkInStartingAccountBalanceIntervals <! From <! From
+    12 -> SumD MissingAccountsInStartingAccountBalanceIntervals <! From
+    13 -> SumD BalancesOutsideStartingAccountBalanceIntervals <! From
+    n -> Invalid n
+
+newtype EntitiesEvent era = CertsEvent (Event (EraRule "CERTS" era))
+  deriving (Generic)
+
+deriving instance Eq (Event (EraRule "CERTS" era)) => Eq (EntitiesEvent era)
+
+instance NFData (Event (EraRule "CERTS" era)) => NFData (EntitiesEvent era)
+
+type instance EraRuleFailure "ENTITIES" DijkstraEra = EntitiesPredFailure DijkstraEra
+
+type instance EraRuleEvent "ENTITIES" DijkstraEra = EntitiesEvent DijkstraEra
+
+instance InjectRuleFailure "ENTITIES" EntitiesPredFailure DijkstraEra
+
+instance InjectRuleFailure "ENTITIES" Conway.ConwayCertsPredFailure DijkstraEra where
+  injectFailure = CertsFailure
+
+instance InjectRuleFailure "ENTITIES" Conway.ConwayCertPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" Conway.ConwayDelegPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" Shelley.ShelleyPoolPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" DijkstraPoolPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" Conway.ConwayGovCertPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" DijkstraGovCertPredFailure DijkstraEra where
+  injectFailure = CertsFailure . injectFailure @"CERTS"
+
+instance InjectRuleFailure "ENTITIES" Conway.ConwayLedgerPredFailure DijkstraEra where
+  injectFailure = conwayToDijkstraEntitiesPredFailure
+
+instance InjectRuleFailure "ENTITIES" Shelley.ShelleyUtxoPredFailure DijkstraEra where
+  injectFailure = shelleyUtxoToDijkstraEntitiesPredFailure
+
+instance
+  ( EraTx era
+  , DijkstraEraTxBody era
+  , DijkstraEraUTxO era
+  , ConwayEraPParams era
+  , ConwayEraCertState era
+  , Embed (EraRule "CERTS" era) (ENTITIES era)
+  , State (EraRule "CERTS" era) ~ CertState era
+  , Signal (EraRule "CERTS" era) ~ Seq (TxCert era)
+  , Environment (EraRule "CERTS" era) ~ Conway.CertsEnv era
+  , EraRule "ENTITIES" era ~ ENTITIES era
+  , InjectRuleFailure "ENTITIES" EntitiesPredFailure era
+  , InjectRuleFailure "ENTITIES" Shelley.ShelleyUtxoPredFailure era
+  , InjectRuleFailure "ENTITIES" Conway.ConwayLedgerPredFailure era
+  ) =>
+  STS (ENTITIES era)
+  where
+  type State (ENTITIES era) = CertState era
+  type Signal (ENTITIES era) = StAnnTx TopTx era
+  type Environment (ENTITIES era) = EntitiesEnv era
+  type BaseM (ENTITIES era) = ShelleyBase
+  type PredicateFailure (ENTITIES era) = EntitiesPredFailure era
+  type Event (ENTITIES era) = EntitiesEvent era
+
+  initialRules = []
+  transitionRules = [dijkstraEntitiesTransition @era]
+
+dijkstraEntitiesTransition ::
+  forall era.
+  ( DijkstraEraTxBody era
+  , DijkstraEraUTxO era
+  , ConwayEraCertState era
+  , Embed (EraRule "CERTS" era) (ENTITIES era)
+  , State (EraRule "CERTS" era) ~ CertState era
+  , Signal (EraRule "CERTS" era) ~ Seq (TxCert era)
+  , Environment (EraRule "CERTS" era) ~ Conway.CertsEnv era
+  , EraRule "ENTITIES" era ~ ENTITIES era
+  , InjectRuleFailure "ENTITIES" EntitiesPredFailure era
+  , InjectRuleFailure "ENTITIES" Shelley.ShelleyUtxoPredFailure era
+  , InjectRuleFailure "ENTITIES" Conway.ConwayLedgerPredFailure era
+  ) =>
+  TransitionRule (ENTITIES era)
+dijkstraEntitiesTransition = do
+  TRC (EntitiesEnv curEpoch pp committee committeeProposals originalAccounts, certState, stAnnTx) <-
+    judgmentContext
+  let tx = stAnnTx ^. txStAnnTxG
+      accounts = certState ^. certDStateL . accountsL
+      certsEnv = Conway.CertsEnv pp curEpoch committee committeeProposals
+      topTxWithdrawals = tx ^. bodyTxL . withdrawalsTxBodyL
+  network <- liftSTS $ asks networkId
+
+  runTest $ Shelley.validateWrongNetworkWithdrawal network (tx ^. bodyTxL)
+  runTest $ validateWrongNetworkInDirectDeposit network (tx ^. bodyTxL)
+  runTest $ validateAccountBalanceIntervals network accounts (tx ^. bodyTxL)
+  runTest $ validateStartingAccountBalanceIntervals network originalAccounts (tx ^. bodyTxL)
+
+  runTest $ validateWithdrawalsAgainstOriginalAccounts stAnnTx network originalAccounts
+  -- Skip the current-account checks when a prior check has failed:
+  -- if aggregate withdrawal validation failed, the current accounts state
+  -- may contain underflowed balances (if the withdrawals in sub-transactions exceeded the balance),
+  -- and any failure derived from it would report garbage.
+  -- Conversely, any underflow in the threaded state implies aggregate withdrawals exceeded the original balance,
+  -- so whenever the state is corrupted the aggregate check is guaranteed to have failed.
+  whenFailureFree $
+    runTest $
+      validateWithdrawalsAgainstCurrentAccounts stAnnTx network accounts
+
+  let certStateBeforeCerts =
+        certState
+          & Conway.updateDormantDRepExpiries tx curEpoch
+          & Conway.updateVotingDRepExpiries tx curEpoch (pp ^. ppDRepActivityL)
+          & certDStateL . accountsL %~ applyWithdrawals topTxWithdrawals
+  certStateAfterCerts <-
+    trans @(EraRule "CERTS" era) $
+      TRC (certsEnv, certStateBeforeCerts, StrictSeq.fromStrict $ tx ^. bodyTxL . certsTxBodyL)
+
+  let directDeposits = tx ^. bodyTxL . directDepositsTxBodyL
+      accountsAfterCerts = certStateAfterCerts ^. certDStateL . accountsL
+  runTest $ validateMissingAccountsInDirectDeposits directDeposits network accountsAfterCerts
+
+  pure $ certStateAfterCerts & certDStateL . accountsL %~ applyDirectDeposits directDeposits
+
+validateWrongNetworkInDirectDeposit ::
+  DijkstraEraTxBody era =>
+  Network ->
+  TxBody t era ->
+  Test (EntitiesPredFailure era)
+validateWrongNetworkInDirectDeposit netId txb =
+  failureOnNonEmptySet depositsWrongNetwork (DirectDepositAddressesWithWrongNetwork netId)
+  where
+    depositsWrongNetwork =
+      Map.keysSet $
+        Map.filterWithKey
+          (\a _ -> aaNetworkId a /= netId)
+          (unDirectDeposits $ txb ^. directDepositsTxBodyL)
+
+validateMissingAccountsInDirectDeposits ::
+  EraAccounts era =>
+  DirectDeposits ->
+  Network ->
+  Accounts era ->
+  Test (EntitiesPredFailure era)
+validateMissingAccountsInDirectDeposits dds network accounts =
+  failureOnJust
+    (directDepositsMissingAccounts dds network accounts)
+    DirectDepositAccountsMissing
+
+-- | Checks that withdrawals satisfy these conditions against original Accounts:
+-- 1) normal mode: top-tx withdrawal account addresses must be registered (sub-tx ones are checked in SUBENTITIES)
+-- 2) normal mode: for each account, the sum of top- and sub-tx withdrawals must not exceed the original balance
+-- 3) legacy mode: for each account, the sum of sub-tx withdrawals must not exceed the original balance
+validateWithdrawalsAgainstOriginalAccounts ::
+  ( EraAccounts era
+  , DijkstraEraUTxO era
+  , DijkstraEraTxBody era
+  ) =>
+  StAnnTx TopTx era ->
+  Network ->
+  Accounts era ->
+  Test (EntitiesPredFailure era)
+validateWithdrawalsAgainstOriginalAccounts stAnnTx network originalAccounts = do
+  let
+    tx = stAnnTx ^. txStAnnTxG
+    legacyMode = stAnnTx ^. plutusLegacyModeStAnnTxG
+    topTxWithdrawals = tx ^. bodyTxL . withdrawalsTxBodyL
+    sumOfSubTxWithdrawals =
+      foldMap'
+        (\subTx -> subTx ^. bodyTxL . withdrawalsTxBodyL)
+        (tx ^. bodyTxL . subTransactionsTxBodyL)
+    sumOfAllWithdrawals = topTxWithdrawals <> sumOfSubTxWithdrawals
+    -- In normal mode, all withdrawals in the batch must not exceed the original balance,
+    -- and all top tx-withdrawals must exist in the original Accounts
+    checkNonLegacy =
+      unless legacyMode $
+        for_ (withdrawalsThatExceedAccountBalance sumOfAllWithdrawals network originalAccounts) $
+          \(Withdrawals missingAccounts, exceedingBalances) ->
+            -- we only check the accounts in the top transactions here, because the subtransactions are checked in SUBENTITES
+            let topMissingAccounts =
+                  Map.intersection (unWithdrawals topTxWithdrawals) missingAccounts
+             in failWithdrawalsMap topMissingAccounts WithdrawalAccountsMissingFromOriginal
+                  *> failureOnNonEmptyMap exceedingBalances WithdrawalAmountsExceedingOriginalBalance
+
+    -- In legacy mode, all withdrawals from subtransactions must not exceed the original balance.
+    checkLegacy =
+      when legacyMode $
+        for_ (withdrawalsThatExceedAccountBalance sumOfSubTxWithdrawals network originalAccounts) $
+          -- missing accounts are discarded, because they are checked in SUBENTITIES
+          \(_, exceedingBalances) ->
+            failureOnNonEmptyMap exceedingBalances WithdrawalAmountsExceedingOriginalBalance
+
+  checkNonLegacy *> checkLegacy
+  where
+    failWithdrawalsMap m mkFailure = failureOnNonEmptyMap m (mkFailure . Withdrawals . NEM.toMap)
+
+-- | Checks that withdrawals satisfy these conditions against the current Accounts:
+-- 1) top-tx withdrawal account addresses must be registered
+-- 2) legacy mode: for each account, the top-tx withdrawal must exactly drain the current balance
+validateWithdrawalsAgainstCurrentAccounts ::
+  ( EraAccounts era
+  , DijkstraEraUTxO era
+  ) =>
+  StAnnTx TopTx era ->
+  Network ->
+  Accounts era ->
+  Test (EntitiesPredFailure era)
+validateWithdrawalsAgainstCurrentAccounts stAnnTx network accounts = do
+  let
+    tx = stAnnTx ^. txStAnnTxG
+    legacyMode = stAnnTx ^. plutusLegacyModeStAnnTxG
+    topTxWithdrawals = tx ^. bodyTxL . withdrawalsTxBodyL
+  -- Top-tx withdrawals must exist in current Accounts.
+  -- In legacy mode, they must drain the account.
+  for_ (withdrawalsThatDoNotDrainAccounts topTxWithdrawals network accounts) $
+    \(Withdrawals missingAccounts, inexact) ->
+      failWithdrawalsMap missingAccounts WithdrawalAccountsMissing
+        *> when legacyMode (failureOnNonEmptyMap inexact WithdrawalAmountsInexactInLegacyMode)
+  where
+    failWithdrawalsMap m mkFailure = failureOnNonEmptyMap m (mkFailure . Withdrawals . NEM.toMap)
+
+conwayToDijkstraEntitiesPredFailure ::
+  forall era. Conway.ConwayLedgerPredFailure era -> EntitiesPredFailure era
+conwayToDijkstraEntitiesPredFailure = \case
+  Conway.ConwayWdrlNotDelegatedToDRep _ -> impossible "ConwayWdrlNotDelegatedToDRep"
+  Conway.ConwayUtxowFailure _ -> impossible "ConwayUtxowFailure"
+  Conway.ConwayCertsFailure _ -> impossible "ConwayCertsFailure"
+  Conway.ConwayGovFailure _ -> impossible "ConwayGovFailure"
+  Conway.ConwayTreasuryValueMismatch _ -> impossible "ConwayTreasuryValueMismatch"
+  Conway.ConwayTxRefScriptsSizeTooBig _ -> impossible "ConwayTxRefScriptsSizeTooBig"
+  Conway.ConwayMempoolFailure _ -> impossible "ConwayMempoolFailure"
+  Conway.ConwayWithdrawalsMissingAccounts _ -> impossible "ConwayWithdrawalsMissingAccounts"
+  Conway.ConwayIncompleteWithdrawals _ -> impossible "ConwayIncompleteWithdrawals"
+  where
+    impossible name = error $ "Impossible: `" <> name <> "` for ENTITIES"
+
+shelleyUtxoToDijkstraEntitiesPredFailure ::
+  Shelley.ShelleyUtxoPredFailure era -> EntitiesPredFailure era
+shelleyUtxoToDijkstraEntitiesPredFailure = \case
+  Shelley.WrongNetworkWithdrawal net addrs -> WithdrawalAddressesWithWrongNetwork net addrs
+  Shelley.BadInputsUTxO _ -> impossible "BadInputsUTxO"
+  Shelley.ExpiredUTxO _ -> impossible "ExpiredUTxO"
+  Shelley.MaxTxSizeUTxO _ -> impossible "MaxTxSizeUTxO"
+  Shelley.InputSetEmptyUTxO -> impossible "InputSetEmptyUTxO"
+  Shelley.FeeTooSmallUTxO _ -> impossible "FeeTooSmallUTxO"
+  Shelley.ValueNotConservedUTxO _ -> impossible "ValueNotConservedUTxO"
+  Shelley.WrongNetwork _ _ -> impossible "WrongNetwork"
+  Shelley.OutputTooSmallUTxO _ -> impossible "OutputTooSmallUTxO"
+  Shelley.UpdateFailure _ -> impossible "UpdateFailure"
+  Shelley.OutputBootAddrAttrsTooBig _ -> impossible "OutputBootAddrAttrsTooBig"
+  where
+    impossible name = error $ "Impossible: `" <> name <> "` for ENTITIES"
+
+instance
+  ( STS (Conway.CERTS era)
+  , PredicateFailure (EraRule "CERTS" era) ~ Conway.ConwayCertsPredFailure era
+  , Event (EraRule "CERTS" era) ~ Conway.ConwayCertsEvent era
+  ) =>
+  Embed (Conway.CERTS era) (ENTITIES era)
+  where
+  wrapFailed = CertsFailure
+  wrapEvent = CertsEvent
+
+accountBalanceIntervalContains :: Coin -> AccountBalanceInterval era -> Bool
+accountBalanceIntervalContains bal = \case
+  AccountBalanceLowerBound (Inclusive lo) -> lo <= bal
+  AccountBalanceUpperBound (Exclusive hi) -> bal < hi
+  AccountBalanceBothBounds (Inclusive lo) (Exclusive hi) -> lo <= bal && bal < hi
+  AccountBalanceExact n -> bal == n
+
+categorizeAccountBalanceIntervals ::
+  EraAccounts era =>
+  Network ->
+  Accounts era ->
+  AccountBalanceIntervals era ->
+  ( Set AccountAddress
+  , Map.Map AccountAddress (AccountBalanceInterval era)
+  , Map.Map AccountAddress (Coin, AccountBalanceInterval era)
+  )
+categorizeAccountBalanceIntervals network accounts (AccountBalanceIntervals intervals) =
+  Map.foldlWithKey' categorize (Set.empty, Map.empty, Map.empty) intervals
+  where
+    categorize (!wrongNetwork, !missing, !outside) acct interval
+      | aaNetworkId acct /= network = (Set.insert acct wrongNetwork, missing, outside)
+      | otherwise =
+          case lookupAccountState (acct ^. accountAddressCredentialL) accounts of
+            Nothing -> (wrongNetwork, Map.insert acct interval missing, outside)
+            Just accountState ->
+              let balance = fromCompact (accountState ^. balanceAccountStateL)
+               in if accountBalanceIntervalContains balance interval
+                    then (wrongNetwork, missing, outside)
+                    else (wrongNetwork, missing, Map.insert acct (balance, interval) outside)
+
+validateAccountBalanceIntervals ::
+  (EraAccounts era, DijkstraEraTxBody era) =>
+  Network ->
+  Accounts era ->
+  TxBody l era ->
+  Test (EntitiesPredFailure era)
+validateAccountBalanceIntervals network accounts txBody =
+  sequenceA_
+    [ failureOnNonEmptySet wrongNetwork (WrongNetworkInAccountBalanceIntervals network)
+    , failureOnNonEmptyMap missing MissingAccountsInAccountBalanceIntervals
+    , failureOnNonEmptyMap outside BalancesOutsideAccountBalanceIntervals
+    ]
+  where
+    (wrongNetwork, missing, outside) =
+      categorizeAccountBalanceIntervals network accounts $
+        txBody ^. accountBalanceIntervalsTxBodyL
+
+validateStartingAccountBalanceIntervals ::
+  (EraAccounts era, DijkstraEraTxBody era) =>
+  Network ->
+  Accounts era ->
+  TxBody TopTx era ->
+  Test (EntitiesPredFailure era)
+validateStartingAccountBalanceIntervals network accounts txBody =
+  sequenceA_
+    [ failureOnNonEmptySet wrongNetwork (WrongNetworkInStartingAccountBalanceIntervals network)
+    , failureOnNonEmptyMap missing MissingAccountsInStartingAccountBalanceIntervals
+    , failureOnNonEmptyMap outside BalancesOutsideStartingAccountBalanceIntervals
+    ]
+  where
+    (wrongNetwork, missing, outside) =
+      categorizeAccountBalanceIntervals network accounts $
+        txBody ^. startingAccountBalanceIntervalsTxBodyL

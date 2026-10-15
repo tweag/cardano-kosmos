@@ -1,0 +1,67 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Conway (
+  ConwayEra,
+  hardforkConwayBootstrapPhase,
+  hardforkConwayDisallowUnelectedCommitteeFromVoting,
+  hardforkConwayDELEGIncorrectDepositsAndRefunds,
+  Tx (..),
+  ApplyTxError (..),
+) where
+
+import Cardano.Ledger.Alonzo (mkAlonzoStAnnTx)
+import Cardano.Ledger.Babbage.TxBody ()
+import Cardano.Ledger.BaseTypes (Inject (..))
+import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
+import Cardano.Ledger.Block (EraBlockHeader, PraosBbodySignal (..), PraosEraBlockHeader)
+import Cardano.Ledger.Conway.BlockBody ()
+import Cardano.Ledger.Conway.Era (
+  ConwayEra,
+  hardforkConwayBootstrapPhase,
+  hardforkConwayDELEGIncorrectDepositsAndRefunds,
+  hardforkConwayDisallowUnelectedCommitteeFromVoting,
+ )
+import Cardano.Ledger.Conway.Forecast ()
+import Cardano.Ledger.Conway.Governance (RunConwayRatify (..))
+import Cardano.Ledger.Conway.Rules (ConwayLedgerPredFailure)
+import Cardano.Ledger.Conway.State ()
+import Cardano.Ledger.Conway.Transition ()
+import Cardano.Ledger.Conway.Translation ()
+import Cardano.Ledger.Conway.Tx (Tx (..))
+import Cardano.Ledger.Conway.TxInfo ()
+import Cardano.Ledger.Conway.TxOut ()
+import Cardano.Ledger.Conway.UTxO ()
+import Cardano.Ledger.Shelley.API
+import Data.List.NonEmpty (NonEmpty)
+import GHC.Generics (Generic)
+
+instance ApplyTx ConwayEra where
+  newtype ApplyTxError ConwayEra = ConwayApplyTxError (NonEmpty (ConwayLedgerPredFailure ConwayEra))
+    deriving (Eq, Show)
+    deriving newtype (EncCBOR, DecCBOR, Semigroup, Generic)
+
+  mkStAnnTx = mkAlonzoStAnnTx
+
+  internalApplyTxWithValidation = defaultApplyTxWithValidation @"MEMPOOL" ConwayApplyTxError
+
+  internalReapplyValidatedTx = defaultReapplyValidatedTx @"MEMPOOL" ConwayApplyTxError
+
+instance ApplyTick ConwayEra
+
+instance (EraBlockHeader h ConwayEra, PraosEraBlockHeader h ConwayEra) => ApplyBlock h ConwayEra where
+  wrapBlockSignal = PraosBbodySignal
+
+instance RunConwayRatify ConwayEra
+
+instance Inject (NonEmpty (ConwayLedgerPredFailure ConwayEra)) (ApplyTxError ConwayEra) where
+  inject = ConwayApplyTxError

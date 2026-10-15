@@ -1,0 +1,228 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Cardano.Ledger.Dijkstra.Translation () where
+
+import Cardano.Ledger.Binary (DecoderError)
+import Cardano.Ledger.Conway (ConwayEra)
+import Cardano.Ledger.Conway.Core
+import Cardano.Ledger.Conway.Governance (
+  ConwayGovState (..),
+  DRepPulsingState (..),
+  EnactState (..),
+  GovAction (..),
+  GovActionState (..),
+  ProposalProcedure (..),
+  Proposals,
+  PulsingSnapshot,
+  RatifyState (..),
+  finishDRepPulser,
+  translateProposals,
+ )
+import Cardano.Ledger.Conway.Governance.DRepPulser (PulsingSnapshot (..))
+import Cardano.Ledger.Dijkstra.Era (DijkstraEra)
+import Cardano.Ledger.Dijkstra.Genesis (DijkstraGenesis (..))
+import Cardano.Ledger.Dijkstra.Governance ()
+import Cardano.Ledger.Dijkstra.State
+import Cardano.Ledger.Dijkstra.Tx ()
+import Cardano.Ledger.Dijkstra.TxAuxData ()
+import Cardano.Ledger.Dijkstra.TxBody (upgradeGovAction, upgradeProposals)
+import Cardano.Ledger.Dijkstra.TxWits ()
+import Cardano.Ledger.Shelley.LedgerState (
+  EpochState (..),
+  LedgerState (..),
+  NewEpochState (..),
+  UTxOState (..),
+  lsCertStateL,
+  lsUTxOStateL,
+ )
+import Data.Coerce (coerce)
+import qualified Data.Map.Strict as Map
+import Lens.Micro ((&), (.~), (^.))
+
+type instance TranslationContext DijkstraEra = DijkstraGenesis
+
+instance TranslateEra DijkstraEra (Tx TopTx) where
+  type TranslationError DijkstraEra (Tx TopTx) = DecoderError
+  translateEra _ctxt tx = case toSTxLevel tx of
+    STopTxOnly -> do
+      -- Note that this does not preserve the hidden bytes field of the transaction.
+      -- This is under the premise that this is irrelevant for TxInBlocks, which are
+      -- not transmitted as contiguous chunks.
+      txBody <- translateEraThroughCBOR "TxBody" $ tx ^. bodyTxL
+      txWits <- translateEraThroughCBOR "TxWits" $ tx ^. witsTxL
+      auxData <- mapM (translateEraThroughCBOR "TxAuxData") (tx ^. auxDataTxL)
+      let isPhase2ValidTx = tx ^. isPhase2ValidTxL
+      pure $
+        mkBasicTx txBody
+          & witsTxL .~ txWits
+          & isPhase2ValidTxL .~ isPhase2ValidTx
+          & auxDataTxL .~ auxData
+
+instance TranslateEra DijkstraEra NewEpochState where
+  translateEra ctxt nes = do
+    pure $
+      NewEpochState
+        { nesEL = nesEL nes
+        , nesBprev = nesBprev nes
+        , nesBcur = nesBcur nes
+        , nesEs = translateEra' ctxt $ nesEs nes
+        , nesRu = nesRu nes
+        , nesPd = nesPd nes
+        , stashedAVVMAddresses = ()
+        }
+
+--------------------------------------------------------------------------------
+-- Auxiliary instances and functions
+--------------------------------------------------------------------------------
+
+instance TranslateEra DijkstraEra PParams where
+  translateEra DijkstraGenesis {dgUpgradePParams} =
+    pure . upgradePParams dgUpgradePParams
+
+instance TranslateEra DijkstraEra FuturePParams where
+  translateEra ctxt = \case
+    NoPParamsUpdate -> pure NoPParamsUpdate
+    DefinitePParamsUpdate pp -> DefinitePParamsUpdate <$> translateEra ctxt pp
+    PotentialPParamsUpdate mpp -> PotentialPParamsUpdate <$> mapM (translateEra ctxt) mpp
+
+instance TranslateEra DijkstraEra SnapShots where
+  translateEra _ctxt _ss@SnapShots {..} = pure SnapShots {..}
+
+instance TranslateEra DijkstraEra EpochState where
+  translateEra ctxt es =
+    pure $
+      EpochState
+        { esChainAccountState = esChainAccountState es
+        , esSnapshots = translateEra' ctxt $ esSnapshots es
+        , esLState = translateEra' ctxt $ esLState es
+        , esNonMyopic = esNonMyopic es
+        }
+
+instance TranslateEra DijkstraEra DState where
+  translateEra _ DState {dsAccounts = ConwayAccounts accounts, ..} =
+    pure DState {dsAccounts = ConwayAccounts (Map.map coerce accounts), ..}
+
+instance TranslateEra DijkstraEra PState where
+  -- The VRF key hashes are recomputed from the registered pools, since the bookkeeping
+  -- of the Conway era does not maintain them reliably.
+  translateEra _ PState {..} = pure $ populateVRFKeyHashes $ coerce PState {..}
+
+instance TranslateEra DijkstraEra VState where
+  translateEra _ vState = pure $ coerce vState
+
+instance TranslateEra DijkstraEra LedgerState where
+  translateEra ctx ls =
+    pure
+      LedgerState
+        { lsUTxOState = translateEra' ctx $ ls ^. lsUTxOStateL
+        , lsCertState = translateCertState ctx $ ls ^. lsCertStateL
+        }
+
+translateCertState ::
+  TranslationContext DijkstraEra ->
+  CertState ConwayEra ->
+  CertState DijkstraEra
+translateCertState ctx ConwayCertState {..} =
+  ConwayCertState
+    { conwayCertVState = translateEra' ctx conwayCertVState
+    , conwayCertPState = translateEra' ctx conwayCertPState
+    , conwayCertDState = translateEra' ctx conwayCertDState
+    }
+
+instance TranslateEra DijkstraEra GovAction where
+  translateEra _ = pure . upgradeGovAction
+
+instance TranslateEra DijkstraEra ProposalProcedure where
+  translateEra _ = pure . upgradeProposals
+
+instance TranslateEra DijkstraEra GovActionState where
+  translateEra ctxt GovActionState {..} =
+    pure $
+      GovActionState
+        { gasId = gasId
+        , gasCommitteeVotes = gasCommitteeVotes
+        , gasDRepVotes = gasDRepVotes
+        , gasStakePoolVotes = gasStakePoolVotes
+        , gasProposalProcedure = translateEra' ctxt gasProposalProcedure
+        , gasProposedIn = gasProposedIn
+        , gasExpiresAfter = gasExpiresAfter
+        }
+
+instance TranslateEra DijkstraEra Proposals where
+  translateEra ctxt = pure . translateProposals @DijkstraEra ctxt
+
+instance TranslateEra DijkstraEra PulsingSnapshot where
+  translateEra ctxt PulsingSnapshot {..} =
+    pure $
+      PulsingSnapshot
+        { psProposals = translateEra' ctxt <$> psProposals
+        , psDRepDistr = psDRepDistr
+        , psDRepState = psDRepState
+        , psPoolDistr = psPoolDistr
+        }
+
+instance TranslateEra DijkstraEra EnactState where
+  translateEra ctxt EnactState {..} =
+    pure $
+      EnactState
+        { ensCommittee = coerce ensCommittee
+        , ensConstitution = coerce ensConstitution
+        , ensCurPParams = translateEra' ctxt ensCurPParams
+        , ensPrevPParams = translateEra' ctxt ensPrevPParams
+        , ensTreasury = ensTreasury
+        , ensWithdrawals = ensWithdrawals
+        , ensPrevGovActionIds = ensPrevGovActionIds
+        }
+
+instance TranslateEra DijkstraEra RatifyState where
+  translateEra ctxt RatifyState {..} =
+    pure $
+      RatifyState
+        { rsEnactState = translateEra' ctxt rsEnactState
+        , rsEnacted = translateEra' ctxt <$> rsEnacted
+        , rsExpired = rsExpired
+        , rsDelayed = rsDelayed
+        }
+
+instance TranslateEra DijkstraEra DRepPulsingState where
+  translateEra ctxt dps = pure $ DRComplete (translateEra' ctxt x) (translateEra' ctxt y)
+    where
+      (x, y) = finishDRepPulser dps
+
+instance TranslateEra DijkstraEra ConwayGovState where
+  translateEra ctxt ConwayGovState {..} =
+    pure $
+      ConwayGovState
+        { cgsCommittee = coerce cgsCommittee
+        , cgsProposals = translateEra' ctxt cgsProposals
+        , cgsConstitution = coerce cgsConstitution
+        , cgsCurPParams = translateEra' ctxt cgsCurPParams
+        , cgsPrevPParams = translateEra' ctxt cgsPrevPParams
+        , cgsFuturePParams = translateEra' ctxt cgsFuturePParams
+        , cgsDRepPulsingState = translateEra' ctxt cgsDRepPulsingState
+        }
+
+instance TranslateEra DijkstraEra UTxOState where
+  translateEra ctxt us =
+    pure
+      UTxOState
+        { utxosUtxo = translateEra' ctxt $ utxosUtxo us
+        , utxosDeposited = utxosDeposited us
+        , utxosFees = utxosFees us
+        , utxosGovState = translateEra' ctxt $ utxosGovState us
+        , utxosInstantStake = coerce $ utxosInstantStake us
+        , utxosDonation = utxosDonation us
+        }
+
+instance TranslateEra DijkstraEra UTxO where
+  translateEra _ctxt utxo =
+    pure $ UTxO $ upgradeTxOut `Map.map` unUTxO utxo

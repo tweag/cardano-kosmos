@@ -1,0 +1,221 @@
+cabal-version: 3.0
+name: cardano-ledger-canonical-state
+version: 9.9.9.9
+synopsis:
+  Instances for working with canonical ledger state representation
+
+description:
+  Library for definition of the canonical state. The library defines canonical types and conversion
+  functions for the non era-specific parts of the Cardano ledger state.
+
+license: Apache-2.0
+license-file: LICENSE
+author: Tweag
+maintainer: operations@iohk.io
+category: Cardano
+build-type: Simple
+extra-doc-files: CHANGELOG.md
+
+common warnings
+  ghc-options:
+    -Wall
+    -Wcompat
+    -Wincomplete-record-updates
+    -Wincomplete-uni-patterns
+    -Wpartial-fields
+    -Wunused-packages
+
+  -- ghc-9.14 gives redundant constraint warnings on some constraints
+  -- that are needed for earlier compilers.
+  if impl(ghc <9.14)
+    ghc-options:
+      -Wredundant-constraints
+
+source-repository head
+  type: git
+  location: https://github.com/intersectmbo/cardano-ledger.git
+  subdir: libs/cardano-ledger-canonical-state
+
+library
+  import: warnings
+  default-language: Haskell2010
+  exposed-modules:
+    Cardano.Ledger.CanonicalState.BasicTypes
+    Cardano.Ledger.CanonicalState.Export
+    Cardano.Ledger.CanonicalState.Import
+    Cardano.Ledger.CanonicalState.LedgerCBOR
+    Cardano.Ledger.CanonicalState.Namespace
+    Cardano.Ledger.CanonicalState.Namespace.Blocks.V0
+    Cardano.Ledger.CanonicalState.Namespace.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesAccounts.V0
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesCommittee.V0
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesDReps.V0
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.V0
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.VRFKeyHashes.V0
+    Cardano.Ledger.CanonicalState.Namespace.GovCommittee.V0
+    Cardano.Ledger.CanonicalState.Namespace.GovConstitution.V0
+    Cardano.Ledger.CanonicalState.Namespace.GovPParams.V0
+    Cardano.Ledger.CanonicalState.Namespace.GovProposals.Roots.V0
+    Cardano.Ledger.CanonicalState.Namespace.GovProposals.V0
+    Cardano.Ledger.CanonicalState.Namespace.UTxO.V0
+
+  other-modules:
+    Cardano.Ledger.CanonicalState.Namespace.Blocks.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.CDDL.Common
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesAccounts.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesCommittee.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesDReps.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.VRFKeyHashes.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.GovCommittee.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.GovConstitution.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.GovPParams.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.GovProposals.Roots.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.GovProposals.V0.CDDL
+    Cardano.Ledger.CanonicalState.Namespace.UTxO.V0.CDDL
+
+  hs-source-dirs: src
+  build-depends:
+    base,
+    base16-bytestring,
+    bytestring,
+    cardano-crypto-class,
+    cardano-data,
+    cardano-ledger-binary,
+    cardano-ledger-core,
+    cardano-strict-containers,
+    cborg,
+    containers,
+    cuddle,
+    heredoc >=0.2,
+    mempack-scls,
+    scls-cbor,
+    scls-core,
+    scls-format,
+    streaming,
+    text,
+
+library conway
+  import: warnings
+  default-language: Haskell2010
+  exposed-modules:
+    Cardano.Ledger.CanonicalState.Conway
+    Cardano.Ledger.CanonicalState.Conway.Export
+    Cardano.Ledger.CanonicalState.Conway.Import
+
+  hs-source-dirs: conway
+  build-depends:
+    base,
+    cardano-data,
+    cardano-ledger-binary,
+    cardano-ledger-canonical-state,
+    cardano-ledger-conway,
+    cardano-ledger-core,
+    cardano-ledger-shelley,
+    cborg,
+    containers,
+    data-default,
+    microlens,
+    scls-cbor,
+    scls-core,
+    scls-format,
+    streaming,
+    text,
+
+library testlib
+  import: warnings
+  exposed-modules:
+    Test.Cardano.Ledger.CanonicalState.Arbitrary
+    Test.Cardano.Ledger.CanonicalState.Testlib
+    Test.Cardano.Ledger.Conway.CanonicalState.Arbitrary
+
+  visibility: public
+  hs-source-dirs: testlib
+  default-language: Haskell2010
+  build-depends:
+    QuickCheck,
+    base,
+    base16-bytestring,
+    bytestring,
+    cardano-ledger-canonical-state:{cardano-ledger-canonical-state, conway, validate},
+    cardano-ledger-conway:{cardano-ledger-conway, testlib},
+    cardano-ledger-core,
+    cborg,
+    cuddle,
+    generic-random,
+    hspec,
+    hspec-expectations,
+    scls-cbor,
+    scls-core,
+    text,
+
+test-suite tests
+  import: warnings
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  hs-source-dirs: test
+  other-modules:
+    Paths_cardano_ledger_canonical_state
+    Test.Cardano.Ledger.CanonicalState.Conformance
+    Test.Cardano.Ledger.CanonicalState.Reference
+    Test.Cardano.Ledger.CanonicalState.Spec
+
+  default-language: Haskell2010
+  ghc-options:
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+
+  build-depends:
+    QuickCheck,
+    antigen,
+    base,
+    base16-bytestring,
+    bytestring,
+    cardano-ledger-canonical-state:{cardano-ledger-canonical-state, conway, testlib, validate},
+    cardano-ledger-conway,
+    cardano-ledger-core,
+    cardano-ledger-core:testlib,
+    cborg,
+    containers,
+    cuddle,
+    directory,
+    filepath,
+    megaparsec,
+    scls-cbor,
+    text,
+
+executable gen-cddl
+  import: warnings
+  default-language: Haskell2010
+  hs-source-dirs: gen-cddl
+  main-is: Main.hs
+  build-depends:
+    base,
+    cardano-ledger-canonical-state,
+    cuddle,
+    directory >=1,
+    filepath >=1.4,
+    prettyprinter,
+    scls-core,
+    text,
+
+library validate
+  import: warnings
+  visibility: public
+  exposed-modules:
+    Cardano.Ledger.CanonicalState.CDDL.Validate
+
+  build-depends:
+    base,
+    bytestring,
+    cardano-ledger-canonical-state,
+    containers,
+    cuddle,
+    scls-core,
+    text,
+
+  hs-source-dirs:
+    cddl-validate
+
+  default-language: Haskell2010

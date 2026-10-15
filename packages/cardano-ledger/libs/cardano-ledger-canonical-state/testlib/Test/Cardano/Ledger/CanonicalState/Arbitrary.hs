@@ -1,0 +1,81 @@
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Cardano.Ledger.CanonicalState.Arbitrary () where
+
+import Cardano.Ledger.CanonicalState.BasicTypes (
+  CanonicalCoin (..),
+  CanonicalExUnits (..),
+  mkCanonicalExUnits,
+ )
+import Cardano.Ledger.CanonicalState.Conway ()
+import qualified Cardano.Ledger.CanonicalState.Namespace.Blocks.V0 as Blocks.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesAccounts.V0 as EntitiesAccounts.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesCommittee.V0 as EntitiesCommittee.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesDReps.V0 as EntitiesDReps.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.EntitiesStakePools.V0 as EntitiesStakePools.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovCommittee.V0 as GovCommittee.V0
+import qualified Cardano.Ledger.CanonicalState.Namespace.GovPParams.V0 as GovPParams.V0 ()
+import qualified Cardano.Ledger.CanonicalState.Namespace.UTxO.V0 as UtxoOut.V0
+import Cardano.Ledger.Coin (CompactForm (CompactCoin))
+import Cardano.Ledger.Core (Era, EraTxOut, TxOut)
+import Generic.Random (genericArbitraryU)
+import Test.Cardano.Ledger.Conway.Arbitrary ()
+import Test.QuickCheck (Arbitrary (..), Positive (..))
+
+instance Arbitrary Blocks.V0.BlockOut where
+  -- starting form the QuickCheck-2.17 there is an arbirary instance for
+  -- Natural, so it's possible to use genericArbitraryU directly.
+  arbitrary = Blocks.V0.BlockOut . fromIntegral . getPositive @Integer <$> arbitrary
+
+instance (EraTxOut era, Arbitrary (TxOut era), Era era) => Arbitrary (UtxoOut.V0.UtxoOut era) where
+  arbitrary = UtxoOut.V0.mkUtxo <$> arbitrary
+
+instance Arbitrary CanonicalCoin where
+  arbitrary = CanonicalCoin . CompactCoin <$> arbitrary
+
+instance Arbitrary EntitiesCommittee.V0.EntitiesCommitteeOut where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesCommittee.V0.CanonicalCommitteeState where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesCommittee.V0.CanonicalCommitteeAuthorization where
+  arbitrary = fmap EntitiesCommittee.V0.mkCanonicalCommitteeAuthorization arbitrary
+
+instance Arbitrary GovCommittee.V0.GovCommitteeOut where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary GovCommittee.V0.CanonicalCommittee where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary CanonicalExUnits where
+  arbitrary = mkCanonicalExUnits <$> arbitrary
+
+instance Arbitrary EntitiesStakePools.V0.CanonicalStakePoolState where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesStakePools.V0.CanonicalStakePool where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesStakePools.V0.CanonicalStakePoolParams where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesStakePools.V0.EntitiesStakePoolsOut where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesDReps.V0.CanonicalDRepState where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesDReps.V0.EntitiesDRepsOut where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesAccounts.V0.CanonicalAccountState where
+  arbitrary = genericArbitraryU
+
+instance Arbitrary EntitiesAccounts.V0.EntitiesAccountsOut where
+  arbitrary = genericArbitraryU

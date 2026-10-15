@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:tweag/cardano-ledger.git
+	branch = 54e24ba4858b5f5cb4c5f6f0adfa3d7cae669b7a
+	commit = 54e24ba4858b5f5cb4c5f6f0adfa3d7cae669b7a
+	parent = b568ad562dbde89b1f882db84cf7d9f96b1de9c4
+	method = merge
+	cmdver = 0.4.9

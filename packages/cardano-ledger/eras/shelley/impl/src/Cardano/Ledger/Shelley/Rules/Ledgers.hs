@@ -1,0 +1,233 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+#if __GLASGOW_HASKELL__ >= 910
+-- See https://gitlab.haskell.org/ghc/ghc/-/issues/27342
+{-# OPTIONS_GHC -fno-spec-eval #-}
+#endif
+
+module Cardano.Ledger.Shelley.Rules.Ledgers (
+  LEDGERS,
+  ShelleyLedgersEnv (..),
+  ShelleyLedgersPredFailure (..),
+  ShelleyLedgersEvent (..),
+) where
+
+import Cardano.Ledger.BaseTypes (EpochNo, ShelleyBase, epochInfo, systemStart)
+import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
+import Cardano.Ledger.Binary.Coders (Encode (..), encode, (!>))
+import Cardano.Ledger.Core
+import Cardano.Ledger.Shelley.API.Mempool (ApplyTx (..))
+import Cardano.Ledger.Shelley.Era (LEDGERS, ShelleyEra)
+import Cardano.Ledger.Shelley.LedgerState (LedgerState (..))
+import Cardano.Ledger.Shelley.Rules.Deleg (ShelleyDelegPredFailure)
+import Cardano.Ledger.Shelley.Rules.Delegs (ShelleyDelegsPredFailure)
+import Cardano.Ledger.Shelley.Rules.Delpl (ShelleyDelplPredFailure)
+import Cardano.Ledger.Shelley.Rules.Ledger (
+  LEDGER,
+  LedgerEnv (..),
+  ShelleyLedgerEvent,
+  ShelleyLedgerPredFailure,
+ )
+import Cardano.Ledger.Shelley.Rules.Pool (ShelleyPoolPredFailure)
+import Cardano.Ledger.Shelley.Rules.Ppup (ShelleyPpupPredFailure)
+import Cardano.Ledger.Shelley.Rules.Utxo (ShelleyUtxoPredFailure)
+import Cardano.Ledger.Shelley.Rules.Utxow (ShelleyUtxowPredFailure)
+import Cardano.Ledger.Slot (SlotNo)
+import Cardano.Ledger.State
+import Control.DeepSeq (NFData)
+import Control.Monad (foldM)
+import Control.Monad.Trans.Reader (asks)
+import Control.State.Transition (
+  Embed (..),
+  STS (..),
+  TRC (..),
+  TransitionRule,
+  judgmentContext,
+  liftSTS,
+  trans,
+ )
+import Data.Default (Default)
+import Data.Foldable (toList)
+import Data.Functor.Identity (Identity)
+import Data.Sequence (Seq)
+import GHC.Generics (Generic)
+import Lens.Micro ((^.))
+
+data ShelleyLedgersEnv era = LedgersEnv
+  { ledgersSlotNo :: SlotNo
+  , ledgersEpochNo :: EpochNo
+  , ledgersPp :: PParams era
+  , ledgersAccount :: ChainAccountState
+  }
+  deriving (Generic)
+
+deriving instance Eq (PParamsHKD Identity era) => Eq (ShelleyLedgersEnv era)
+
+deriving instance Show (PParamsHKD Identity era) => Show (ShelleyLedgersEnv era)
+
+instance NFData (PParamsHKD Identity era) => NFData (ShelleyLedgersEnv era)
+
+instance EraPParams era => EncCBOR (ShelleyLedgersEnv era) where
+  encCBOR x@(LedgersEnv _ _ _ _) =
+    let LedgersEnv {..} = x
+     in encode $
+          Rec LedgersEnv
+            !> To ledgersSlotNo
+            !> To ledgersEpochNo
+            !> To ledgersPp
+            !> To ledgersAccount
+
+newtype ShelleyLedgersPredFailure era
+  = LedgerFailure (PredicateFailure (EraRule "LEDGER" era)) -- Subtransition Failures
+  deriving (Generic)
+
+instance
+  NFData (PredicateFailure (EraRule "LEDGER" era)) =>
+  NFData (ShelleyLedgersPredFailure era)
+
+type instance EraRuleFailure "LEDGERS" ShelleyEra = ShelleyLedgersPredFailure ShelleyEra
+
+type instance EraRuleEvent "LEDGERS" ShelleyEra = ShelleyLedgersEvent ShelleyEra
+
+instance InjectRuleFailure "LEDGERS" ShelleyLedgersPredFailure ShelleyEra
+
+instance InjectRuleFailure "LEDGERS" ShelleyLedgerPredFailure ShelleyEra where
+  injectFailure = LedgerFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyUtxowPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyUtxoPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyPpupPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyDelegsPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyDelplPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyPoolPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+instance InjectRuleFailure "LEDGERS" ShelleyDelegPredFailure ShelleyEra where
+  injectFailure = LedgerFailure . injectFailure
+
+newtype ShelleyLedgersEvent era
+  = LedgerEvent (Event (EraRule "LEDGER" era))
+  deriving (Generic)
+
+deriving instance
+  Eq (Event (EraRule "LEDGER" era)) =>
+  Eq (ShelleyLedgersEvent era)
+
+deriving stock instance
+  ( Era era
+  , Show (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  Show (ShelleyLedgersPredFailure era)
+
+deriving stock instance
+  ( Era era
+  , Eq (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  Eq (ShelleyLedgersPredFailure era)
+
+deriving stock instance
+  ( Era era
+  , Ord (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  Ord (ShelleyLedgersPredFailure era)
+
+instance
+  ( Era era
+  , EncCBOR (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  EncCBOR (ShelleyLedgersPredFailure era)
+  where
+  encCBOR (LedgerFailure e) = encCBOR e
+
+instance
+  ( Era era
+  , DecCBOR (PredicateFailure (EraRule "LEDGER" era))
+  ) =>
+  DecCBOR (ShelleyLedgersPredFailure era)
+  where
+  decCBOR = LedgerFailure <$> decCBOR
+
+instance
+  ( ApplyTx era
+  , EraGov era
+  , EraStake era
+  , Default (CertState era)
+  , Embed (EraRule "LEDGER" era) (LEDGERS era)
+  , Environment (EraRule "LEDGER" era) ~ LedgerEnv era
+  , State (EraRule "LEDGER" era) ~ LedgerState era
+  , Signal (EraRule "LEDGER" era) ~ StAnnTx TopTx era
+  , Default (LedgerState era)
+  ) =>
+  STS (LEDGERS era)
+  where
+  type State (LEDGERS era) = LedgerState era
+  type Signal (LEDGERS era) = Seq (Tx TopTx era)
+  type Environment (LEDGERS era) = ShelleyLedgersEnv era
+  type BaseM (LEDGERS era) = ShelleyBase
+  type PredicateFailure (LEDGERS era) = ShelleyLedgersPredFailure era
+  type Event (LEDGERS era) = ShelleyLedgersEvent era
+
+  transitionRules = [ledgersTransition]
+
+ledgersTransition ::
+  forall era.
+  ( ApplyTx era
+  , EraGov era
+  , EraStake era
+  , Default (CertState era)
+  , Embed (EraRule "LEDGER" era) (LEDGERS era)
+  , Environment (EraRule "LEDGER" era) ~ LedgerEnv era
+  , State (EraRule "LEDGER" era) ~ LedgerState era
+  , Signal (EraRule "LEDGER" era) ~ StAnnTx TopTx era
+  ) =>
+  TransitionRule (LEDGERS era)
+ledgersTransition = do
+  TRC (LedgersEnv slot epochNo pp account, initLedgerState, txs) <- judgmentContext
+  ei <- liftSTS $ asks epochInfo
+  sysStart <- liftSTS $ asks systemStart
+  foldM
+    ( \ !curLedgerState (ix, tx) ->
+        -- build the annotations against the same utxo snapshot that the rule will validate against
+        let utxo = curLedgerState ^. utxoL
+            stAnnTx = mkStAnnTx ei sysStart pp utxo mempty tx
+         in trans @(EraRule "LEDGER" era) $
+              TRC (LedgerEnv slot (Just epochNo) ix pp account, curLedgerState, stAnnTx)
+    )
+    initLedgerState
+    $ zip [minBound ..]
+    $ toList txs
+
+instance
+  ( Era era
+  , STS (LEDGER era)
+  , PredicateFailure (EraRule "LEDGER" era) ~ ShelleyLedgerPredFailure era
+  , Event (EraRule "LEDGER" era) ~ ShelleyLedgerEvent era
+  ) =>
+  Embed (LEDGER era) (LEDGERS era)
+  where
+  wrapFailed = LedgerFailure
+  wrapEvent = LedgerEvent

@@ -1,0 +1,454 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE UndecidableSuperClasses #-}
+-- Recursive definition constraints of `EraPlutusContext` and `EraPlutusTxInfo` lead to a wrongful
+-- redundant constraint warning in the definition of `lookupTxInfoResult`.
+--
+-- Also `mkSupportedPlutusScript` has a constraint that is not required by the type system, but is
+-- necessary for the safety of the function.
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
+#if __GLASGOW_HASKELL__ >= 910
+-- See https://gitlab.haskell.org/ghc/ghc/-/issues/27342
+{-# OPTIONS_GHC -fno-spec-eval #-}
+#endif
+
+module Cardano.Ledger.Alonzo.Plutus.Context (
+  CollectError (..),
+  LedgerTxInfo (..),
+  LedgerLevelTxInfo (..),
+  toScriptHashByPurpose,
+  EraPlutusTxInfo (..),
+  PlutusTxInfoResult (..),
+  mkPlutusTxInfoFromResult,
+  toPlutusTxInfoForPurpose,
+  EraPlutusContext (..),
+  lookupTxInfoResultImpossible,
+  SupportedPlutusRunnable (..),
+  SupportedLanguage (..),
+  mkSupportedLanguageM,
+  supportedLanguages,
+  mkSupportedPlutusScript,
+  mkSupportedBinaryPlutusScript,
+
+  -- * Language dependent translation
+  PlutusTxInfo,
+  PlutusTxCert,
+  PlutusScriptPurpose,
+  PlutusScriptContext,
+  PlutusTxInInfo,
+) where
+
+import Cardano.Ledger.Alonzo.Era (AlonzoEra)
+import Cardano.Ledger.Alonzo.Scripts (
+  AlonzoEraScript (eraMaxLanguage, mkPlutusScript),
+  AsItem (..),
+  AsIx,
+  AsIxItem (..),
+  AsPurpose,
+  PlutusPurpose,
+  PlutusScript (..),
+  hoistPlutusPurpose,
+  toAsIx,
+ )
+import Cardano.Ledger.BaseTypes (ProtVer (..), TxIx, Version, kindObjectValue)
+import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
+import Cardano.Ledger.Binary.Coders
+import Cardano.Ledger.Core
+import Cardano.Ledger.Plutus (
+  Data,
+  Language (..),
+  Plutus (..),
+  PlutusArgs,
+  PlutusBinary,
+  PlutusLanguage,
+  PlutusRunnable (..),
+  PlutusScriptContext,
+  SLanguage (..),
+  asSLanguage,
+  plutusLanguage,
+ )
+import Cardano.Ledger.State (UTxO (..))
+import Cardano.Ledger.TxIn (TxId, TxIn)
+import Cardano.Slotting.EpochInfo (EpochInfo)
+import Cardano.Slotting.Time (SystemStart)
+import Control.DeepSeq (NFData (..))
+import Control.Monad.Trans.Fail.String (errorFail)
+import Data.Aeson (ToJSON (..), (.=), pattern String)
+import Data.Kind (Type)
+import Data.List.NonEmpty (NonEmpty, nonEmpty)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Text (Text)
+import GHC.Generics
+import GHC.Stack
+import qualified PlutusLedgerApi.V1 as PV1
+import qualified PlutusLedgerApi.V2 as PV2
+import qualified PlutusLedgerApi.V3 as PV3
+import qualified PlutusLedgerApi.V4 as PV4
+
+-- | Information needed for TxInfo construction that is level specific.
+data LedgerLevelTxInfo level era where
+  LedgerTopTxInfo ::
+    -- | This is a field that is only used starting with Dijkstra era and only by top level
+    -- transactions.
+    Map TxId (TxInfoResult era) ->
+    LedgerLevelTxInfo TopTx era
+  LedgerSubTxInfo ::
+    -- | Index of this sub-transaction in the `subTransactionTxBodyL` list
+    TxIx ->
+    LedgerLevelTxInfo SubTx era
+
+-- | All information that is necessary from the ledger to construct Plutus' TxInfo.
+data LedgerTxInfo level era where
+  LedgerTxInfo ::
+    { ltiProtVer :: !ProtVer
+    , ltiEpochInfo :: !(EpochInfo (Either Text))
+    , ltiSystemStart :: !SystemStart
+    , ltiUTxO :: !(UTxO era)
+    , ltiTx :: !(Tx level era)
+    , ltiScriptsUsed :: [(PlutusPurpose AsIxItem era, SupportedPlutusRunnable era)]
+    , ltiScriptHashesUsed :: Map.Map (PlutusPurpose AsIx era) ScriptHash
+    -- ^ Map that will be used for looking up `ScriptHash`. Currently unused until Dijkstra era, hence is lazy.
+    , ltiLevelTxInfo :: LedgerLevelTxInfo level era
+    } ->
+    LedgerTxInfo level era
+
+instance (HasEraTxLevel Tx era, EraTxLevel era) => HasEraTxLevel LedgerTxInfo era where
+  toSTxLevel = toSTxLevel . ltiTx
+
+toScriptHashByPurpose ::
+  Ord (PlutusPurpose AsIx era) =>
+  [(PlutusPurpose AsIxItem era, SupportedPlutusRunnable era)] ->
+  Map (PlutusPurpose AsIx era) ScriptHash
+toScriptHashByPurpose scriptsUsed =
+  Map.fromList
+    [ (hoistPlutusPurpose toAsIx sp, plutusRunnableScriptHash sr)
+    | (sp, SupportedPlutusRunnable sr) <- scriptsUsed
+    ]
+
+class
+  ( PlutusLanguage l
+  , EraPlutusContext era
+  , EraTxLevel era
+  , Eq (PlutusTxInfo l)
+  , Show (PlutusTxInfo l)
+  ) =>
+  EraPlutusTxInfo (l :: Language) era
+  where
+  toPlutusTxCert ::
+    proxy l ->
+    ProtVer ->
+    TxCert era ->
+    Either (ContextError era) (PlutusTxCert l)
+
+  toPlutusScriptPurpose ::
+    proxy l ->
+    LedgerTxInfo level era ->
+    PlutusPurpose AsIxItem era ->
+    Either (ContextError era) (PlutusScriptPurpose l)
+
+  toPlutusTxInfo ::
+    proxy l ->
+    LedgerTxInfo level era ->
+    PlutusTxInfoResult l era
+
+  toPlutusArgs ::
+    proxy l ->
+    LedgerTxInfo level era ->
+    PlutusTxInfo l ->
+    PlutusPurpose AsIxItem era ->
+    Data era ->
+    Either (ContextError era) (PlutusArgs l)
+
+  toPlutusTxInInfo ::
+    proxy l ->
+    UTxO era ->
+    TxIn ->
+    Either (ContextError era) (PlutusTxInInfo era l)
+
+-- | This is the helper type that captures translation of `Tx` to `PlutusTxInfo`.
+--
+-- It is important to note that `TxInfo` is always the same per Plutus version for each `Tx`. This
+-- invariant allows us to avoid duplicate computation by memoizing all possible `PlutusTxInfo`s per
+-- transaction. Starting with Dijkstra era there is a slight complication introduced to this
+-- invariant where top level transaction has a different `PlutusTxInfo` for "Guarding" purpose, when
+-- compared to all other purposes. That is the reason why result is somewhat strange, namely a
+-- function from `PlutusPurpose` to `PlutusTxInfo`. It is also done this way, instead of adding
+-- `ScriptPurpose` as an argument to `toPlutusTxInfo` to preserve capability of memoization, hence
+-- nested `Either`
+newtype PlutusTxInfoResult l era
+  = PlutusTxInfoResult
+  { unPlutusTxInfoResult :: Either (ContextError era) (PlutusTxInfo l)
+  }
+
+-- | Given the prepared `PlutusTxInfoResult` and the purpose this function allows constructing the `PlutusTxInfo`, while memoizing the computation from  `PlutusTxInfoResult` for its subsequent uses.
+mkPlutusTxInfoFromResult ::
+  PlutusPurpose AsPurpose era ->
+  PlutusTxInfoResult l era ->
+  Either (ContextError era) (PlutusTxInfo l)
+mkPlutusTxInfoFromResult _sp (PlutusTxInfoResult txInfoResult) = txInfoResult
+{-# DEPRECATED mkPlutusTxInfoFromResult "In favor of `unPlutusTxInfoResult`" #-}
+
+-- | This is what `toPlutusTxInfo` would be without the intermediate `PlutusTxInfoResult`.
+--
+-- /Note/ - Using this function totally drops any memoization of `TxInfo`, as such use it only for
+-- testing or tooling that doesn't care about performance.
+toPlutusTxInfoForPurpose ::
+  EraPlutusTxInfo l era =>
+  proxy l ->
+  LedgerTxInfo level era ->
+  PlutusPurpose AsPurpose era ->
+  Either (ContextError era) (PlutusTxInfo l)
+toPlutusTxInfoForPurpose proxy lti sp =
+  mkPlutusTxInfoFromResult sp $ toPlutusTxInfo proxy lti
+
+class
+  ( AlonzoEraScript era
+  , Ord (ContextError era)
+  , Show (ContextError era)
+  , NFData (ContextError era)
+  , EncCBOR (ContextError era)
+  , DecCBOR (ContextError era)
+  , ToJSON (ContextError era)
+  ) =>
+  EraPlutusContext era
+  where
+  type ContextError era = (r :: Type) | r -> era
+
+  -- | This data type family is used to memoize the results of `toPlutusTxInfo`, so the outcome can
+  -- be shared between execution of different scripts with the same language version.
+  data TxInfoResult era :: Type
+
+  mkSupportedLanguage :: Language -> Maybe (SupportedLanguage era)
+
+  mkSupportedPlutusRunnable :: Version -> PlutusScript era -> SupportedPlutusRunnable era
+
+  -- | Construct `PlutusTxInfo` for all supported languages in this era.
+  mkTxInfoResult :: LedgerTxInfo level era -> TxInfoResult era
+
+  -- | `TxInfo` for the same language can be shared between executions of every script of the same
+  -- version in a single transaction.
+  --
+  -- /Note/ - The `EraPlutusTxInfo` is here only to enforce this function is not called with an
+  -- unsupported plutus language version.
+  lookupTxInfoResult ::
+    EraPlutusTxInfo l era =>
+    SLanguage l ->
+    TxInfoResult era ->
+    PlutusTxInfoResult l era
+
+-- | Helper function to use when implementing `lookupTxInfoResult` for plutus languages that are not
+-- supported by the era.
+lookupTxInfoResultImpossible ::
+  (HasCallStack, EraPlutusTxInfo l era) => SLanguage l -> PlutusTxInfoResult l era
+lookupTxInfoResultImpossible slang =
+  error $ "Impossible: Attempt to lookup TxInfoResult for an unsupported language: " <> show slang
+
+-- =============================================
+-- Type families that specify Plutus types that are different from one version to another
+
+type family PlutusTxCert (l :: Language) where
+  PlutusTxCert 'PlutusV1 = PV1.DCert
+  PlutusTxCert 'PlutusV2 = PV2.DCert
+  PlutusTxCert 'PlutusV3 = PV3.TxCert
+  PlutusTxCert 'PlutusV4 = PV4.TxCert
+
+type family PlutusScriptPurpose (l :: Language) where
+  PlutusScriptPurpose 'PlutusV1 = PV1.ScriptPurpose
+  PlutusScriptPurpose 'PlutusV2 = PV2.ScriptPurpose
+  PlutusScriptPurpose 'PlutusV3 = PV3.ScriptPurpose
+  PlutusScriptPurpose 'PlutusV4 = PV4.ScriptPurpose
+
+type family PlutusTxInfo (l :: Language) where
+  PlutusTxInfo 'PlutusV1 = PV1.TxInfo
+  PlutusTxInfo 'PlutusV2 = PV2.TxInfo
+  PlutusTxInfo 'PlutusV3 = PV3.TxInfo
+  PlutusTxInfo 'PlutusV4 = PV4.TxInfo
+
+type family PlutusTxInInfo era (l :: Language) where
+  -- This special case is here because Alonzo does not have a ContextError
+  -- for the case where it encounters a Byron address in a TxIn
+  PlutusTxInInfo AlonzoEra PlutusV1 = Maybe PV1.TxInInfo
+  PlutusTxInInfo _ 'PlutusV1 = PV1.TxInInfo
+  PlutusTxInInfo _ 'PlutusV2 = PV2.TxInInfo
+  PlutusTxInInfo _ 'PlutusV3 = PV3.TxInInfo
+  PlutusTxInInfo _ 'PlutusV4 = PV4.TxInInfo
+
+-- | This is just like `mkPlutusScript`, except it is guaranteed to be total through the enforcement
+-- of support by the type system and `EraPlutusTxInfo` type class instances for supported plutus
+-- versions.
+mkSupportedPlutusScript ::
+  forall l era.
+  (HasCallStack, EraPlutusTxInfo l era) =>
+  Plutus l ->
+  PlutusScript era
+mkSupportedPlutusScript plutus =
+  case mkPlutusScript plutus of
+    Nothing ->
+      error $
+        "Impossible: "
+          ++ show plutus
+          ++ " language version should be supported by the "
+          ++ eraName @era
+    Just plutusScript -> plutusScript
+
+-- | This is just like `mkBinaryPlutusScript`, except it is guaranteed to be total through the enforcement
+-- of support by the type system and `EraPlutusTxInfo` type class instances (via calling `mkSupportedPlutusScript) for supported plutus
+-- versions.
+mkSupportedBinaryPlutusScript ::
+  forall era.
+  (HasCallStack, AlonzoEraScript era) =>
+  SupportedLanguage era ->
+  PlutusBinary ->
+  PlutusScript era
+mkSupportedBinaryPlutusScript supportedLanguage plutus =
+  case supportedLanguage of
+    SupportedLanguage sLang ->
+      mkSupportedPlutusScript (asSLanguage sLang (Plutus plutus))
+
+-- | Invariant of this type is that it cannot be used between different protocol versions. In other
+-- words `SupportedPlutusRunnable` constructed from the same script, but two separate protocol
+-- versions, is not guaranteed to be the same, i.e. one of the could fail decoding, while the other
+-- would not.
+data SupportedPlutusRunnable era where
+  SupportedPlutusRunnable ::
+    EraPlutusTxInfo l era =>
+    !(PlutusRunnable l) -> SupportedPlutusRunnable era
+
+instance Show (SupportedPlutusRunnable era) where
+  show (SupportedPlutusRunnable spr) = "(SupportedPlutusRunnable (" ++ show spr ++ "))"
+
+-- | As long as the language and the script hash are the same, we can conclude equality, because of
+-- the type invariant
+instance Eq (SupportedPlutusRunnable era) where
+  SupportedPlutusRunnable spr1 == SupportedPlutusRunnable spr2 =
+    plutusLanguage spr1 == plutusLanguage spr2
+      && plutusRunnableScriptHash spr1 == plutusRunnableScriptHash spr2
+
+instance NFData (SupportedPlutusRunnable era) where
+  rnf (SupportedPlutusRunnable spr) = rnf spr
+
+data SupportedLanguage era where
+  SupportedLanguage :: EraPlutusTxInfo l era => SLanguage l -> SupportedLanguage era
+
+instance Show (SupportedLanguage era) where
+  show (SupportedLanguage sLang) = "(SupportedLanguage (" ++ show sLang ++ "))"
+
+instance Eq (SupportedLanguage era) where
+  SupportedLanguage sLang1 == SupportedLanguage sLang2 =
+    plutusLanguage sLang1 == plutusLanguage sLang2
+
+instance Ord (SupportedLanguage era) where
+  compare (SupportedLanguage sLang1) (SupportedLanguage sLang2) =
+    compare (plutusLanguage sLang1) (plutusLanguage sLang2)
+
+instance Era era => EncCBOR (SupportedLanguage era) where
+  encCBOR (SupportedLanguage sLang) = encCBOR sLang
+
+instance EraPlutusContext era => DecCBOR (SupportedLanguage era) where
+  decCBOR = decCBOR >>= mkSupportedLanguageM
+
+supportedLanguages ::
+  forall era.
+  (HasCallStack, EraPlutusContext era) =>
+  NonEmpty (SupportedLanguage era)
+supportedLanguages =
+  let langs =
+        [ errorFail (mkSupportedLanguageM lang)
+        | lang <- [minBound .. eraMaxLanguage @era]
+        ]
+   in case nonEmpty langs of
+        Nothing -> error "Impossible: there are no supported languages"
+        Just neLangs -> neLangs
+
+mkSupportedLanguageM ::
+  forall era m.
+  (EraPlutusContext era, MonadFail m) =>
+  Language ->
+  m (SupportedLanguage era)
+mkSupportedLanguageM lang =
+  case mkSupportedLanguage lang of
+    Nothing -> fail $ show lang ++ " language is not supported in " ++ eraName @era
+    Just supportedLanguage -> pure supportedLanguage
+
+-- | When collecting inputs for two phase scripts, these are the things that can go wrong.
+data CollectError era
+  = NoRedeemer !(PlutusPurpose AsItem era)
+  | NoWitness !ScriptHash
+  | NoCostModel !Language
+  | BadTranslation !(ContextError era)
+  deriving (Generic)
+
+deriving instance
+  (AlonzoEraScript era, Eq (ContextError era)) =>
+  Eq (CollectError era)
+
+deriving instance
+  (AlonzoEraScript era, Ord (ContextError era)) =>
+  Ord (CollectError era)
+
+deriving instance
+  (AlonzoEraScript era, Show (ContextError era)) =>
+  Show (CollectError era)
+
+instance
+  (AlonzoEraScript era, NFData (ContextError era)) =>
+  NFData (CollectError era)
+
+instance (AlonzoEraScript era, EncCBOR (ContextError era)) => EncCBOR (CollectError era) where
+  encCBOR (NoRedeemer x) = encode $ Sum NoRedeemer 0 !> To x
+  encCBOR (NoWitness x) = encode $ Sum (NoWitness @era) 1 !> To x
+  encCBOR (NoCostModel x) = encode $ Sum NoCostModel 2 !> To x
+  encCBOR (BadTranslation x) = encode $ Sum (BadTranslation @era) 3 !> To x
+
+instance (AlonzoEraScript era, DecCBOR (ContextError era)) => DecCBOR (CollectError era) where
+  decCBOR = decode (Summands "CollectError" dec)
+    where
+      dec 0 = SumD NoRedeemer <! From
+      dec 1 = SumD NoWitness <! From
+      dec 2 = SumD NoCostModel <! From
+      dec 3 = SumD BadTranslation <! From
+      dec n = Invalid n
+
+instance
+  ( Era era
+  , ToJSON (PlutusPurpose AsItem era)
+  , ToJSON (ContextError era)
+  ) =>
+  ToJSON (CollectError era)
+  where
+  toJSON = \case
+    NoRedeemer sPurpose ->
+      kindObjectValue
+        "CollectError"
+        [ "error" .= String "NoRedeemer"
+        , "plutusPurpose" .= toJSON sPurpose
+        ]
+    NoWitness sHash ->
+      kindObjectValue
+        "CollectError"
+        [ "error" .= String "NoWitness"
+        , "scriptHash" .= toJSON sHash
+        ]
+    NoCostModel lang ->
+      kindObjectValue
+        "CollectError"
+        [ "error" .= String "NoCostModel"
+        , "language" .= toJSON lang
+        ]
+    BadTranslation err ->
+      kindObjectValue "BadTranslation" ["error" .= toJSON err]

@@ -130,12 +130,14 @@ instance
     let plutusScript :: Plutus.Plutus lang
         plutusScript = L.Plutus $ L.PlutusBinary scriptShortBs
 
-    let plutusRunnable = Plutus.decodePlutusRunnable v plutusScript
-    case Plutus.plutusRunnableResult plutusRunnable of
+    -- 'decodePlutusRunnable' is total now; the decode result it used to return
+    -- is a lazy field of 'PlutusRunnable', so forcing it keeps this check.
+    let runnable = Plutus.decodePlutusRunnable v plutusScript
+    case Plutus.plutusRunnableResult runnable of
       Left e ->
         Left $
           CBOR.DecoderErrorCustom "PlutusLedgerApi.Common.ScriptDecodeError" (Text.pack . show $ pretty e)
-      Right{} -> Right $ PlutusScriptInEra plutusRunnable
+      Right{} -> Right $ PlutusScriptInEra runnable
 
 deserialisePlutusScriptInEra
   :: forall era lang

@@ -326,6 +326,8 @@ import Cardano.Api.Tx.Internal.Sign
 import Cardano.Ledger.Alonzo.Core qualified as Ledger
 import Cardano.Ledger.Api qualified as L
 import Cardano.Ledger.Binary qualified as Ledger
+import Cardano.Ledger.Credential qualified as Ledger (Credential)
+import Cardano.Ledger.Hashes qualified as L hiding (Hash)
 
 import Control.Exception (displayException)
 import Data.Bifunctor (bimap)
@@ -409,12 +411,14 @@ evaluateSignedTx
   -- ^ Registered stake pools
   -> Map StakeCredential L.Coin
   -- ^ Stake delegation deposits
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ DRep delegation deposits
   -> L.UTxO (LedgerEra era)
   -- ^ UTxO set for the transaction inputs
   -> SignedTx era
   -- ^ Signed transaction to evaluate
   -> TxEvaluationResult (LedgerEra era)
-evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits utxo (SignedTx tx) =
+evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits drepDelegDeposits utxo (SignedTx tx) =
   -- obtainCommonConstraints is needed here to bring ShelleyLedgerEra era ~ LedgerEra era
   -- into scope, unifying SignedTx's ShelleyLedgerEra with evaluateTransaction's LedgerEra.
   obtainCommonConstraints (useEra @era) $
@@ -424,6 +428,7 @@ evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits
       protocolParams
       poolIds
       stakeDelegDeposits
+      drepDelegDeposits
       utxo
       tx
 

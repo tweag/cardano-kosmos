@@ -172,9 +172,11 @@ toNewPlutusScriptWitness
 toNewPlutusScriptWitness eon w l (Old.PScript (Old.PlutusScriptSerialised scriptShortBs)) scriptRedeemer execUnits datum = do
   let protocolVersion = getVersion eon
       plutusScript = L.Plutus $ L.PlutusBinary scriptShortBs
-      plutusScriptRunnable =
-        L.decodePlutusRunnable @(Old.ToLedgerPlutusLanguage lang) protocolVersion plutusScript
 
+  -- 'decodePlutusRunnable' is total now; the decode result it used to return
+  -- is a lazy field of 'PlutusRunnable', so forcing it keeps this check.
+  let plutusScriptRunnable =
+        L.decodePlutusRunnable @(Old.ToLedgerPlutusLanguage lang) protocolVersion plutusScript
   case L.plutusRunnableResult plutusScriptRunnable of
     Left e ->
       Left $

@@ -201,6 +201,8 @@ shelleyGenesisDefaults =
 dijkstraGenesisDefaults :: DijkstraGenesis
 dijkstraGenesisDefaults =
   -- copied from: https://github.com/IntersectMBO/cardano-ledger/blob/232511b0fa01cd848cd7a569d1acc322124cf9b8/eras/dijkstra/impl/testlib/Test/Cardano/Ledger/Dijkstra/ImpTest.hs#L121
+  -- Keep in step with cardano-node's 'emptyDijkstraGenesis', so a node started
+  -- without a Dijkstra genesis file agrees with what the CLI writes out.
   DijkstraGenesis
     { dgUpgradePParams =
         UpgradeDijkstraPParams
@@ -286,84 +288,91 @@ conwayGenesisDefaults =
         , dvtCommitteeNormal = 1 %! 2
         , dvtCommitteeNoConfidence = 0 %! 1
         }
-    testingCostModelV3 :: HasCallStack => L.CostModel
-    testingCostModelV3 = mkCostModel' PlutusV3 $ snd <$> costModelParamsForTesting
-
-    mkCostModel' :: (Integral i, Show i, HasCallStack) => Language -> [i] -> L.CostModel
-    mkCostModel' lang params =
-      case L.mkCostModel lang $ map fromIntegral params of
-        Left err ->
-          error $
-            "CostModel parameters are not well-formed for "
-              ++ show lang
-              ++ ": "
-              ++ show err
-              ++ "\n"
-              ++ show params
-        Right costModel -> costModel
-
-    costModelParamsForTesting :: HasCallStack => [(V3.ParamName, Int64)]
-    costModelParamsForTesting =
-      -- all geneses should have exactly the number of cost model params equal to the initial number
-      -- initial number - a number of parameters for the language, when the plutus language was introduced
-      take (L.costModelInitParamCount PlutusV3)
-        . Map.toList
-        . fromJust
-        $ extractCostModelParamsLedgerOrder mCostModel
-
-    mCostModel :: MCostModel
-    mCostModel =
-      -- nothing to clear because v4 does not exist (yet).
-      toMCostModel defaultCekCostModelForTesting & builtinCostModel %~ clearBuiltinCostModel'
-
-    -- \*** FIXME!!! ***
-    -- This is temporary to get the tests to pass
-    clearBuiltinCostModel' :: m ~ MBuiltinCostModel => m -> m
-    clearBuiltinCostModel' r =
-      r
-        { -- , paramIntegerToByteString = mempty -- Required for V2
-          -- , paramByteStringToInteger = mempty -- Required for V2
-          paramExpModInteger = mempty
-        , paramDropList = mempty
-        , paramLengthOfArray = mempty
-        , paramListToArray = mempty
-        , paramIndexArray = mempty
-        }
-
-    -- A helper function to lift to a "full" `MCostModel`, by mapping *all* of its fields to `Just`.
-    -- The fields can be later on cleared, by assigning them to `Nothing`.
-    toMCostModel
-      :: CostModel CekMachineCosts BuiltinCostModel
-      -> MCostModel
-    toMCostModel cm =
-      cm
-        & machineCostModel
-          %~ bmap (Just . runIdentity)
-        & builtinCostModel
-          %~ bmap (MCostingFun . Just)
-
-    extractCostModelParamsLedgerOrder
-      :: (IsParamName p, Ord p)
-      => MCostModel
-      -> Maybe (Map.Map p Int64)
-    extractCostModelParamsLedgerOrder =
-      extractInAlphaOrder
-        >=> toLedgerOrder
-     where
-      extractInAlphaOrder = extractCostModelParams
-      toLedgerOrder = mapKeysM readParamName
-
-      mapKeysM :: (Monad m, Ord k2) => (k1 -> m k2) -> Map.Map k1 a -> m (Map.Map k2 a)
-      mapKeysM = viaListM . mapM . firstM
-
-      viaListM op = fmap Map.fromList . op . Map.toList
-      firstM f (k, v) = (,v) <$> f k
 
 type MCostModel = CostModel MCekMachineCosts MBuiltinCostModel
 
 type MCekMachineCosts = CekMachineCostsBase Maybe
 
 type MBuiltinCostModel = BuiltinCostModelBase MCostingFun
+
+testingCostModelV3 :: HasCallStack => L.CostModel
+testingCostModelV3 = mkCostModel' PlutusV3 $ snd <$> costModelParamsForTesting
+
+-- PlutusV4 has no testing parameters of its own yet, so it borrows V3's -- same
+-- as the ledger's 'testingCostModelV4'. Both languages currently declare 251
+-- initial parameters.
+testingCostModelV4 :: HasCallStack => L.CostModel
+testingCostModelV4 = mkCostModel' PlutusV4 $ snd <$> costModelParamsForTesting
+
+mkCostModel' :: (Integral i, Show i, HasCallStack) => Language -> [i] -> L.CostModel
+mkCostModel' lang params =
+  case L.mkCostModel lang $ map fromIntegral params of
+    Left err ->
+      error $
+        "CostModel parameters are not well-formed for "
+          ++ show lang
+          ++ ": "
+          ++ show err
+          ++ "\n"
+          ++ show params
+    Right costModel -> costModel
+
+costModelParamsForTesting :: HasCallStack => [(V3.ParamName, Int64)]
+costModelParamsForTesting =
+  -- all geneses should have exactly the number of cost model params equal to the initial number
+  -- initial number - a number of parameters for the language, when the plutus language was introduced
+  take (L.costModelInitParamCount PlutusV3)
+    . Map.toList
+    . fromJust
+    $ extractCostModelParamsLedgerOrder mCostModel
+
+mCostModel :: MCostModel
+mCostModel =
+  -- nothing to clear because v4 does not exist (yet).
+  toMCostModel defaultCekCostModelForTesting & builtinCostModel %~ clearBuiltinCostModel'
+
+-- \*** FIXME!!! ***
+-- This is temporary to get the tests to pass
+clearBuiltinCostModel' :: m ~ MBuiltinCostModel => m -> m
+clearBuiltinCostModel' r =
+  r
+    { -- , paramIntegerToByteString = mempty -- Required for V2
+      -- , paramByteStringToInteger = mempty -- Required for V2
+      paramExpModInteger = mempty
+    , paramDropList = mempty
+    , paramLengthOfArray = mempty
+    , paramListToArray = mempty
+    , paramIndexArray = mempty
+    }
+
+-- A helper function to lift to a "full" `MCostModel`, by mapping *all* of its fields to `Just`.
+-- The fields can be later on cleared, by assigning them to `Nothing`.
+toMCostModel
+  :: CostModel CekMachineCosts BuiltinCostModel
+  -> MCostModel
+toMCostModel cm =
+  cm
+    & machineCostModel
+      %~ bmap (Just . runIdentity)
+    & builtinCostModel
+      %~ bmap (MCostingFun . Just)
+
+extractCostModelParamsLedgerOrder
+  :: (IsParamName p, Ord p)
+  => MCostModel
+  -> Maybe (Map.Map p Int64)
+extractCostModelParamsLedgerOrder =
+  extractInAlphaOrder
+    >=> toLedgerOrder
+ where
+  extractInAlphaOrder = extractCostModelParams
+  toLedgerOrder = mapKeysM readParamName
+
+  mapKeysM :: (Monad m, Ord k2) => (k1 -> m k2) -> Map.Map k1 a -> m (Map.Map k2 a)
+  mapKeysM = viaListM . mapM . firstM
+
+  viaListM op = fmap Map.fromList . op . Map.toList
+  firstM f (k, v) = (,v) <$> f k
 
 (%!) :: forall r. (HasCallStack, Typeable r, BoundedRational r) => Integer -> Integer -> r
 n %! d = unsafeBoundedRational $ n Data.Ratio.% d

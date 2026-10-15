@@ -131,9 +131,10 @@ estimateOrCalculateBalancedTxBody
   -> TxBodyContent BuildTx era
   -> Set PoolId
   -> Map StakeCredential L.Coin
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> AddressInEra era
   -> Either (AutoBalanceError era) (BalancedTxBody era)
-estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids stakeDelegDeposits changeAddr =
+estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids stakeDelegDeposits drepDelegDeposits changeAddr =
   case feeEstMode of
     CalculateWithSpendableUTxO utxo systemstart ledgerEpochInfo mOverride ->
       first AutoBalanceCalculationError $
@@ -144,6 +145,7 @@ estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids s
           (LedgerProtocolParameters pparams)
           poolids
           stakeDelegDeposits
+          drepDelegDeposits
           utxo
           txBodyContent
           changeAddr
@@ -166,6 +168,7 @@ estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids s
                   pparams
                   poolids
                   stakeDelegDeposits
+                  drepDelegDeposits
                   exUnitsMap
                   totalPotentialCollateral
                   numKeyWits
@@ -205,6 +208,9 @@ estimateBalancedTxBody
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ A map of all deposits for DRep credentials that are being
+  --   unregistered in this transaction.
   -> Map ScriptWitnessIndex ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -230,6 +236,7 @@ estimateBalancedTxBody
   pparams
   poolids
   stakeDelegDeposits
+  drepDelegDeposits
   exUnitsMap
   totalPotentialCollateral
   intendedKeyWits
@@ -355,7 +362,7 @@ estimateBalancedTxBody
 
     let fakeUTxO = createFakeUTxO sbe changeaddr txbodycontent1 $ selectLovelace availableUTxOValue
         balance =
-          evaluateTransactionBalance sbe pparams poolids stakeDelegDeposits fakeUTxO txbody2
+          evaluateTransactionBalance sbe pparams poolids stakeDelegDeposits drepDelegDeposits fakeUTxO txbody2
         balanceTxOut = TxOut changeaddr balance TxOutDatumNone ReferenceScriptNone
 
     -- Step 6. Check all txouts have the min required UTxO value
@@ -815,6 +822,10 @@ extractPlutusScriptAndLanguage p =
 --
 -- Finding the (non-zero) balance of a partially constructed transaction is
 -- useful for adjusting a transaction to be fully balanced.
+-- Note: the DRep deposit map is no longer consulted. The ledger dropped that
+-- lookup from 'evalBalanceTxBody' ("we do not need to look into DRep state in
+-- order to figure out the refund"); the parameter is kept so callers do not
+-- have to change.
 evaluateTransactionBalance
   :: forall era
    . ()
@@ -822,10 +833,11 @@ evaluateTransactionBalance
   -> Ledger.PParams (ShelleyLedgerEra era)
   -> Set PoolId
   -> Map StakeCredential L.Coin
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> UTxO era
   -> TxBody era
   -> TxOutValue era
-evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo (ShelleyTxBody _ txbody _ _ _ _) =
+evaluateTransactionBalance sbe pp poolids stakeDelegDeposits _drepDelegDeposits utxo (ShelleyTxBody _ txbody _ _ _ _) =
   shelleyBasedEraConstraints sbe $
     TxOutValueShelleyBased sbe $
       L.evalBalanceTxBody
@@ -1035,6 +1047,9 @@ makeTransactionBodyAutoBalance
   -> Map StakeCredential L.Coin
   -- ^ The map of all deposits for stake credentials that are being
   --   unregistered in this transaction
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ The map of all deposits for DRep credentials that are being
+  --   unregistered in this transaction
   -> UTxO era
   -- ^ The transaction inputs (including reference and collateral ones), not the entire 'UTxO'.
   -> TxBodyContent BuildTx era
@@ -1050,6 +1065,7 @@ makeTransactionBodyAutoBalance
   lpp@(LedgerProtocolParameters pp)
   poolids
   stakeDelegDeposits
+  drepDelegDeposits
   utxo
   txbodycontent
   changeaddr
@@ -1071,7 +1087,7 @@ makeTransactionBodyAutoBalance
 
       txbodyForChange <- first TxBodyError $ createTransactionBody sbe txbodycontent
       let initialChangeTxOutValue =
-            evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo txbodyForChange
+            evaluateTransactionBalance sbe pp poolids stakeDelegDeposits drepDelegDeposits utxo txbodyForChange
           initialChangeTxOut =
             TxOut
               changeaddr
@@ -1182,7 +1198,7 @@ makeTransactionBodyAutoBalance
               , txReturnCollateral = retColl
               , txTotalCollateral = reqCol
               }
-      let balance = evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo txbody2
+      let balance = evaluateTransactionBalance sbe pp poolids stakeDelegDeposits drepDelegDeposits utxo txbody2
           balanceTxOut = TxOut changeaddr balance TxOutDatumNone ReferenceScriptNone
       first (uncurry TxBodyErrorMinUTxONotMet)
         . mapM_ (checkMinUTxOValue sbe pp)

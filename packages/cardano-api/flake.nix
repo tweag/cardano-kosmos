@@ -26,7 +26,7 @@
     };
 
     CHaP = {
-      url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
+      url = "github:intersectmbo/cardano-haskell-packages?ref=index-only";
       flake = false;
     };
 
@@ -66,9 +66,11 @@
         nixpkgs = let
           abseilOverlay = final: prev:
             prev.lib.optionalAttrs prev.stdenv.hostPlatform.isWindows {
-              abseil-cpp = prev.abseil-cpp.overrideAttrs (finalAttrs: previousAttrs: {
-                buildInputs = previousAttrs.buildInputs ++ [prev.pkgs.windows.mingw_w64_pthreads];
-              });
+              abseil-cpp = prev.abseil-cpp.overrideAttrs (
+                finalAttrs: previousAttrs: {
+                  buildInputs = previousAttrs.buildInputs ++ [prev.pkgs.windows.mingw_w64_pthreads];
+                }
+              );
             };
           unstableOverlay = final: prev: {
             unstable = import inputs.unstable {
@@ -122,161 +124,170 @@
 
         # We use cabalProject' to ensure we don't build the plan for
         # all systems.
-        cabalProject = nixpkgs.haskell-nix.cabalProject' ({config, ...}: {
-          src = ./.;
-          name = "cardano-api";
-          compiler-nix-name = lib.mkDefault defaultCompiler;
+        cabalProject = nixpkgs.haskell-nix.cabalProject' (
+          {config, ...}: {
+            src = ./.;
+            name = "cardano-api";
+            compiler-nix-name = lib.mkDefault defaultCompiler;
 
-          # we also want cross compilation to windows on linux (and only with default compiler).
-          crossPlatforms = p:
-            lib.optional (system == "x86_64-linux" && config.compiler-nix-name == crossCompilerVersion)
-            p.mingwW64;
+            # we also want cross compilation to windows on linux (and only with default compiler).
+            crossPlatforms = p:
+              lib.optional (
+                system == "x86_64-linux" && config.compiler-nix-name == crossCompilerVersion
+              )
+              p.mingwW64;
 
-          # CHaP input map, so we can find CHaP packages (needs to be more
-          # recent than the index-state we set!). Can be updated with
-          #
-          #  nix flake lock --update-input CHaP
-          #
-          inputMap = {
-            "https://chap.intersectmbo.org/" = inputs.CHaP;
-          };
-          # Also currently needed to make `nix flake lock --update-input CHaP` work.
-          cabalProjectLocal = ''
-            repository cardano-haskell-packages-local
-              url: file:${inputs.CHaP}
-              secure: True
-            active-repositories: hackage.haskell.org, cardano-haskell-packages-local
-          '';
-
-          shell.packages = p: [
-            # Packages in this repo
-            p.cardano-api
-            p.cardano-api-gen
-            p.cardano-rpc
-            p.cardano-wasm
-            # Work around for issue created by our inability to register sublibs.
-            # This package may need to be built and we need to make sure its dependencies
-            # are included in `ghc-pkg list` (in particular `compact`)
-            p.ouroboros-consensus
-          ];
-          # tools we want in our shell, from hackage
-          shell.tools =
-            {
-              cabal = "3.16.1.0";
-            }
-            // lib.optionalAttrs (config.compiler-nix-name == defaultCompiler) {
-              # tools that work only with default compiler
-              ghcid = "0.8.9";
-              cabal-gild = "1.7.0.1";
-              fourmolu = "0.18.0.0";
-              proto-lens-protoc = "latest";
-              haskell-language-server = {
-                src = inputs.hls;
-                configureArgs = "--disable-benchmarks --disable-tests";
-              };
-              hlint = "3.10";
+            # CHaP input map, so we can find CHaP packages (needs to be more
+            # recent than the index-state we set!). Can be updated with
+            #
+            #  nix flake lock --update-input CHaP
+            #
+            inputMap = {
+              "https://chap.intersectmbo.org/" = inputs.CHaP;
             };
-          # and from nixpkgs or other inputs
-          shell.nativeBuildInputs = with nixpkgs; [
-            gh
-            git
-            jq
-            yq-go
-            unstable.actionlint
-            shellcheck
-            snappy
-            protobuf
-            # buf version must match `.github/workflows/haskell.yml` (buf is
-            # not backwards-compatible across minor versions for
-            # `buf generate` output).
-            unstable.buf
-            blst
-            inputs.cardano-dev.packages.${system}.herald
-            (writeShellScriptBin "haskell-language-server-wrapper" ''exec haskell-language-server "$@"'')
-          ];
-          # disable Hoogle until someone request it
-          shell.withHoogle = false;
-          # Skip cross compilers for the shell
-          shell.crossPlatforms = _: [];
-          shell.shellHook = ''
-            export PATH="${nixpkgs.nix}/bin:$PATH"
-            ${pre-commit-check.shellHook}
-            export LD_LIBRARY_PATH="${nixpkgs.snappy}/lib:$LD_LIBRARY_PATH"
-            export PATH="$(git rev-parse --show-toplevel)/scripts/devshell:$PATH"
-          '';
+            # Also currently needed to make `nix flake lock --update-input CHaP` work.
+            cabalProjectLocal = ''
+              repository cardano-haskell-packages-local
+                url: file:${inputs.CHaP}
+                secure: True
+              active-repositories: hackage.haskell.org, cardano-haskell-packages-local
+            '';
 
-          # package customizations as needed. Where cabal.project is not
-          # specific enough, or doesn't allow setting these.
-          modules = [
-            ({...}: {
-              packages.cardano-api = {
-                configureFlags = ["--ghc-option=-Werror"];
-                components = {
-                  tests.cardano-api-golden = {
-                    preCheck = ''
-                      export CREATE_GOLDEN_FILES=1
-                    '';
+            shell.packages = p: [
+              # Packages in this repo
+              p.cardano-api
+              p.cardano-api-gen
+              p.cardano-rpc
+              p.cardano-wasm
+              # Work around for issue created by our inability to register sublibs.
+              # This package may need to be built and we need to make sure its dependencies
+              # are included in `ghc-pkg list` (in particular `compact`)
+              p.ouroboros-consensus
+              # cardano-binary is needed here so that its testlib sublibrary gets registered
+              # in ghc-pkg (required transitively by cardano-crypto-wrapper:testlib)
+              p.cardano-binary
+            ];
+            # tools we want in our shell, from hackage
+            shell.tools =
+              {
+                cabal = "3.16.1.0";
+              }
+              // lib.optionalAttrs (config.compiler-nix-name == defaultCompiler) {
+                # tools that work only with default compiler
+                ghcid = "0.8.9";
+                cabal-gild = "1.7.0.1";
+                fourmolu = "0.18.0.0";
+                proto-lens-protoc = "latest";
+                haskell-language-server = {
+                  src = inputs.hls;
+                  configureArgs = "--disable-benchmarks --disable-tests";
+                };
+                hlint = "3.10";
+              };
+            # and from nixpkgs or other inputs
+            shell.nativeBuildInputs = with nixpkgs; [
+              gh
+              git
+              jq
+              yq-go
+              unstable.actionlint
+              shellcheck
+              snappy
+              protobuf
+              # buf version must match `.github/workflows/haskell.yml` (buf is
+              # not backwards-compatible across minor versions for
+              # `buf generate` output).
+              unstable.buf
+              blst
+              inputs.cardano-dev.packages.${system}.herald
+              (writeShellScriptBin "haskell-language-server-wrapper" ''exec haskell-language-server "$@"'')
+            ];
+            # disable Hoogle until someone request it
+            shell.withHoogle = false;
+            # Skip cross compilers for the shell
+            shell.crossPlatforms = _: [];
+            shell.shellHook = ''
+              export PATH="${nixpkgs.nix}/bin:$PATH"
+              ${pre-commit-check.shellHook}
+              export LD_LIBRARY_PATH="${nixpkgs.snappy}/lib:$LD_LIBRARY_PATH"
+              export PATH="$(git rev-parse --show-toplevel)/scripts/devshell:$PATH"
+            '';
+
+            # package customizations as needed. Where cabal.project is not
+            # specific enough, or doesn't allow setting these.
+            modules = [
+              ({...}: {
+                packages.cardano-api = {
+                  configureFlags = ["--ghc-option=-Werror"];
+                  components = {
+                    tests.cardano-api-golden = {
+                      preCheck = ''
+                        export CREATE_GOLDEN_FILES=1
+                      '';
+                    };
                   };
                 };
-              };
-            })
-            ({
-              pkgs,
-              config,
-              ...
-            }: let
-              generatedExampleFiles = map (f: "cardano-wasm/lib-wrapper/${f}") (builtins.filter (f: lib.strings.hasSuffix ".d.ts" f) (builtins.attrNames (builtins.readDir ./cardano-wasm/lib-wrapper)));
-              exportWasmPath = "export CARDANO_WASM=${config.hsPkgs.cardano-wasm.components.exes.cardano-wasm}/bin/cardano-wasm${pkgs.stdenv.hostPlatform.extensions.executable}";
-            in {
-              packages.cardano-wasm.components.tests.cardano-wasm-golden.preCheck = let
-                filteredProjectBase = inputs.incl ./. generatedExampleFiles;
-              in ''
-                ${exportWasmPath}
-                cp -r ${filteredProjectBase}/* ..
-              '';
-            })
-            {
-              # haskell.nix's windows.nix points crypton-x509-system >=1.7 at a
-              # patch path that does not exist (missing ".patch" suffix); the
-              # postPatch below already applies the same Crypt32 -> crypt32
-              # rename, so drop the broken patch list.
-              packages.crypton-x509-system.patches = lib.mkForce [];
-              packages.crypton-x509-system.postPatch = ''
-                substituteInPlace crypton-x509-system.cabal --replace 'Crypt32' 'crypt32'
-              '';
-              # cardano-addresses vendors cardano-crypto's C bits, so the two
-              # packages define 15 identical symbols (the ed25519 set, the
-              # wallet_encrypted_* wrappers, and two unprefixed helpers). The
-              # GHC RTS linker refuses the duplicates when it loads both to run
-              # Template Haskell in cross-compiled builds. Namespace the
-              # vendored copy and make the file-local helpers static.
-              packages.cardano-addresses.postPatch = ''
-                substituteInPlace cbits/ed25519/ed25519.c cbits/ed25519/ed25519.h cbits/encrypted_sign.c \
-                  --replace-fail cardano_crypto_ cardano_addresses_
-                substituteInPlace cbits/encrypted_sign.c lib/Cardano/Address/Crypto/Wallet/Encrypted.hs \
-                  --replace-fail wallet_encrypted_ addresses_wallet_encrypted_
-                substituteInPlace cbits/encrypted_sign.c \
-                  --replace-fail 'void clear(void *buf' 'static void clear(void *buf' \
-                  --replace-fail 'void scalar_add_no_overflow(' 'static void scalar_add_no_overflow('
-              '';
-            }
-            ({
-              pkgs,
-              config,
-              ...
-            }: {
-              packages =
+              })
+              ({
+                pkgs,
+                config,
+                ...
+              }: let
+                generatedExampleFiles = map (f: "cardano-wasm/lib-wrapper/${f}") (builtins.filter (f: lib.strings.hasSuffix ".d.ts" f) (builtins.attrNames (builtins.readDir ./cardano-wasm/lib-wrapper)));
+                exportWasmPath = "export CARDANO_WASM=${config.hsPkgs.cardano-wasm.components.exes.cardano-wasm}/bin/cardano-wasm${pkgs.stdenv.hostPlatform.extensions.executable}";
+              in {
+                packages.cardano-wasm.components.tests.cardano-wasm-golden.preCheck = let
+                  filteredProjectBase = inputs.incl ./. generatedExampleFiles;
+                in ''
+                  ${exportWasmPath}
+                  cp -r ${filteredProjectBase}/* ..
+                '';
+              })
+              {
+                # haskell.nix's windows.nix points crypton-x509-system >=1.7 at a
+                # patch path that does not exist (missing ".patch" suffix); the
+                # postPatch below already applies the same Crypt32 -> crypt32
+                # rename, so drop the broken patch list.
+                packages.crypton-x509-system.patches = lib.mkForce [];
+                packages.crypton-x509-system.postPatch = ''
+                  substituteInPlace crypton-x509-system.cabal --replace 'Crypt32' 'crypt32'
+                '';
+                # cardano-addresses vendors cardano-crypto's C bits, so the two
+                # packages define 15 identical symbols (the ed25519 set, the
+                # wallet_encrypted_* wrappers, and two unprefixed helpers). The
+                # GHC RTS linker refuses the duplicates when it loads both to run
+                # Template Haskell in cross-compiled builds. Namespace the
+                # vendored copy and make the file-local helpers static.
+                packages.cardano-addresses.postPatch = ''
+                  substituteInPlace cbits/ed25519/ed25519.c cbits/ed25519/ed25519.h cbits/encrypted_sign.c \
+                    --replace-fail cardano_crypto_ cardano_addresses_
+                  substituteInPlace cbits/encrypted_sign.c lib/Cardano/Address/Crypto/Wallet/Encrypted.hs \
+                    --replace-fail wallet_encrypted_ addresses_wallet_encrypted_
+                  substituteInPlace cbits/encrypted_sign.c \
+                    --replace-fail 'void clear(void *buf' 'static void clear(void *buf' \
+                    --replace-fail 'void scalar_add_no_overflow(' 'static void scalar_add_no_overflow('
+                '';
+              }
+              (
                 {
-                  basement.components.library.configureFlags = [
-                    "--hsc2hs-option=--cflag=-Wno-int-conversion"
-                  ];
+                  pkgs,
+                  config,
+                  ...
+                }: {
+                  packages =
+                    {
+                      basement.components.library.configureFlags = [
+                        "--hsc2hs-option=--cflag=-Wno-int-conversion"
+                      ];
+                    }
+                    // lib.optionalAttrs (config.packages ? proto-lens-protobuf-types) {
+                      proto-lens-protobuf-types.components.library.build-tools = [pkgs.buildPackages.protobuf];
+                    };
                 }
-                // lib.optionalAttrs (config.packages ? proto-lens-protobuf-types) {
-                  proto-lens-protobuf-types.components.library.build-tools = [pkgs.buildPackages.protobuf];
-                };
-            })
-          ];
-        });
+              )
+            ];
+          }
+        );
         # ... and construct a flake from the cabal project
         flake = cabalProject.flake (
           lib.optionalAttrs (system == "x86_64-linux") {
@@ -288,7 +299,8 @@
                 then defaultCompiler
                 else stableCompiler;
             in
-              lib.genAttrs [osDependentStableCompiler crossCompilerVersion haddockCompiler] (compiler-nix-name: {
+              lib.genAttrs [osDependentStableCompiler crossCompilerVersion haddockCompiler]
+              (compiler-nix-name: {
                 inherit compiler-nix-name;
               });
           }
@@ -298,8 +310,7 @@
           wasm-pkgs = inputs.wasm-nixpkgs.legacyPackages.${system};
           wasi-sdk = inputs.ghc-wasm-meta.packages.${system}.wasi-sdk;
           wasm = {
-            libsodium =
-              wasm-pkgs.callPackage ./nix/libsodium.nix {inherit wasi-sdk;};
+            libsodium = wasm-pkgs.callPackage ./nix/libsodium.nix {inherit wasi-sdk;};
             secp256k1 = (wasm-pkgs.callPackage ./nix/secp256k1.nix {inherit wasi-sdk;}).overrideAttrs (_: {
               src = nixpkgs.secp256k1.src;
             });
@@ -307,7 +318,8 @@
               (wasm-pkgs.callPackage ./nix/blst.nix {
                 inherit wasi-sdk;
                 version = nixpkgs.blst.version;
-              }).overrideAttrs (_: {
+              }).overrideAttrs
+              (_: {
                 src = nixpkgs.blst.src;
               });
           };

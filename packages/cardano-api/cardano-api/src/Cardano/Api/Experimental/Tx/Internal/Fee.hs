@@ -229,6 +229,9 @@ estimateBalancedTxBody
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ A map of all deposits for DRep credentials that are being
+  --   unregistered in this transaction.
   -> Map (Ledger.PlutusPurpose Ledger.AsIx (LedgerEra era)) ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -254,6 +257,7 @@ estimateBalancedTxBody
   pparams
   poolids
   stakeDelegDeposits
+  drepDelegDeposits
   exUnitsMap =
     obtainCommonConstraints w $
       estimateBalancedTxBody'
@@ -261,6 +265,7 @@ estimateBalancedTxBody
         pparams
         poolids
         stakeDelegDeposits
+        drepDelegDeposits
         (Map.mapKeys (toScriptIndex (convert w)) exUnitsMap)
 
 data TxFeeEstimationError era
@@ -288,6 +293,9 @@ estimateBalancedTxBody'
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ A map of all deposits for DRep credentials that are being
+  --   unregistered in this transaction.
   -> Map ScriptWitnessIndex ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -312,6 +320,7 @@ estimateBalancedTxBody'
   pparams
   poolids
   stakeDelegDeposits
+  drepDelegDeposits
   exUnitsMap
   totalPotentialCollateral
   intendedKeyWits
@@ -433,7 +442,7 @@ estimateBalancedTxBody'
           createFakeUTxO (toShelleyAddr changeaddr) txbodycontent1 $
             L.coin availableUTxOValue
         balance :: Ledger.Value (LedgerEra era) =
-          evaluateTransactionBalance pparams poolids stakeDelegDeposits fakeUTxO txbody2
+          evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits fakeUTxO txbody2
 
         coinBalance :: L.Coin
         coinBalance = L.coin balance
@@ -570,12 +579,14 @@ evaluateTransaction
   -- ^ Registered stake pools
   -> Map StakeCredential L.Coin
   -- ^ Stake delegation deposits
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ DRep delegation deposits
   -> L.UTxO (LedgerEra era)
   -- ^ UTxO set for the transaction inputs
   -> L.Tx L.TopTx (LedgerEra era)
   -- ^ Signed transaction to evaluate
   -> TxEvaluationResult (LedgerEra era)
-evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDeposits utxo tx =
+evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDeposits _drepDelegDeposits utxo tx =
   obtainCommonConstraints (useEra @era) $ do
     let txEvalExecutionUnits =
           evaluateTransactionExecutionUnits systemStart epochInfo protocolParams utxo tx
@@ -623,16 +634,21 @@ evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDepos
 --
 -- Finding the (non-zero) balance of a partially constructed transaction is
 -- useful for adjusting a transaction to be fully balanced.
+-- Note: the DRep deposit map is no longer consulted. The ledger dropped that
+-- lookup from 'evalBalanceTxBody' ("we do not need to look into DRep state in
+-- order to figure out the refund"); the parameter is kept so callers do not
+-- have to change.
 evaluateTransactionBalance
   :: forall era
    . IsEra era
   => Ledger.PParams (LedgerEra era)
   -> Set PoolId
   -> Map StakeCredential L.Coin
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> L.UTxO (LedgerEra era)
   -> UnsignedTx (LedgerEra era)
   -> L.Value (LedgerEra era)
-evaluateTransactionBalance pp poolids stakeDelegDeposits utxo (UnsignedTx unsignedTx) =
+evaluateTransactionBalance pp poolids stakeDelegDeposits _drepDelegDeposits utxo (UnsignedTx unsignedTx) =
   let txbody = unsignedTx ^. L.bodyTxL
    in obtainCommonConstraints (useEra @era) $
         L.evalBalanceTxBody
@@ -900,10 +916,13 @@ calcMinFeeRecursive
   -> Map StakeCredential L.Coin
   -- ^ Deposits for stake credentials being deregistered in this
   -- transaction. These are counted as refunds on the consumed side.
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ Deposits for DRep credentials being deregistered in this
+  -- transaction. These are counted as refunds on the consumed side.
   -> Int
   -- ^ Number of extra key hashes for native scripts
   -> Either FeeCalculationError (UnsignedTx (LedgerEra era))
-calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposits nExtraWitnesses
+calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposits drepDelegDeposits nExtraWitnesses
   -- If multi-assets are non-negative initially, they stay non-negative across
   -- iterations (only ADA and fee change), so check once upfront.
   | multiAssetIsNegative =
@@ -911,7 +930,7 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
   | otherwise =
       go maxIterations unsignedTx
  where
-  initialBalance = evaluateTransactionBalance pparams poolids stakeDelegDeposits utxo unsignedTx
+  initialBalance = evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits utxo unsignedTx
   multiAssets =
     obtainCommonConstraints (useEra @era) $
       let L.MaryValue _ ma = initialBalance
@@ -948,7 +967,7 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
     minFee = obtainCommonConstraints (useEra @era) $ L.calcMinFeeTx utxo pparams ledgerTx nExtraWitnesses
     txBodyFee = ledgerTx ^. L.bodyTxL . L.feeTxBodyL
     txBalanceValue =
-      evaluateTransactionBalance pparams poolids stakeDelegDeposits utxo unSignTx
+      evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits utxo unSignTx
 
 checkOutputMinUTxO
   :: forall era
@@ -1509,6 +1528,9 @@ makeTransactionBodyAutoBalance
   -> Map StakeCredential L.Coin
   -- ^ The map of all deposits for stake credentials that are being
   --   unregistered in this transaction
+  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
+  -- ^ The map of all deposits for DRep credentials that are being
+  --   unregistered in this transaction
   -> L.UTxO (LedgerEra era)
   -- ^ The transaction inputs (including reference and collateral ones), not the entire 'UTxO'.
   -> TxBodyContent (LedgerEra era)
@@ -1525,6 +1547,7 @@ makeTransactionBodyAutoBalance
   pp
   poolids
   stakeDelegDeposits
+  drepDelegDeposits
   utxo
   txbodycontent
   changeaddr
@@ -1552,7 +1575,7 @@ makeTransactionBodyAutoBalance
     -- Check the balance before constructing the TxOut. L.mkBasicTxOut calls toCompact, which throws an irrecoverable
     -- error on negative Coin values, so checkNonNegative would never get to return Left for the negative case.
     initialChangeTxOutValue :: Ledger.Value (LedgerEra era) <- do
-      let val = evaluateTransactionBalance pp poolids stakeDelegDeposits utxo txbodyForChange
+      let val = evaluateTransactionBalance pp poolids stakeDelegDeposits drepDelegDeposits utxo txbodyForChange
           L.MaryValue initialCoin initialMultiAsset = obtainCommonConstraints (useEra @era) val
       val
         <$ unless
@@ -1667,7 +1690,7 @@ makeTransactionBodyAutoBalance
             }
 
     obtainCommonConstraints (useEra @era) $ do
-      let balance :: L.MaryValue = evaluateTransactionBalance pp poolids stakeDelegDeposits utxo txbody2
+      let balance :: L.MaryValue = evaluateTransactionBalance pp poolids stakeDelegDeposits drepDelegDeposits utxo txbody2
           adaBalance = getAda (useEra @era) balance
       when (adaBalance < 0) $
         Left $

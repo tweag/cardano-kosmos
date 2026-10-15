@@ -1,3 +1,5 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 -- | Generators suitable for serialisation. Note that these are not guaranteed
@@ -21,11 +23,17 @@ import Cardano.Slotting.Slot
   ( SlotNo (SlotNo)
   , WithOrigin (At, Origin)
   )
-import Ouroboros.Consensus.Protocol.Praos (PraosState (PraosState))
+import qualified Data.ByteString as BS
+import Ouroboros.Consensus.Leios.Protocol (LeiosAnnouncement (..))
+import Ouroboros.Consensus.Leios.Types (EbHash (..))
+import Ouroboros.Consensus.Protocol.Praos
+  ( PolyPraosState (PraosState)
+  )
 import qualified Ouroboros.Consensus.Protocol.Praos as Praos
+import Ouroboros.Consensus.Protocol.Praos.Common (pureLeiosOnly)
 import Test.Cardano.Ledger.Shelley.Serialisation.EraIndepGenerators ()
 import Test.Crypto.KES ()
-import Test.QuickCheck (Arbitrary (..), Gen, choose, oneof)
+import Test.QuickCheck (Arbitrary (..), Gen, choose, oneof, vectorOf)
 
 instance Arbitrary InputVRF where
   arbitrary = mkInputVRF <$> arbitrary <*> arbitrary
@@ -66,7 +74,19 @@ instance Praos.PraosCrypto c => Arbitrary (Header c) where
     let hSig = unsoundPureSignedKES () period hBody sKey
     pure $ Header hBody hSig
 
-instance Arbitrary PraosState where
+instance Arbitrary LeiosAnnouncement where
+  arbitrary =
+    MkLeiosAnnouncement
+      <$> arbitrary
+      <*> (MkEbHash . BS.pack <$> vectorOf 32 arbitrary)
+      <*> arbitrary
+
+instance
+  ( Applicative (Praos.WhenLeios proto)
+  , Traversable (Praos.WhenLeios proto)
+  ) =>
+  Arbitrary (PolyPraosState proto)
+  where
   arbitrary =
     PraosState
       <$> oneof
@@ -80,3 +100,4 @@ instance Arbitrary PraosState where
       <*> arbitrary
       <*> arbitrary
       <*> arbitrary
+      <*> traverse (\() -> arbitrary) (pureLeiosOnly ())

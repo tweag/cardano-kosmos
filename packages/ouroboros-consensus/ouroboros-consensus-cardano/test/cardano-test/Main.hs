@@ -5,12 +5,13 @@ import qualified Test.Consensus.Cardano.Capacity (tests)
 import qualified Test.Consensus.Cardano.DiffusionPipelining
 import Test.Consensus.Cardano.GenCDDLs
 import qualified Test.Consensus.Cardano.Golden
+import qualified Test.Consensus.Cardano.LeiosNotify
 import qualified Test.Consensus.Cardano.MiniProtocol.LocalTxSubmission.Server
 import qualified Test.Consensus.Cardano.Serialisation (tests)
 import qualified Test.Consensus.Cardano.Show ()
 import qualified Test.Consensus.Cardano.SupportedNetworkProtocolVersion
 import qualified Test.Consensus.Cardano.SupportsSanityCheck
-import qualified Test.Consensus.Cardano.Translation (tests)
+import qualified Test.Consensus.Cardano.Translation (forecastTests, tests)
 import qualified Test.Consensus.Cardano.TxId (tests)
 import Test.Tasty
 import qualified Test.ThreadNet.AllegraMary
@@ -37,6 +38,7 @@ tests =
         testGroup
           "Serialisation"
           [ Test.Consensus.Cardano.Golden.tests
+          , Test.Consensus.Cardano.LeiosNotify.tests
           , Test.Consensus.Cardano.Serialisation.tests
           ]
     , Test.Consensus.Cardano.SupportedNetworkProtocolVersion.tests
@@ -47,5 +49,6 @@ tests =
     , Test.ThreadNet.ShelleyAllegra.tests
     , Test.Consensus.Cardano.MiniProtocol.LocalTxSubmission.Server.tests
     , Test.Consensus.Cardano.Translation.tests
+    , Test.Consensus.Cardano.Translation.forecastTests
     , Test.Consensus.Cardano.TxId.tests
     ]

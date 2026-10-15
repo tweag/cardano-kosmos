@@ -413,10 +413,14 @@ instance
           Just (NonEmpty.fromList nonPersistentSeats)
 
 -- | A reasonably tight upper bound on the size of a Peras certificate.
--- This upper bound is used to check, at aggregation time, that the certificate does not exceed
--- the size limit we've set for Peras certificates. We use an upper bound instead of the actual size,
--- because the latter would require serializing the certificate, which is expensive and only actually
--- needs to be done when the certificate is to be included in a block.
+-- This upper bound is used to check, at aggregation time, that the certificate
+-- does not exceed the size limit we've set for Peras certificates. We use an
+-- upper bound instead of the actual size, because the latter would require
+-- serializing the certificate, which is expensive and only actually needs to
+-- be done when the certificate is to be included in a block.
+--
+-- NOTE: this will be moved to 'cardano-base' soon, see
+-- https://github.com/IntersectMBO/cardano-base/pull/701
 perasCertSizeUpperBound :: PerasCert blk -> PerasCertSize
 perasCertSizeUpperBound cert =
   (`divCeiling` 8) $

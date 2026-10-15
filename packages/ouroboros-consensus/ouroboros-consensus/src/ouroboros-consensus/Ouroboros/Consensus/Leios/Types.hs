@@ -25,7 +25,17 @@ module Ouroboros.Consensus.Leios.Types
 
     -- * Points
   , LeiosPoint (..)
+  , encodeLeiosPoint
+  , decodeLeiosPoint
   , prettyLeiosPoint
+
+    -- * Elections
+  , ElectionId (..)
+
+    -- * Votes
+  , LeiosVote (..)
+  , encodeLeiosVote
+  , decodeLeiosVote
 
     -- * Endorser blocks
   , BytesSize
@@ -36,10 +46,20 @@ module Ouroboros.Consensus.Leios.Types
   , encodeLeiosEbMaxFramingSize
   , encodeLeiosEbSize
   , leiosReferencesCapacity
+
+    -- * Header checks
+  , milliseconds32ToNominalDiffTime
+  , minCertificationSlot
   ) where
 
+import Cardano.Binary.FixedSizeCodec (decodeFixedSized, encodeFixedSized)
+import Cardano.Crypto.Leios (LeiosSeatId (..), LeiosSignature)
 import Cardano.Crypto.Util (SignableRepresentation (..))
+import Cardano.Ledger.BaseTypes (Milliseconds32 (..))
+import Cardano.Ledger.Binary.Plain (decodeRecordNamed)
+import Cardano.Ledger.Keys (KeyHash, KeyRole (BlockIssuer))
 import Cardano.Slotting.Slot (SlotNo (..))
+import Cardano.Slotting.Time (SlotLength, slotLengthToMillisec)
 import Codec.CBOR.Decoding (Decoder)
 import qualified Codec.CBOR.Decoding as CBOR
 import Codec.CBOR.Encoding (Encoding)
@@ -52,6 +72,8 @@ import qualified Data.ByteString.Base16 as BS16
 import qualified Data.ByteString.Char8 as BS8
 import Data.Foldable (toList)
 import Data.Function ((&))
+import qualified Data.Text as T
+import Data.Time (NominalDiffTime)
 import Data.Vector.Strict (Vector)
 import qualified Data.Vector.Strict as V
 import Data.Word (Word32)
@@ -136,9 +158,65 @@ instance SignableRepresentation LeiosPoint where
       encode (pointSlotNo point)
         <> encodeEbHash (pointEbHash point)
 
+encodeLeiosPoint :: LeiosPoint -> Encoding
+encodeLeiosPoint (MkLeiosPoint ebSlot ebHash) =
+  CBOR.encodeListLen 2
+    <> encode ebSlot
+    <> encodeEbHash ebHash
+
+decodeLeiosPoint :: Decoder s LeiosPoint
+decodeLeiosPoint =
+  decodeRecordNamed (T.pack "LeiosPoint") (const 2) $
+    MkLeiosPoint <$> decode <*> decodeEbHash
+
 prettyLeiosPoint :: LeiosPoint -> String
 prettyLeiosPoint (MkLeiosPoint (SlotNo slotNo) (MkEbHash bytes)) =
   "(" ++ show slotNo ++ ", " ++ BS8.unpack (BS16.encode bytes) ++ ")"
+
+-- * Elections
+
+-- | A ranking block leadership election: a slot and the pool it elected.
+--
+-- This is unrelated to the 'Ouroboros.Consensus.Committee.Crypto.ElectionId'
+-- type family, which identifies an election of a voting committee. We do not
+-- anticipate a module using both.
+--
+-- The derived 'Ord' orders by slot first, which pruning relies on.
+data ElectionId = ElectionId
+  { electionSlot :: !SlotNo
+  , electionElectee :: !(KeyHash BlockIssuer)
+  }
+  deriving stock (Eq, Ord, Show, Generic)
+  deriving anyclass NoThunks
+
+-- * Votes
+
+-- | A vote for a Leios announcement.
+data LeiosVote = MkLeiosVote
+  { voteAnnouncingRbHash :: !RbHash
+  -- ^ the 'HeaderHash' of the ranking block ('s header) that carries the
+  -- announcement
+  , voteSeatId :: !LeiosSeatId
+  -- ^ the voter's seat in the committee
+  , voteSignature :: !LeiosSignature
+  -- ^ the voter's signature of 'voteAnnouncingRbHash'
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving anyclass NoThunks
+
+instance ShowProxy LeiosVote where showProxy _ = "LeiosVote"
+
+encodeLeiosVote :: LeiosVote -> Encoding
+encodeLeiosVote (MkLeiosVote rbHash seat signature) =
+  CBOR.encodeListLen 3
+    <> encodeRbHash rbHash
+    <> CBOR.encodeWord16 (leiosSeatIndex seat)
+    <> encodeFixedSized signature
+
+decodeLeiosVote :: Decoder s LeiosVote
+decodeLeiosVote =
+  decodeRecordNamed (T.pack "LeiosVote") (const 3) $
+    MkLeiosVote <$> decodeRbHash <*> (LeiosSeatId <$> CBOR.decodeWord16) <*> decodeFixedSized
 
 -- * Endorser blocks
 
@@ -226,3 +304,36 @@ cborIntBytesSize n
   | n < 0x100 = 2
   | n < 0x10000 = 3
   | otherwise = 5
+
+-- * Header checks
+
+-- | A duration the ledger gives in milliseconds.
+milliseconds32ToNominalDiffTime :: Milliseconds32 -> NominalDiffTime
+milliseconds32ToNominalDiffTime (Milliseconds32 ms) = fromIntegral ms / 1000
+
+-- | The earliest slot at which a block may certify an endorser block announced
+-- in the given slot.
+--
+-- The announcement, voting and diffusion periods must all have elapsed. They
+-- are wall-clock durations, so the gap rounds up to whole slots: a block is
+-- forged at its slot's onset, so the answer is the first slot whose onset is far
+-- enough after the announcement.
+minCertificationSlot ::
+  SlotLength ->
+  -- | Announcement period length
+  Milliseconds32 ->
+  -- | Vote period length
+  Milliseconds32 ->
+  -- | Diffusion period length
+  Milliseconds32 ->
+  -- | Slot of the announcing block
+  SlotNo ->
+  SlotNo
+minCertificationSlot slotLength announcement vote diffusion announcingSlot =
+  announcingSlot + SlotNo (fromIntegral ((totalMs + slotMs - 1) `div` slotMs))
+ where
+  totalMs = 3 * ms announcement + ms vote + ms diffusion
+  ms = toInteger . unMilliseconds32
+  slotMs = case slotLengthToMillisec slotLength of
+    0 -> error "minCertificationSlot: zero slot length"
+    n -> n

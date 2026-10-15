@@ -50,6 +50,8 @@ import Data.Function (on)
 import Data.Functor ((<&>))
 import Data.Hashable (Hashable)
 import Data.List.NonEmpty (NonEmpty)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Proxy
 import Data.Set (Set, member)
 import qualified Data.Text as Text
@@ -79,8 +81,13 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck
   ( HistoricityCheck
   )
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck
-  ( SomeHeaderInFutureCheck
+  ( ClockSkew
+  , SomeHeaderInFutureCheck
   )
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State
+  ( LeiosNotifyPeerState
+  )
+import Ouroboros.Consensus.Network.NodeToNode.LeiosNotify (leiosNotifyPruner)
 import Ouroboros.Consensus.Node.GSM (GsmNodeKernelArgs (..))
 import qualified Ouroboros.Consensus.Node.GSM as GSM
 import Ouroboros.Consensus.Node.Genesis
@@ -211,6 +218,10 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
   -- ^ Accumulator for tx-submission counters of disconnected peers.
   , getTxDecisionPolicy :: TxDecisionPolicy
   -- ^ Tx-submission decision policy.
+  , getLeiosNotifyClientStates ::
+      StrictTVar m (Map (ConnectionId addrNTN) (StrictTVar m (LeiosNotifyPeerState blk)))
+  -- ^ The state of each LeiosNotify client, by upstream peer, which
+  -- 'leiosNotifyPruner' prunes.
   }
 
 -- | Arguments required when initializing a node
@@ -224,6 +235,8 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , chainDB :: ChainDB m blk
   , initChainDB :: StorageConfig blk -> InitChainDB m blk -> m ()
   , chainSyncFutureCheck :: SomeHeaderInFutureCheck m blk
+  , maxClockSkew :: ClockSkew
+  -- ^ The most that an honest peer's clock may differ from ours.
   , chainSyncHistoricityCheck ::
       m GSM.GsmState ->
       HistoricityCheck m blk
@@ -437,6 +450,11 @@ initNodeKernel
           keepAliveRegistry
           blockFetchConfiguration
 
+    leiosNotifyClientStates <- newTVarIO Map.empty
+    void $
+      forkLinkedThread registry "NodeKernel.leiosNotifyPruner" $
+        leiosNotifyPruner chainDB leiosNotifyClientStates
+
     void $
       forkLinkedThread registry "NodeKernel.txCountersThreadV2" $
         txCountersThreadV2
@@ -475,6 +493,7 @@ initNodeKernel
         , getSharedTxStateVar = sharedTxStateVar
         , getTxCountersVar = txCountersVar
         , getTxDecisionPolicy = txDecisionPolicy miniProtocolParameters
+        , getLeiosNotifyClientStates = leiosNotifyClientStates
         }
    where
     -- Start a thread conditionally when the PerasFlag is provided and the
@@ -550,7 +569,7 @@ perasVoteForgingController
         -- this round before invoking the epoch context resolver. Otherwise, it
         -- can fail to resolve the current round info as it might still be stuck
         -- on the previous epoch.
-        when (slotInRound /= 45) $ do
+        when (slotInRound /= 75) $ do
           tell [TracePerasVotingNoVoteAfterFirstSlotInRound roundNo slotInRound]
           hoistMaybe Nothing
         -- Do the voting rules state that we should vote? And if so, for which block?
@@ -718,12 +737,7 @@ forkBlockForging ::
   m (Thread m Void)
 forkBlockForging IS{..} (MkBlockForging blockForgingM) =
   forkLinkedWatcherAllocate registry label blockForgingMLabel finalize $ \bf ->
-    knownSlotWatcher btime $ \currentSlot -> do
-      mbPerasCert <-
-        checkPerasCertInclusion
-          (perasCertInclusionTracer tracers)
-          chainDB
-          currentSlot
+    knownSlotWatcher btime $ \currentSlot ->
       withEarlyExit_ $
         forge
           (forgeTracer tracers)
@@ -732,8 +746,8 @@ forkBlockForging IS{..} (MkBlockForging blockForgingM) =
           chainDB
           mempool
           bf
+          (checkPerasCertInclusion (perasCertInclusionTracer tracers))
           currentSlot
-          mbPerasCert
  where
   label :: String
   label = "NodeKernel.blockForging"

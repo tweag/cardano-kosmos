@@ -66,6 +66,7 @@ import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
+import Lens.Micro ((^.))
 import NoThunks.Class (NoThunks (..))
 import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.HardFork.Combinator
@@ -92,6 +93,7 @@ import Ouroboros.Consensus.Shelley.Protocol.Abstract
   , ShelleyProtocolHeader
   , pHeaderBlock
   , pHeaderBodyHash
+  , pHeaderContainsLeiosCert
   , pHeaderHash
   , pHeaderSlot
   )
@@ -223,9 +225,15 @@ instance ShelleyCompatible proto era => GetHeader (ShelleyBlock proto era) where
     -- Compute the hash the body of the block (the transactions) and compare
     -- that against the hash of the body stored in the header.
     SL.hashBlockBody blockBody == pHeaderBodyHash shelleyHdr
+      -- The body hash does not cover this claim, so it is checked separately.
+      && bodyContainsCert == pHeaderContainsLeiosCert shelleyHdr
+      -- A CertRB carries a certificate instead of transactions, never both.
+      && not (bodyContainsCert && bodyContainsTxs)
    where
     ShelleyHeader{shelleyHeaderRaw = shelleyHdr} = hdr
     ShelleyBlock{shelleyBlockRaw = SL.Block _ blockBody} = blk
+    bodyContainsCert = blockBodyContainsLeiosCert blockBody
+    bodyContainsTxs = not (null (blockBody ^. SL.txSeqBlockBodyL))
 
   headerIsEBB = const Nothing
 

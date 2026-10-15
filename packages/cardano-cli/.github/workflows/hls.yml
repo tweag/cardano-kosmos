@@ -1,0 +1,116 @@
+name: "Haskell Language Server works"
+on:
+  merge_group:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+
+  test-hls-works:
+    env:
+      # Modify this value to "invalidate" the cache.
+      HLS_CACHE_VERSION: "2024-06-25"
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check if changes were trivial
+        id: check_trivial_changes
+        run: |
+          if [ -z "${{ github.base_ref }}" ]; then
+            exception=false
+          else
+            git fetch origin ${{ github.base_ref }} --unshallow
+            base_ref=origin/${{ github.base_ref }}
+            head_ref=HEAD
+            changed_files=$(git diff-tree --name-status -r "$base_ref".."$head_ref" -- | cut -f2 -d$'\t')
+            # Flag to check whether we do the rest of checks
+            exception=true
+  
+            for file in $changed_files; do
+              # If changes were to a markdown file we don't mind
+              if [[ $file == *.md ]]; then
+                echo "$file: is markdown, so it doesn't matter (trivial change)"
+                continue
+              fi
+  
+              # If changes were to a .cabal file, we ensure only the version changed
+              if [[ $file == *.cabal ]]; then
+                # If file doesn't exist it means it was moved or removed
+                if [ ! -f "$file" ]; then
+                  echo "$file: was moved or removed and is a cabal file (non-trivial change)"
+                  exception=false
+                  break
+                fi
+  
+                # We ensure the only change was to the version field
+                diff_version=$(git diff "$base_ref".."$head_ref" -- "$file" | perl -ne 'print if /^-(?!version:)/' | wc -l)
+                diff_no_version=$(git diff "$base_ref".."$head_ref" -- "$file" | perl -ne 'print if /^\+(?!version:)/' | wc -l)
+  
+                if [ "$diff_version" -gt 1 ] || [ "$diff_no_version" -gt 1 ]; then
+                  echo "$file: was modified beyond the version tag (non-trivial change)"
+                  exception=false
+                  break
+                fi
+                echo "In $file, at most the version field was modified"
+              else
+                # If other types of files were changed, do not skip the checks
+                echo "$file: was changed and is not a markdown nor a cabal file (non-trivial change)"
+                exception=false
+                break
+              fi
+            done
+          fi
+
+          if $exception; then
+            echo "CHECK_HLS_WORKS=0" >> "$GITHUB_OUTPUT"
+            echo "All changes are trival, skipping rest of checks..."
+          else
+            echo "CHECK_HLS_WORKS=1" >> "$GITHUB_OUTPUT"
+            echo "Some changes are non-trivial. We need to do the checks!"
+          fi
+      - uses: cachix/install-nix-action@v31
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            substituters = https://cache.iog.io/ https://cache.nixos.org/
+
+      - uses: rrbutani/use-nix-shell-action@v1
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+
+      - name: Update dependencies
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+        run: cabal update; cabal freeze
+
+      - name: Obtain GHC version
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+        run: |
+          echo "VERSION=$(ghc --numeric-version)" >> "$GITHUB_OUTPUT"
+        id: ghc
+
+      - name: HLS caching
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+        uses: actions/cache@v4
+        with:
+          path: |
+            /home/runner/.cache/hie-bios
+            /home/runner/.cache/ghcide
+            /home/runner/.local/state/cabal
+            .ghc.environment.x86_64-linux-*
+            dist-newstyle
+          key: hls-cache-${{ env.HLS_CACHE_VERSION }}-${{ runner.os }}-${{ steps.ghc.outputs.VERSION }}-${{ hashFiles('**/cabal.project.freeze') }}-${{ hashFiles('**/*.cabal', '**/cabal.project') }}
+          restore-keys: |
+            hls-cache-${{ env.HLS_CACHE_VERSION }}-${{ runner.os }}-${{ steps.ghc.outputs.VERSION }}-${{ hashFiles('**/cabal.project.freeze') }}-
+
+      - name: Test HLS works
+        if: steps.check_trivial_changes.outputs.CHECK_HLS_WORKS > 0
+        run: haskell-language-server

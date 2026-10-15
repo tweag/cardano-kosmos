@@ -1,0 +1,83 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Cardano.CLI.EraBased.Transaction.Internal.HashCheck
+  ( checkCertificateHashes
+  , checkVotingProcedureHashes
+  , checkProposalHashes
+  )
+where
+
+import Cardano.Api
+  ( ExceptT
+  , Proposal (..)
+  , VotingProcedures (..)
+  , convert
+  , except
+  , firstExceptT
+  , getAnchorDataFromGovernanceAction
+  , shelleyBasedEraConstraints
+  , withExceptT
+  )
+import Cardano.Api.Experimental (obtainCommonConstraints)
+import Cardano.Api.Experimental qualified as Exp
+import Cardano.Api.Ledger qualified as L
+
+import Cardano.CLI.EraIndependent.Hash.Internal.Common (carryHashChecks)
+import Cardano.CLI.Type.Common (MustCheckHash (..), PotentiallyCheckedAnchor (..))
+import Cardano.CLI.Type.Error.TxCmdError (TxCmdError (..))
+
+import Control.Monad (forM_)
+
+-- | Check the hash of the anchor data against the hash in the anchor
+checkAnchorMetadataHash :: L.Anchor -> ExceptT TxCmdError IO ()
+checkAnchorMetadataHash anchor =
+  firstExceptT (TxCmdHashCheckError $ L.anchorUrl anchor) $
+    carryHashChecks
+      ( PotentiallyCheckedAnchor
+          { pcaMustCheck = CheckHash
+          , pcaAnchor = anchor
+          }
+      )
+
+-- | Find references to anchor data and check the hashes are valid
+-- and they match the linked data.
+checkCertificateHashes
+  :: forall era. Exp.IsEra era => Exp.Certificate (Exp.LedgerEra era) -> ExceptT TxCmdError IO ()
+checkCertificateHashes cert = do
+  mAnchor <-
+    withExceptT TxCmdPoolMetadataHashError $
+      except $
+        obtainCommonConstraints (Exp.useEra @era) $
+          Exp.getAnchorDataFromCertificate Exp.useEra cert
+  maybe (return mempty) checkAnchorMetadataHash mAnchor
+
+-- | Find references to anchor data in voting procedures and check the hashes are valid
+-- and they match the linked data.
+checkVotingProcedureHashes
+  :: forall era. Exp.IsEra era => VotingProcedures era -> ExceptT TxCmdError IO ()
+checkVotingProcedureHashes (VotingProcedures (L.VotingProcedures voterMap)) =
+  shelleyBasedEraConstraints (convert $ Exp.useEra @era) $
+    forM_
+      voterMap
+      ( mapM $ \(L.VotingProcedure _ mAnchor) ->
+          forM_ mAnchor checkAnchorMetadataHash
+      )
+
+-- | Find references to anchor data in proposals and check the hashes are valid
+-- and they match the linked data.
+checkProposalHashes
+  :: forall era. Exp.IsEra era => Proposal era -> ExceptT TxCmdError IO ()
+checkProposalHashes
+  ( Proposal
+      ( L.ProposalProcedure
+          { L.pProcGovAction = govAction
+          , L.pProcAnchor = anchor
+          }
+        )
+    ) =
+    Exp.obtainCommonConstraints (Exp.useEra @era) $ do
+      checkAnchorMetadataHash anchor
+      maybe (return ()) checkAnchorMetadataHash (getAnchorDataFromGovernanceAction govAction)
+
+-- Only the `NewConstitution` governance action contains a checkable hash with a corresponding URL.

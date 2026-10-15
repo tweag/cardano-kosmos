@@ -1,0 +1,43 @@
+name: Check cabal-gild format
+
+on:
+  merge_group:
+  pull_request:
+
+jobs:
+  check-cabal-gild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            substituters = https://cache.iog.io/ https://cache.nixos.org/
+
+      - uses: rrbutani/use-nix-shell-action@v1
+
+      - name: Run cabal-gild over all modified files
+        run: |
+          rc="0"
+           echo "cabal-gild version: $(cabal-gild --version)"
+          for file in $(git ls-files "*.cabal")
+          do
+            echo "cabal-gild --mode=check --input=$file"
+            if ! cabal-gild --mode=check --input="$file"
+            then
+              cabal-gild --mode=format --io="$file"
+              echo "💣 $file is badly formatted. Fix it with:"
+              echo "cabal-gild --mode=format --io=$file"
+              echo -e
+              echo "Diff for $file:"
+              git diff "$file"
+              echo -e
+              rc="1"
+            fi
+          done
+
+          exit $rc
+

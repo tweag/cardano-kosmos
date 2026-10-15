@@ -1,0 +1,25 @@
+{
+    "anchor": {
+        "dataHash": "2399719c6477ac0cd1348ef84d6752194280b10b58163593366f6e2ca9f28cd2",
+        "url": "proposal-dummy-url"
+    },
+    "deposit": 10,
+    "governance action": {
+        "contents": [
+            null,
+            {
+                "anchor": {
+                    "dataHash": "913844423a72d4ff4cffe1ca2bed8e7f354dba7563df9e630e5b6a86fa72659a",
+                    "url": "http://my-great-constitution.rocks"
+                }
+            }
+        ],
+        "tag": "NewConstitution"
+    },
+    "return address": {
+        "credential": {
+            "keyHash": "8f4a3466a404c11eb410313015b88e447d81b60089e25f611600e605"
+        },
+        "network": "Mainnet"
+    }
+}

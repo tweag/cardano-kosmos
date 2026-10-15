@@ -27,15 +27,4 @@ result-*
 .direnv/
 
 #testnet
-devenv
 devnet-env
-local-config
-process-compose.yaml
-process-compose.log
-cardano_binaries.json
-
-### Victoria Metrics ###
-victoria-metrics-data/
-victoria-logs-data/
-vlagent-remotewrite-data/
-vlagent-file-checkpoints.json

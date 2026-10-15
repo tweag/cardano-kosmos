@@ -1,0 +1,318 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Test.Cardano.Api.Transaction.Body.Plutus.Scripts
+  ( tests
+  )
+where
+
+import Cardano.Api (AlonzoEraOnwards (..), proxyToAsType)
+import Cardano.Api qualified as Api
+import Cardano.Api.Experimental
+import Cardano.Api.Experimental.AnyScriptWitness
+import Cardano.Api.Experimental.Plutus hiding (AnyPlutusScript (..))
+import Cardano.Api.Experimental.Plutus qualified as Plutus
+import Cardano.Api.Experimental.Tx qualified as Exp
+import Cardano.Api.Ledger qualified as L
+import Cardano.Api.Serialise.Cbor (SerialiseAsCBOR (..))
+
+import Cardano.Ledger.Conway qualified as L
+import Cardano.Ledger.Conway.Scripts qualified as L
+import Cardano.Ledger.Dijkstra.Scripts qualified as L
+import Cardano.Ledger.Plutus.Language qualified as L
+
+import Prelude
+
+import Data.Bifunctor (second)
+import Data.Function
+import Data.List qualified as List
+import Data.Map.Strict qualified as Map
+import Data.Proxy (Proxy (..))
+import Data.Word (Word32)
+
+import Test.Gen.Cardano.Api.Experimental qualified as Exp
+import Test.Gen.Cardano.Api.Typed
+  ( genIndexedPlutusScriptWitness
+  , genMintWitnessable
+  , genPlutusScriptInEra
+  , genSimpleScriptMintWitness
+  , genWitnessable
+  )
+
+import Test.Cardano.Api.Orphans ()
+
+import Hedgehog
+import Hedgehog.Extras qualified as H
+import Hedgehog.Gen qualified as Gen
+import Hedgehog.Range qualified as Range
+import Test.Tasty (TestTree, testGroup)
+import Test.Tasty.Hedgehog (testProperty)
+
+prop_compare_plutus_script_hashes :: Property
+prop_compare_plutus_script_hashes = property $ do
+  scriptInEra <- forAll genPlutusScriptInEra
+
+  let anyScript = AnyPlutusScript scriptInEra
+      anyScriptHash = hashAnyScript anyScript
+
+  let script = plutusScriptInEraToScript scriptInEra
+  let hash = L.hashScript script
+
+  hash === anyScriptHash
+
+prop_roundtrip_plutus_script_in_era_cbor :: Property
+prop_roundtrip_plutus_script_in_era_cbor = property $ do
+  scriptInEra <- forAll genPlutusScriptInEra
+  tripping
+    scriptInEra
+    serialiseToCBOR
+    (deserialiseFromCBOR (proxyToAsType (Proxy @(PlutusScriptInEra L.PlutusV3 (LedgerEra ConwayEra)))))
+
+prop_roundtrip_any_plutus_script_text_envelope :: Property
+prop_roundtrip_any_plutus_script_text_envelope = property $ do
+  scriptInEra <- forAll genPlutusScriptInEra
+  let anyScript = Plutus.AnyPlutusScript scriptInEra
+  tripping
+    anyScript
+    (serialiseAnyPlutusScriptToTextEnvelope Nothing)
+    (deserialiseAnyPlutusScriptFromTextEnvelope @(LedgerEra ConwayEra))
+
+-- | This property checks that the redeemer pointer map is constructed correctly.
+-- Previously identical script purposes were being created and overwriting each other
+-- in the redeemer pointer map.
+prop_getAnyWitnessRedeemerPointerMap :: Property
+prop_getAnyWitnessRedeemerPointerMap = property $ do
+  l <- forAll $ Gen.int (Range.linear 2 5)
+  witnessables <- forAll $ Gen.list (Range.singleton l) $ genWitnessable @L.ConwayEra
+  wits <-
+    forAll $
+      Gen.list (Range.singleton l) $
+        genIndexedPlutusScriptWitness @ConwayEra
+  let anyWits =
+        [ AnyPlutusScriptWitness swit
+        | IndexedPlutusScriptWitness _ _ swit <- wits
+        ]
+
+      zipped = zip witnessables anyWits
+      expectedRedeemerPointerMapLength = length zipped
+      finalWits = take expectedRedeemerPointerMapLength wits
+
+      L.Redeemers constructedRedeemerPointerMap = getAnyWitnessRedeemerPointerMap zipped
+
+  annotate "Constructed redeemer pointer map"
+  annotateShow constructedRedeemerPointerMap
+  let redeemerPointerMapSize = Map.size constructedRedeemerPointerMap
+
+  cover 30 "Redeemer pointer map size more than 1" $ redeemerPointerMapSize > 1
+
+  -- Confirm we have the expected number of redeemers
+  Map.size constructedRedeemerPointerMap === expectedRedeemerPointerMapLength
+
+  let initialRedeemers =
+        [ redeemer
+        | IndexedPlutusScriptWitness _ _ swit <- finalWits
+        , let redeemer = getAnyPlutusScriptWitnessRedeemer swit
+        ]
+
+      ledgerRedeemers :: [L.Data L.ConwayEra]
+      ledgerRedeemers = map fst $ Map.elems constructedRedeemerPointerMap
+
+      convertedRedeemers = map Api.fromAlonzoData ledgerRedeemers
+
+  annotate "Initial Indexed Script Witnesses"
+  annotateShow wits
+
+  -- Confirm we have idential redeemers
+  List.sort initialRedeemers === List.sort convertedRedeemers
+
+-- | Previously toAnyWitness was not handling simple scripts correctly resulting
+-- in their exclusion in the resultant transaction.
+prop_toAnyWitness :: Property
+prop_toAnyWitness =
+  property $ do
+    let eon = AlonzoEraOnwardsConway
+    l <- forAll $ Gen.int (Range.linear 2 5)
+    witnessables <-
+      fmap List.nub $ forAll $ Gen.list (Range.singleton l) $ genMintWitnessable @L.ConwayEra
+
+    simpleScripts <-
+      fmap List.nub $
+        forAll $
+          Gen.list (Range.singleton l) $
+            genSimpleScriptMintWitness Api.ShelleyBasedEraConway
+
+    let excludeReferenceScripts = filter (not . isReferenceScript) simpleScripts
+        finalLength = List.length zipped
+        zipped = zip witnessables excludeReferenceScripts
+
+    res <-
+      evalEither $
+        legacyWitnessConversion eon $
+          zip witnessables (map Api.BuildTxWith excludeReferenceScripts)
+
+    annotateShow (extractSimpleScripts res)
+
+    cover 30 "More than one script generated" $ length res > 1
+
+    finalLength === length (extractSimpleScripts res) + length (extractPlutusScripts res)
+
+-- | Confirm `extractAllIndexedPlutusScriptWitnesses` extracts all expected script
+-- witnesses from a given transaction.
+prop_extractAllIndexedPlutusScriptWitnesses :: Property
+prop_extractAllIndexedPlutusScriptWitnesses =
+  property $ do
+    let era :: Era ConwayEra = ConwayEra
+    -- Generate plutus script witnesses for each possible plutus purpose
+    plutusScriptwitnessedTxIns <-
+      forAll $ Gen.list (Range.linear 0 3) $ Exp.genScriptWitnessedTxIn @(LedgerEra ConwayEra)
+    plutusScriptWitnessedMint <- forAll $ Exp.genScriptWitnessedTxMintValue @(LedgerEra ConwayEra)
+    plutusScriptWitnessedTxCerts <- forAll $ Exp.genScriptWitnessedTxCertificates @(LedgerEra ConwayEra)
+    plutusScriptWitnessesTxWithdrawals <-
+      forAll $ Exp.genScriptWitnessedTxWithdrawals @(LedgerEra ConwayEra)
+    plutusScriptWitnesssedTxVotingProcedures <-
+      forAll $ Exp.genScriptWitnesssedTxVotingProcedures @(LedgerEra ConwayEra)
+    plutusScriptWitnessedTxProposalProcedures <-
+      forAll $ Exp.genScriptWitnessedTxProposals @(LedgerEra ConwayEra)
+
+    -- Populate the stripped `TxBodyContent` value with our generated plutus script
+    -- witnesses
+    let txBodyContentWithPlutusWitnesses =
+          Exp.defaultTxBodyContent
+            & Exp.setTxIns plutusScriptwitnessedTxIns
+            & Exp.setTxMintValue plutusScriptWitnessedMint
+            & Exp.setTxCertificates plutusScriptWitnessedTxCerts
+            & Exp.setTxWithdrawals plutusScriptWitnessesTxWithdrawals
+            & Exp.setTxVotingProcedures plutusScriptWitnesssedTxVotingProcedures
+            & Exp.setTxProposalProcedures plutusScriptWitnessedTxProposalProcedures
+
+    extractedPlutusScriptWitnesses <-
+      evalEither $ Exp.extractAllIndexedPlutusScriptWitnesses era txBodyContentWithPlutusWitnesses
+
+    let generatedTxInWits = plutusScriptwitnessedTxIns
+        generatedTxMintWits = plutusScriptWitnessedMint
+        generatedTxCertWits = plutusScriptWitnessedTxCerts
+        generatedTxWithdrawals = plutusScriptWitnessesTxWithdrawals
+        generatedTxVotingprocedures = plutusScriptWitnesssedTxVotingProcedures
+        generatedTxProposalProcedures = plutusScriptWitnessedTxProposalProcedures
+
+    let allGeneratedPlutusScriptWitnesses =
+          mconcat
+            [ createIndexedPlutusScriptWitnesses $ Exp.extractWitnessableTxIns generatedTxInWits
+            , createIndexedPlutusScriptWitnesses $
+                map (second anyScriptWitnessToAnyWitness) $
+                  Exp.extractWitnessableMints generatedTxMintWits
+            , createIndexedPlutusScriptWitnesses $ Exp.extractWitnessableCertificates generatedTxCertWits
+            , createIndexedPlutusScriptWitnesses $ Exp.extractWitnessableWithdrawals generatedTxWithdrawals
+            , createIndexedPlutusScriptWitnesses $ Exp.extractWitnessableVotes (Just generatedTxVotingprocedures)
+            , createIndexedPlutusScriptWitnesses $
+                Exp.extractWitnessableProposals (Just generatedTxProposalProcedures)
+            ]
+
+    H.note_ "All generated script witnesses"
+    H.noteShow_ allGeneratedPlutusScriptWitnesses
+    H.note_ "Extracted indexed plutus script witnesses"
+    H.noteShow_ extractedPlutusScriptWitnesses
+
+    length allGeneratedPlutusScriptWitnesses === length extractedPlutusScriptWitnesses
+
+-- | 'toPlutusScriptPurposeIndex' classifies ledger redeemer pointers the same
+-- way as the older 'Api.toScriptIndex', for every purpose category the two
+-- share, at every era with plutus scripts. 'GuardingScript' (Dijkstra's new
+-- purpose) has no old-API counterpart -- 'Api.toScriptIndex' errors on it --
+-- so it is checked separately in 'prop_toPlutusScriptPurposeIndex_guarding'.
+prop_toPlutusScriptPurposeIndex_matches_toScriptIndex :: Property
+prop_toPlutusScriptPurposeIndex_matches_toScriptIndex = property $ do
+  ix <- forAll $ Gen.word32 (Range.linear 0 1000)
+  checkAlonzoFamily AlonzoEraOnwardsAlonzo ix
+  checkAlonzoFamily AlonzoEraOnwardsBabbage ix
+  checkConwayFamily AlonzoEraOnwardsConway ix
+  checkConwayFamily AlonzoEraOnwardsDijkstra ix
+ where
+  verify
+    :: AlonzoEraOnwards era
+    -> L.PlutusPurpose L.AsIx (Api.ShelleyLedgerEra era)
+    -> PropertyT IO ()
+  verify eon purpose =
+    Api.toScriptIndex eon purpose
+      === toOldEquivalent (toPlutusScriptPurposeIndex (Api.convert eon) purpose)
+
+  checkAlonzoFamily
+    :: forall era
+     . L.AlonzoEraScript (Api.ShelleyLedgerEra era)
+    => AlonzoEraOnwards era -> Word32 -> PropertyT IO ()
+  checkAlonzoFamily eon ix = do
+    verify eon (L.mkSpendingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+    verify eon (L.mkMintingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+    verify eon (L.mkCertifyingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+    verify eon (L.mkWithdrawingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+
+  checkConwayFamily
+    :: forall era
+     . L.ConwayEraScript (Api.ShelleyLedgerEra era)
+    => AlonzoEraOnwards era -> Word32 -> PropertyT IO ()
+  checkConwayFamily eon ix = do
+    checkAlonzoFamily eon ix
+    verify eon (L.mkVotingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+    verify eon (L.mkProposingPurpose @(Api.ShelleyLedgerEra era) (L.AsIx ix))
+
+  toOldEquivalent :: (PlutusScriptPurpose, Word32) -> Api.ScriptWitnessIndex
+  toOldEquivalent (SpendingScript, i) = Api.ScriptWitnessIndexTxIn i
+  toOldEquivalent (MintingScript, i) = Api.ScriptWitnessIndexMint i
+  toOldEquivalent (CertifyingScript, i) = Api.ScriptWitnessIndexCertificate i
+  toOldEquivalent (WithdrawingScript, i) = Api.ScriptWitnessIndexWithdrawal i
+  toOldEquivalent (VotingScript, i) = Api.ScriptWitnessIndexVoting i
+  toOldEquivalent (ProposingScript, i) = Api.ScriptWitnessIndexProposing i
+  toOldEquivalent (GuardingScript, i) =
+    error $ "no old-API equivalent for GuardingScript " <> show i
+
+-- | The Dijkstra-only 'GuardingScript' purpose has no 'Api.toScriptIndex'
+-- counterpart ('Api.toScriptIndexDijkstra' errors on it), so it is checked
+-- directly here instead of alongside the shared categories above.
+prop_toPlutusScriptPurposeIndex_guarding :: Property
+prop_toPlutusScriptPurposeIndex_guarding = property $ do
+  ix <- forAll $ Gen.word32 (Range.linear 0 1000)
+  let purpose = L.mkGuardingPurpose @(Api.ShelleyLedgerEra Api.DijkstraEra) (L.AsIx ix)
+  toPlutusScriptPurposeIndex Api.ShelleyBasedEraDijkstra purpose === (GuardingScript, ix)
+
+-- | We exclude reference scripts because they do not end up in the resulting transaction.
+isReferenceScript :: Api.Witness witctx era -> Bool
+isReferenceScript (Api.ScriptWitness _ (Api.SimpleScriptWitness _ (Api.SReferenceScript{}))) = True
+isReferenceScript (Api.ScriptWitness _ (Api.PlutusScriptWitness _ _ (Api.PReferenceScript{}) _ _ _)) = False
+isReferenceScript _ = False
+
+extractSimpleScripts
+  :: [(Witnessable 'MintItem era, AnyWitness era)]
+  -> [SimpleScriptOrReferenceInput era]
+extractSimpleScripts wits =
+  [s | (_, AnySimpleScriptWitness s) <- wits]
+
+extractPlutusScripts :: [(Witnessable witctz era, AnyWitness era)] -> [AnyWitness era]
+extractPlutusScripts wits =
+  [AnyPlutusScriptWitness s | (_, AnyPlutusScriptWitness s) <- wits]
+
+tests :: TestTree
+tests =
+  testGroup
+    "Test.Cardano.Api.Transaction.Body.Plutus.Scripts"
+    [ testProperty "prop_compare_plutus_script_hashes" prop_compare_plutus_script_hashes
+    , testProperty
+        "prop_roundtrip_plutus_script_in_era_cbor"
+        prop_roundtrip_plutus_script_in_era_cbor
+    , testProperty
+        "prop_roundtrip_any_plutus_script_text_envelope"
+        prop_roundtrip_any_plutus_script_text_envelope
+    , testProperty
+        "prop_extractAllIndexedPlutusScriptWitnesses"
+        prop_extractAllIndexedPlutusScriptWitnesses
+    , testProperty "prop_getAnyWitnessRedeemerPointerMap" prop_getAnyWitnessRedeemerPointerMap
+    , testProperty "prop_toAnyWitness" prop_toAnyWitness
+    , testProperty
+        "prop_toPlutusScriptPurposeIndex_matches_toScriptIndex"
+        prop_toPlutusScriptPurposeIndex_matches_toScriptIndex
+    , testProperty
+        "prop_toPlutusScriptPurposeIndex_guarding"
+        prop_toPlutusScriptPurposeIndex_guarding
+    ]

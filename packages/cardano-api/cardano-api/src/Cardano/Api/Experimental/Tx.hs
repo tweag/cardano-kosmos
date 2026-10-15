@@ -1,0 +1,478 @@
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE InstanceSigs #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# OPTIONS_GHC -Wno-deprecations #-}
+
+module Cardano.Api.Experimental.Tx
+  ( -- * Creating transactions using the new API
+
+    -- |
+    -- Both the old and new APIs can be used to create transactions, and
+    -- it is possible to transform a transaction from one format to the other
+    -- as they share the same representation. However, the focus will shift
+    -- towards using the new API, while the old API will be deprecated to ensure
+    -- simplicity, closer alignment with the ledger, and easier maintenance.
+    --
+    -- In both the new and old APIs, constructing a transaction requires creating
+    -- a 'TxBodyContent', along with at least one witness (for example, a
+    -- 'ShelleyWitnessSigningKey') to sign the transaction.
+    -- This process remains unchanged.
+    --
+    -- To learn how to create a transaction using the old API, see the
+    -- "Cardano.Api.Tx.Internal.Body" documentation.
+    --
+    -- In the examples below, the following qualified modules are used:
+    --
+    -- @
+    -- import qualified Cardano.Api as Api                -- the general `cardano-api` exports (including the old API)
+    -- import qualified Cardano.Api.Script as Script      -- types related to scripts (Plutus and native)
+    -- import qualified Cardano.Api.Ledger as Ledger      -- cardano-ledger re-exports
+    -- import qualified Cardano.Api.Experimental as Exp   -- the experimental API
+    -- @
+    --
+    -- For instructions on how to do this, refer to the @Test.Cardano.Api.Experimental@ documentation.
+
+    -- ** Creating a 'TxBodyContent'
+
+    -- |
+    -- Regardless of whether the experimental or the traditional API is used, creating a 'TxBodyContent'
+    -- is necessary.
+    --
+    -- You can see how to do this in the documentation of the "Cardano.Api.Tx.Internal.Body" module.
+
+    -- ** Balancing a transaction
+
+    -- |
+    -- If a UTXO has exactly 12 ada, the transaction could be constructed as described in
+    -- "Cardano.Api.Tx.Internal.Body", and it would be valid. However:
+    --
+    --   * Ada may be wasted
+    --   * The UTXO that we intend to spend may not contain exactly 12 ada
+    --   * The transaction may not be this simple.
+    --
+    -- For these reasons, it is recommended to balance the transaction before proceeding with
+    -- signing and submitting.
+    --
+    -- For instructions on how to balance a transaction, refer to the "Cardano.Api.Tx.Internal.Fee" documentation.
+
+    -- ** Creating a 'ShelleyWitnessSigningKey'
+
+    -- |
+    -- Signing a transaction requires a witness, such as a 'ShelleyWitnessSigningKey'.
+    --
+    -- For instructions on creating a 'ShelleyWitnessSigningKey' refer to the "Cardano.Api.Tx.Internal.Sign" documentation.
+
+    -- ** Creating a transaction using the new API
+
+    -- |
+    -- This section outlines how to create a transaction using the new API. First,
+    -- create an 'UnsignedTx' using the 'makeUnsignedTx' function and the 'Era' and
+    -- 'TxBodyContent' that we defined earlier:
+    --
+    -- @
+    -- case Exp.makeUnsignedTx era txBodyContent of
+    --   Left err -> error (show err)
+    --   Right unsignedTx -> ...
+    -- @
+    --
+    -- Next, use the key witness to sign the unsigned transaction with the 'makeKeyWitness' function:
+    --
+    -- @
+    -- let transactionWitness = Exp.makeKeyWitness era unsignedTx (Api.WitnessPaymentKey signingKey)
+    -- @
+    --
+    -- Finally, sign the transaction using the 'signTx' function:
+    --
+    -- @
+    -- let newApiSignedTx :: Ledger.Tx (Exp.LedgerEra Exp.ConwayEra) = Exp.signTx era [] [transactionWitness] unsignedTx
+    -- @
+    --
+    -- The empty list represents the bootstrap witnesses, which are not needed in this case.
+    --
+    -- The transaction is now signed.
+
+    -- ** Converting a transaction from the new API to the old API
+
+    -- |
+    -- A transaction created with the new API can be easily converted to the old API by
+    -- wrapping it with the 'ShelleyTx' constructor:
+    --
+    -- @
+    -- let oldStyleTx :: Api.Tx Api.ConwayEra = ShelleyTx sbe newApiSignedTx
+    -- @
+
+    -- ** Inspecting transactions
+
+    -- |
+    -- When using a 'Tx' created with the experimental API, the 'TxBody' and
+    -- 'TxWits' can be extracted using the 'txBody' and 'txWits' lenses from
+    -- "Cardano.Api.Ledger" respectively.
+
+    -- * Contents
+    UnsignedTx (..)
+  , SignedTx (..)
+  , MakeUnsignedTxError (..)
+  , makeUnsignedTx
+  , makeKeyWitness
+  , signTx
+  , convertTxBodyToUnsignedTx
+  , hashTxBody
+  , getUnsignedTxFee
+
+    -- * TxBodyContent
+
+    -- | Body content is one type, 'BodyContent', indexed by the transaction
+    -- level. 'TxBodyContent' is a top-level body and 'SubTxBodyContent' is a
+    -- Dijkstra sub-transaction body. A setter typed @BodyContent l era@ works
+    -- on both; a setter typed @TxBodyContent era@ sets a field that only a
+    -- top-level body has.
+  , BodyContent (..)
+  , TxBodyContent
+  , SubTxBodyContent
+  , defaultTxBodyContent
+  , defaultSubTxBodyContent
+  , mkTxCertificates
+  , mkTxVotingProcedures
+  , mkTxProposalProcedures
+
+    -- ** Fields of a top-level body
+  , txIns
+  , txInsCollateral
+  , txInsReference
+  , txOuts
+  , txTotalCollateral
+  , txReturnCollateral
+  , txFee
+  , txValidityLowerBound
+  , txValidityUpperBound
+  , txMetadata
+  , txAuxScripts
+  , txExtraKeyWits
+  , txProtocolParams
+  , txWithdrawals
+  , txCertificates
+  , txMintValue
+  , txScriptValidity
+  , txProposalProcedures
+  , txVotingProcedures
+  , txCurrentTreasuryValue
+  , txTreasuryDonation
+  , txSupplementalDatums
+  , txGuards
+  , txSubTransactions
+  , txRequiredTopLevelGuards
+  , txDirectDeposits
+  , txAccountBalanceIntervals
+  , txStartingAccountBalanceIntervals
+
+    -- ** Fields of a sub-transaction body
+  , subTxIns
+  , subTxInsReference
+  , subTxOuts
+  , subTxValidityLowerBound
+  , subTxValidityUpperBound
+  , subTxMetadata
+  , subTxAuxScripts
+  , subTxProtocolParams
+  , subTxWithdrawals
+  , subTxCertificates
+  , subTxMintValue
+  , subTxProposalProcedures
+  , subTxVotingProcedures
+  , subTxCurrentTreasuryValue
+  , subTxTreasuryDonation
+  , subTxSupplementalDatums
+  , subTxGuards
+  , subTxRequiredTopLevelGuards
+  , subTxDirectDeposits
+  , subTxAccountBalanceIntervals
+
+    -- ** Setters shared by both levels
+  , modTxOuts
+  , setTxAuxScripts
+  , setTxCertificates
+  , setTxCurrentTreasuryValue
+  , setTxIns
+  , setTxInsReference
+  , setTxMetadata
+  , setTxMintValue
+  , setTxOuts
+  , setTxProposalProcedures
+  , setTxProtocolParams
+  , setTxSupplementalDatums
+  , setTxTreasuryDonation
+  , setTxValidityLowerBound
+  , setTxValidityUpperBound
+  , setTxVotingProcedures
+  , setTxWithdrawals
+  , setTxGuards
+  , setTxRequiredTopLevelGuards
+  , setTxDirectDeposits
+  , setTxAccountBalanceIntervals
+
+    -- ** Setters for top-level bodies only
+  , setTxReturnCollateral
+  , setTxTotalCollateral
+  , setTxExtraKeyWits
+  , setTxFee
+  , setTxInsCollateral
+  , setTxScriptValidity
+  , setTxSubTransactions
+  , setTxSignedSubTransactions
+  , setTxStartingAccountBalanceIntervals
+
+    -- * Sub-transactions (Dijkstra era onwards)
+  , UnsignedSubTx (..)
+  , SignedSubTx (..)
+  , makeUnsignedSubTx
+  , makeSubTxKeyWitness
+  , signSubTx
+  , makeSignedSubTx
+  , getUnsignedSubTxId
+  , getSignedSubTxId
+  , AsType (AsUnsignedSubTx, AsSignedSubTx)
+
+    -- * TxBodyContent sub type
+  , TxCertificates (..)
+  , TxMintValue (..)
+  , TxOut (..)
+  , TxProposalProcedures (..)
+  , TxVotingProcedures (..)
+  , TxWithdrawals (..)
+  , TxReturnCollateral (..)
+  , TxTotalCollateral (..)
+  , TxExtraKeyWitnesses (..)
+  , TxInsReference (..)
+
+    -- * Witness
+
+    -- ** Any witness (key, simple script, plutus script).
+  , AnyWitness (..)
+  , getAnyWitnessScript
+  , getAnyWitnessReferenceInput
+  , getAnyWitnessPlutusLanguage
+  , getAnyWitnessScriptData
+
+    -- ** All the parts that constitute a plutus script witness but also including simple scripts
+  , TxScriptWitnessRequirements (..)
+
+    -- ** Plutus related
+  , Datum (..)
+  , getDatums
+  , extractDatumsAndHashes
+
+    -- ** Collecting plutus script witness related transaction requirements.
+  , collectPlutusScriptHashes
+  , extractAllIndexedPlutusScriptWitnesses
+  , getTxScriptWitnessesRequirements
+  , obtainMonoidConstraint
+
+    -- * Transaction evaluation
+  , evaluateTransaction
+  , evaluateSignedTx
+  , TxEvaluationResult (..)
+  , evaluateTransactionExecutionUnits
+
+    -- * Balancing transactions
+  , calculateMinimumUTxO
+  , makeTransactionBodyAutoBalance
+  , TxBodyErrorAutoBalance (..)
+  , TxFeeEstimationError (..)
+
+    -- ** Internal functions
+  , extractExecutionUnits
+  , getTxScriptWitnessRequirements
+  , extractWitnessableTxIns
+  , extractWitnessableMints
+  , extractWitnessableCertificates
+  , extractWitnessableWithdrawals
+  , extractWitnessableVotes
+  , extractWitnessableProposals
+  )
+where
+
+import Cardano.Api.Address (StakeCredential)
+import Cardano.Api.Certificate.Internal (PoolId)
+import Cardano.Api.Era.Internal.Core qualified as Api
+import Cardano.Api.Era.Internal.Eon.ShelleyBasedEra
+import Cardano.Api.Experimental.Era
+import Cardano.Api.Experimental.Tx.Internal.AnyWitness
+import Cardano.Api.Experimental.Tx.Internal.BodyContent
+import Cardano.Api.Experimental.Tx.Internal.Fee
+import Cardano.Api.Experimental.Tx.Internal.SubTransaction
+import Cardano.Api.Experimental.Tx.Internal.TxScriptWitnessRequirements
+import Cardano.Api.Experimental.Tx.Internal.Type
+import Cardano.Api.HasTypeProxy (HasTypeProxy (..), Proxy, asType)
+import Cardano.Api.Ledger.Internal.Reexport qualified as L
+import Cardano.Api.Plutus.Internal.Script qualified as Api
+import Cardano.Api.Pretty (docToString, pretty)
+import Cardano.Api.Query.Internal.Type.QueryInMode (LedgerEpochInfo, SystemStart)
+import Cardano.Api.Serialise.Raw
+  ( SerialiseAsRawBytes (..)
+  , SerialiseAsRawBytesError (SerialiseAsRawBytesError)
+  )
+import Cardano.Api.Tx.Internal.Body qualified as Api
+import Cardano.Api.Tx.Internal.Sign
+
+import Cardano.Ledger.Alonzo.Core qualified as Ledger
+import Cardano.Ledger.Api qualified as L
+import Cardano.Ledger.Binary qualified as Ledger
+
+import Control.Exception (displayException)
+import Data.Bifunctor (bimap)
+import Data.ByteString.Lazy (fromStrict)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import GHC.Stack
+import Lens.Micro
+
+getUnsignedTxFee :: UnsignedTx era -> L.Coin
+getUnsignedTxFee (UnsignedTx unsignedTx) =
+  let txbody = unsignedTx ^. L.bodyTxL
+   in txbody ^. L.feeTxBodyL
+
+makeKeyWitness
+  :: HasCallStack
+  => Era era
+  -> UnsignedTx (LedgerEra era)
+  -> ShelleyWitnessSigningKey
+  -> L.WitVKey L.Witness
+makeKeyWitness era (UnsignedTx unsignedTx) wsk =
+  obtainCommonConstraints era $
+    makeShelleyKeyWitnessFromHash (hashTxBody (unsignedTx ^. L.bodyTxL)) wsk
+
+-- | A transaction that has been witnesssed
+data SignedTx era
+  = L.EraTx (ShelleyLedgerEra era) => SignedTx (Ledger.Tx Ledger.TopTx (ShelleyLedgerEra era))
+
+deriving instance Eq (SignedTx era)
+
+deriving instance Show (SignedTx era)
+
+instance HasTypeProxy era => HasTypeProxy (SignedTx era) where
+  data AsType (SignedTx era) = AsSignedTx (AsType era)
+  proxyToAsType :: Proxy (SignedTx era) -> AsType (SignedTx era)
+  proxyToAsType _ = AsSignedTx (asType @era)
+
+instance
+  ( HasTypeProxy era
+  , L.EraTx (ShelleyLedgerEra era)
+  )
+  => SerialiseAsRawBytes (SignedTx era)
+  where
+  serialiseToRawBytes (SignedTx tx) =
+    Ledger.serialize' (Ledger.eraProtVerHigh @(ShelleyLedgerEra era)) tx
+  deserialiseFromRawBytes _ =
+    bimap wrapError SignedTx
+      . Ledger.decodeFullAnnotator
+        (Ledger.eraProtVerHigh @(ShelleyLedgerEra era))
+        "SignedTx"
+        Ledger.decCBOR
+      . fromStrict
+   where
+    wrapError
+      :: Ledger.DecoderError -> SerialiseAsRawBytesError
+    wrapError = SerialiseAsRawBytesError . displayException
+
+signTx
+  :: Era era
+  -> [L.BootstrapWitness]
+  -> [L.WitVKey L.Witness]
+  -> UnsignedTx (LedgerEra era)
+  -> SignedTx era
+signTx era bootstrapWits shelleyKeyWits (UnsignedTx unsigned) =
+  obtainCommonConstraints era $
+    SignedTx $
+      addKeyWitnesses bootstrapWits shelleyKeyWits unsigned
+
+-- | Like 'evaluateTransaction' but accepts a 'SignedTx' directly.
+evaluateSignedTx
+  :: forall era
+   . IsEra era
+  => SystemStart
+  -- ^ Start time of the blockchain
+  -> LedgerEpochInfo
+  -- ^ Epoch info for slot/time conversions
+  -> L.PParams (LedgerEra era)
+  -- ^ Protocol parameters
+  -> Set PoolId
+  -- ^ Registered stake pools
+  -> Map StakeCredential L.Coin
+  -- ^ Stake delegation deposits
+  -> L.UTxO (LedgerEra era)
+  -- ^ UTxO set for the transaction inputs
+  -> SignedTx era
+  -- ^ Signed transaction to evaluate
+  -> TxEvaluationResult (LedgerEra era)
+evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits utxo (SignedTx tx) =
+  -- obtainCommonConstraints is needed here to bring ShelleyLedgerEra era ~ LedgerEra era
+  -- into scope, unifying SignedTx's ShelleyLedgerEra with evaluateTransaction's LedgerEra.
+  obtainCommonConstraints (useEra @era) $
+    evaluateTransaction
+      systemStart
+      epochInfo
+      protocolParams
+      poolIds
+      stakeDelegDeposits
+      utxo
+      tx
+
+-- Compatibility related. Will be removed once the old api has been deprecated and deleted.
+
+convertTxBodyToUnsignedTx
+  :: HasCallStack => ShelleyBasedEra era -> TxBody era -> UnsignedTx (LedgerEra era)
+convertTxBodyToUnsignedTx sbe txbody =
+  Api.forEraInEon
+    (Api.toCardanoEra sbe)
+    (error $ "convertTxBodyToUnsignedTx: Error - unsupported era " <> docToString (pretty sbe))
+    ( \w -> do
+        let ShelleyTx _ unsignedLedgerTx = makeSignedTransaction [] txbody
+        obtainCommonConstraints w $ UnsignedTx unsignedLedgerTx
+    )
+
+-- | Collect all plutus script hashes that are needed to validate the given transaction
+-- and return them in a map with their corresponding 'ScriptWitnessIndex' as key.
+collectPlutusScriptHashes
+  :: forall era
+   . IsEra era
+  => UnsignedTx (LedgerEra era)
+  -> L.UTxO (LedgerEra era)
+  -> Map Api.ScriptWitnessIndex Api.ScriptHash
+collectPlutusScriptHashes (UnsignedTx tx) utxo =
+  let sNeeded :: L.AlonzoScriptsNeeded (LedgerEra era) = obtainCommonConstraints (useEra @era) $ L.getScriptsNeeded utxo (tx ^. L.bodyTxL)
+   in getPurposes @era sNeeded
+
+getPurposes
+  :: forall era
+   . IsEra era
+  => L.AlonzoScriptsNeeded (LedgerEra era)
+  -> Map Api.ScriptWitnessIndex Api.ScriptHash
+getPurposes (L.AlonzoScriptsNeeded purposes) =
+  Map.fromList $
+    Prelude.map
+      ( bimap
+          ( obtainCommonConstraints (useEra @era) $
+              Api.toScriptIndex (convert (useEra @era))
+                . purposeAsIxItemToAsIx
+          )
+          Api.fromShelleyScriptHash
+      )
+      purposes
+
+purposeAsIxItemToAsIx
+  :: forall era
+   . IsEra era
+  => L.PlutusPurpose L.AsIxItem (LedgerEra era)
+  -> L.PlutusPurpose L.AsIx (LedgerEra era)
+purposeAsIxItemToAsIx purpose =
+  obtainCommonConstraints (useEra @era) $ L.hoistPlutusPurpose L.toAsIx purpose

@@ -1,0 +1,766 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeOperators #-}
+
+module Cardano.Api.Genesis.Internal
+  ( ShelleyGenesis (..)
+  , shelleyGenesisDefaults
+  , alonzoGenesisDefaults
+  , conwayGenesisDefaults
+  , dijkstraGenesisDefaults
+
+    -- ** Configuration
+  , ByronGenesisConfig
+  , ShelleyGenesisConfig
+  , AlonzoGenesisConfig
+  , ConwayGenesisConfig
+  , ShelleyConfig (..)
+  , GenesisHashByron (..)
+  , GenesisHashShelley (..)
+  , GenesisHashAlonzo (..)
+  , GenesisHashConway (..)
+
+    -- ** Files
+  , ByronGenesisFile
+  , ShelleyGenesisFile
+  , AlonzoGenesisFile
+  , ConwayGenesisFile
+
+    -- ** Defaults
+  , defaultV1CostModel
+
+    -- * Utilities
+  , unsafeBoundedRational
+  )
+where
+
+import Cardano.Api.IO
+
+import Cardano.Chain.Genesis qualified
+import Cardano.Crypto.Hash.Blake2b qualified
+import Cardano.Crypto.Hash.Class qualified
+import Cardano.Ledger.Alonzo.Genesis (AlonzoExtraConfig (..), AlonzoGenesis (..))
+import Cardano.Ledger.Alonzo.Scripts (ExUnits (..), Prices (..))
+import Cardano.Ledger.Api (CoinPerWord (..))
+import Cardano.Ledger.BaseTypes as Ledger
+import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Coin qualified as L
+import Cardano.Ledger.Conway.Genesis (ConwayGenesis (..))
+import Cardano.Ledger.Conway.PParams
+  ( DRepVotingThresholds (..)
+  , PoolVotingThresholds (..)
+  , UpgradeConwayPParams (..)
+  )
+import Cardano.Ledger.Dijkstra.Genesis (DijkstraGenesis (..))
+import Cardano.Ledger.Dijkstra.PParams (UpgradeDijkstraPParams (..))
+import Cardano.Ledger.Plutus (Language (..))
+import Cardano.Ledger.Plutus qualified as L
+import Cardano.Ledger.Plutus.CostModels (mkCostModelsLenient)
+import Cardano.Ledger.Plutus.ExUnits (OrdExUnits (..))
+import Cardano.Ledger.Shelley.Core
+import Cardano.Ledger.Shelley.Genesis
+  ( NominalDiffTimeMicro
+  , ShelleyGenesis (..)
+  , emptyGenesisStaking
+  )
+import Cardano.Ledger.Shelley.Genesis qualified as Ledger
+import Cardano.Slotting.Slot (SlotInterval (..))
+import PlutusCore.Evaluation.Machine.BuiltinCostModel
+import PlutusCore.Evaluation.Machine.CostModelInterface
+import PlutusCore.Evaluation.Machine.ExBudgetingDefaults
+import PlutusCore.Evaluation.Machine.MachineParameters
+import PlutusLedgerApi.Common (IsParamName, readParamName)
+import PlutusLedgerApi.V3 qualified as V3
+
+import Control.Monad
+import Control.Monad.Trans.Fail.String (errorFail)
+import Data.ByteString (ByteString)
+import Data.Default.Class qualified as DefaultClass
+import Data.Functor.Identity
+import Data.Int (Int64)
+import Data.ListMap qualified as ListMap
+import Data.Map.Strict qualified as M
+import Data.Map.Strict qualified as Map
+import Data.Maybe
+import Data.Ratio
+import Data.Text (Text)
+import Data.Time qualified as Time
+import Data.Typeable
+import GHC.Exts (IsList (..))
+import GHC.Stack (HasCallStack)
+import Lens.Micro
+
+import Test.Cardano.Ledger.Plutus (testingCostModel)
+
+import Barbies (bmap)
+import UntypedPlutusCore.Evaluation.Machine.Cek.CekMachineCosts
+
+data ShelleyConfig = ShelleyConfig
+  { scConfig :: !Ledger.ShelleyGenesis
+  , scGenesisHash :: !GenesisHashShelley
+  }
+
+newtype GenesisHashByron = GenesisHashByron
+  { unGenesisHashByron :: Text
+  }
+  deriving newtype (Eq, Show)
+
+newtype GenesisHashShelley = GenesisHashShelley
+  { unGenesisHashShelley
+      :: Cardano.Crypto.Hash.Class.Hash Cardano.Crypto.Hash.Blake2b.Blake2b_256 ByteString
+  }
+  deriving newtype (Eq, Show)
+
+newtype GenesisHashAlonzo = GenesisHashAlonzo
+  { unGenesisHashAlonzo
+      :: Cardano.Crypto.Hash.Class.Hash Cardano.Crypto.Hash.Blake2b.Blake2b_256 ByteString
+  }
+  deriving newtype (Eq, Show)
+
+newtype GenesisHashConway = GenesisHashConway
+  { unGenesisHashConway
+      :: Cardano.Crypto.Hash.Class.Hash Cardano.Crypto.Hash.Blake2b.Blake2b_256 ByteString
+  }
+  deriving newtype (Eq, Show)
+
+type ByronGenesisConfig = Cardano.Chain.Genesis.Config
+
+type ShelleyGenesisConfig = ShelleyConfig
+
+type AlonzoGenesisConfig = AlonzoGenesis
+
+type ConwayGenesisConfig = ConwayGenesis
+
+type ByronGenesisFile = File ByronGenesisConfig
+
+type ShelleyGenesisFile = File ShelleyGenesisConfig
+
+type AlonzoGenesisFile = File AlonzoGenesisConfig
+
+type ConwayGenesisFile = File ConwayGenesisConfig
+
+-- | Some reasonable starting defaults for constructing a 'ShelleyGenesis'.
+--
+-- You must override at least the following fields for this to be useful:
+--
+-- * 'sgSystemStart' the time of the first block
+-- * 'sgNetworkMagic' to a suitable testnet or mainnet network magic number.
+-- * 'sgGenDelegs' to have some initial nodes
+-- * 'sgInitialFunds' to have any money in the system
+-- * 'sgMaxLovelaceSupply' must be at least the sum of the 'sgInitialFunds'
+--   but more if you want to allow for rewards.
+shelleyGenesisDefaults :: ShelleyGenesis
+shelleyGenesisDefaults =
+  ShelleyGenesis
+    { -- parameters for this specific chain
+      sgSystemStart = zeroTime
+    , sgNetworkMagic = 42
+    , sgNetworkId = Ledger.Testnet
+    , -- consensus protocol parameters
+      sgSlotLength = 1.0 :: NominalDiffTimeMicro -- 1s slots
+    , sgActiveSlotsCoeff = unsafeBR (1 % 20) -- f ; 1/f = 20s block times on average
+    , sgSecurityParam = k
+    , sgEpochLength = Ledger.EpochSize (unNonZero k * 10 * 20) -- 10k/f
+    , sgSlotsPerKESPeriod = 60 * 60 * 36 -- 1.5 days with 1s slots
+    , sgMaxKESEvolutions = 60 -- 90 days
+    , sgUpdateQuorum = 5 -- assuming 7 genesis keys
+    , -- ledger protocol parameters
+      sgProtocolParams =
+        emptyPParams
+          & ppDL .~ maxBound
+          & ppMaxBHSizeL .~ 1100 -- TODO: compute from crypto
+          & ppMaxBBSizeL .~ 64 * 1024 -- max 64kb blocks
+          & ppMaxTxSizeL .~ 16 * 1024 -- max 16kb txs
+          & ppEMaxL .~ EpochInterval 18
+          & ppTxFeePerByteL .~ CoinPerByte (L.CompactCoin 1) -- The linear factor for the minimum fee calculation
+          & ppTxFeeFixedL .~ Coin 0 -- The constant factor for the minimum fee calculation
+          -- pot = tx_fees + ρ * remaining_reserves
+          & ppRhoL .~ unsafeBR (1 % 10) -- How much of reserves goes into pot
+          & ppTauL .~ unsafeBR (1 % 10) -- τ * remaining_reserves is sent to treasury every epoch
+          & ppKeyDepositL .~ L.Coin 400_000 -- require a non-zero deposit when registering keys
+    , -- genesis keys and initial funds
+      sgGenDelegs = M.empty
+    , sgStaking = emptyGenesisStaking
+    , sgInitialFunds = ListMap.empty
+    , sgMaxLovelaceSupply = 0
+    , sgExtraConfig = SJust DefaultClass.def
+    }
+ where
+  k = knownNonZeroBounded @2160
+  zeroTime = Time.UTCTime (Time.fromGregorian 1970 1 1) 0 -- tradition
+  unsafeBR :: (HasCallStack, Typeable r, BoundedRational r) => Rational -> r
+  unsafeBR = unsafeBoundedRational
+
+dijkstraGenesisDefaults :: DijkstraGenesis
+dijkstraGenesisDefaults =
+  -- copied from: https://github.com/IntersectMBO/cardano-ledger/blob/232511b0fa01cd848cd7a569d1acc322124cf9b8/eras/dijkstra/impl/testlib/Test/Cardano/Ledger/Dijkstra/ImpTest.hs#L121
+  DijkstraGenesis
+    { dgUpgradePParams =
+        UpgradeDijkstraPParams
+          { udppMaxRefScriptSizePerBlock = 1024 * 1024 -- 1MiB
+          , udppMaxRefScriptSizePerTx = 200 * 1024 -- 200KiB
+          , udppRefScriptCostStride = knownNonZeroBounded @25600 -- 25 KiB
+          , udppRefScriptCostMultiplier = fromJust $ boundRational 1.2
+          , udppMaxPledgeLeverage = MaxPledgeLeverage SNothing
+          , udppMinPoolMargin = fromJust $ boundRational 0.015
+          , udppPlutusV4CostModel = testingCostModel PlutusV4
+          , -- Feasible values from CIP-164 Table 7
+            udppLeiosAnnouncementPeriodLength = Milliseconds32 1_000 -- L_hdr
+          , udppLeiosVotePeriodLength = Milliseconds32 4_000 -- L_vote
+          , udppLeiosDiffusionPeriodLength = Milliseconds32 7_000 -- L_diff
+          , udppLeiosCommitteeSize = 900 -- N_c
+          , udppLeiosQuorumStakeThreshold = fromJust $ boundRational 0.75 -- tau
+          , udppMaxEndorserBlockReferencesSize = 512 * 1024 -- 512 KiB
+          , udppMaxEndorserBlockTxsSize = 12 * 1024 * 1024 -- 12 MiB
+          , udppMaxEndorserBlockExUnits = OrdExUnits $ ExUnits 7_000_000_000 2_000_000_000_000
+          , udppMaxRefScriptSizePerEndorserBlock = 12 * 1024 * 1024 -- 12 MiB
+          , udppPerasMinCandidateBlockAge = SlotInterval 90
+          , udppPerasHealingFactor = fromJust $ boundRational 0.5
+          , udppPerasCertBoost = 15
+          , udppPerasTargetCommitteeSize = 800
+          , udppPerasBootstrapRound = SJust 0
+          , udppPerasQuorumThresholdSafetyMargin = fromJust $ boundRational 0.05
+          , -- No pricing logic uses these yet, they are enabled by a later
+            -- intra-era hard fork within the Dijkstra era.
+            udppRefInputsCostPerMultiAssetPolicy = Coin 0
+          , udppRefInputsCostPerDatumByte = CoinPerByte (L.CompactCoin 0)
+          }
+    }
+
+-- | Some reasonable starting defaults for constructing a 'ConwayGenesis'.
+-- Based on https://github.com/IntersectMBO/cardano-node/blob/master/cardano-testnet/src/Testnet/Defaults.hs
+conwayGenesisDefaults :: ConwayGenesis
+conwayGenesisDefaults =
+  ConwayGenesis
+    { cgUpgradePParams = defaultUpgradeConwayParams
+    , cgConstitution = DefaultClass.def
+    , cgCommittee = DefaultClass.def
+    , cgDelegs = mempty
+    , cgInitialDReps = mempty
+    , cgExtraConfig = SJust DefaultClass.def
+    }
+ where
+  defaultUpgradeConwayParams :: UpgradeConwayPParams Identity
+  defaultUpgradeConwayParams =
+    UpgradeConwayPParams
+      { ucppPoolVotingThresholds = defaultPoolVotingThresholds
+      , ucppGovActionLifetime = EpochInterval 1
+      , ucppGovActionDeposit = Coin 1_000_000
+      , ucppDRepVotingThresholds = defaultDRepVotingThresholds
+      , ucppDRepDeposit = Coin 1_000_000
+      , ucppDRepActivity = EpochInterval 100
+      , ucppCommitteeMinSize = 0
+      , ucppCommitteeMaxTermLength = EpochInterval 200
+      , ucppMinFeeRefScriptCostPerByte = 0 %! 1 -- TODO: set to correct value after benchmarking
+      , ucppPlutusV3CostModel = testingCostModelV3
+      }
+   where
+    defaultPoolVotingThresholds :: PoolVotingThresholds
+    defaultPoolVotingThresholds =
+      PoolVotingThresholds
+        { pvtPPSecurityGroup = 1 %! 2
+        , pvtMotionNoConfidence = 1 %! 2
+        , pvtHardForkInitiation = 1 %! 2
+        , pvtCommitteeNormal = 1 %! 2
+        , pvtCommitteeNoConfidence = 1 %! 2
+        }
+
+    defaultDRepVotingThresholds :: DRepVotingThresholds
+    defaultDRepVotingThresholds =
+      DRepVotingThresholds
+        { dvtUpdateToConstitution = 0 %! 1
+        , dvtTreasuryWithdrawal = 1 %! 2
+        , dvtPPTechnicalGroup = 1 %! 2
+        , dvtPPNetworkGroup = 1 %! 2
+        , dvtPPGovGroup = 1 %! 2
+        , dvtPPEconomicGroup = 1 %! 2
+        , dvtMotionNoConfidence = 0 %! 1
+        , dvtHardForkInitiation = 1 %! 2
+        , dvtCommitteeNormal = 1 %! 2
+        , dvtCommitteeNoConfidence = 0 %! 1
+        }
+    testingCostModelV3 :: HasCallStack => L.CostModel
+    testingCostModelV3 = mkCostModel' PlutusV3 $ snd <$> costModelParamsForTesting
+
+    mkCostModel' :: (Integral i, Show i, HasCallStack) => Language -> [i] -> L.CostModel
+    mkCostModel' lang params =
+      case L.mkCostModel lang $ map fromIntegral params of
+        Left err ->
+          error $
+            "CostModel parameters are not well-formed for "
+              ++ show lang
+              ++ ": "
+              ++ show err
+              ++ "\n"
+              ++ show params
+        Right costModel -> costModel
+
+    costModelParamsForTesting :: HasCallStack => [(V3.ParamName, Int64)]
+    costModelParamsForTesting =
+      -- all geneses should have exactly the number of cost model params equal to the initial number
+      -- initial number - a number of parameters for the language, when the plutus language was introduced
+      take (L.costModelInitParamCount PlutusV3)
+        . Map.toList
+        . fromJust
+        $ extractCostModelParamsLedgerOrder mCostModel
+
+    mCostModel :: MCostModel
+    mCostModel =
+      -- nothing to clear because v4 does not exist (yet).
+      toMCostModel defaultCekCostModelForTesting & builtinCostModel %~ clearBuiltinCostModel'
+
+    -- \*** FIXME!!! ***
+    -- This is temporary to get the tests to pass
+    clearBuiltinCostModel' :: m ~ MBuiltinCostModel => m -> m
+    clearBuiltinCostModel' r =
+      r
+        { -- , paramIntegerToByteString = mempty -- Required for V2
+          -- , paramByteStringToInteger = mempty -- Required for V2
+          paramExpModInteger = mempty
+        , paramDropList = mempty
+        , paramLengthOfArray = mempty
+        , paramListToArray = mempty
+        , paramIndexArray = mempty
+        }
+
+    -- A helper function to lift to a "full" `MCostModel`, by mapping *all* of its fields to `Just`.
+    -- The fields can be later on cleared, by assigning them to `Nothing`.
+    toMCostModel
+      :: CostModel CekMachineCosts BuiltinCostModel
+      -> MCostModel
+    toMCostModel cm =
+      cm
+        & machineCostModel
+          %~ bmap (Just . runIdentity)
+        & builtinCostModel
+          %~ bmap (MCostingFun . Just)
+
+    extractCostModelParamsLedgerOrder
+      :: (IsParamName p, Ord p)
+      => MCostModel
+      -> Maybe (Map.Map p Int64)
+    extractCostModelParamsLedgerOrder =
+      extractInAlphaOrder
+        >=> toLedgerOrder
+     where
+      extractInAlphaOrder = extractCostModelParams
+      toLedgerOrder = mapKeysM readParamName
+
+      mapKeysM :: (Monad m, Ord k2) => (k1 -> m k2) -> Map.Map k1 a -> m (Map.Map k2 a)
+      mapKeysM = viaListM . mapM . firstM
+
+      viaListM op = fmap Map.fromList . op . Map.toList
+      firstM f (k, v) = (,v) <$> f k
+
+type MCostModel = CostModel MCekMachineCosts MBuiltinCostModel
+
+type MCekMachineCosts = CekMachineCostsBase Maybe
+
+type MBuiltinCostModel = BuiltinCostModelBase MCostingFun
+
+(%!) :: forall r. (HasCallStack, Typeable r, BoundedRational r) => Integer -> Integer -> r
+n %! d = unsafeBoundedRational $ n Data.Ratio.% d
+
+-- | Some reasonable starting defaults for constructing a 'AlonzoGenesis'.
+-- Based on https://github.com/IntersectMBO/cardano-node/blob/master/cardano-testnet/src/Testnet/Defaults.hs
+alonzoGenesisDefaults
+  :: AlonzoGenesis
+alonzoGenesisDefaults =
+  AlonzoGenesis
+    { agPrices =
+        Prices
+          { prSteps = 721 %! 10_000_000
+          , prMem = 577 %! 10_000
+          }
+    , agMaxValSize = 5000
+    , agMaxTxExUnits =
+        ExUnits
+          { exUnitsMem = 140_000_000
+          , exUnitsSteps = 10_000_000_000
+          }
+    , agMaxCollateralInputs = 3
+    , agMaxBlockExUnits =
+        ExUnits
+          { exUnitsMem = 62_000_000
+          , exUnitsSteps = 20_000_000_000
+          }
+    , agPlutusV1CostModel = either (error . show) id (L.mkCostModel PlutusV1 defaultV1CostModelValues)
+    , agCollateralPercentage = 150
+    , agCoinsPerUTxOWord = CoinPerWord $ Coin 34_482
+    , agExtraConfig = SJust . AlonzoExtraConfig . Just $ errorFail apiCostModels
+    }
+ where
+  apiCostModels =
+    mkCostModelsLenient $
+      fromList
+        [ (fromIntegral $ fromEnum PlutusV1, defaultV1CostModelValues)
+        , (fromIntegral $ fromEnum PlutusV2, defaultV2CostModel)
+        ]
+  defaultV2CostModel =
+    [ 205_665
+    , 812
+    , 1
+    , 1
+    , 1000
+    , 571
+    , 0
+    , 1
+    , 1000
+    , 24_177
+    , 4
+    , 1
+    , 1000
+    , 32
+    , 117_366
+    , 10_475
+    , 4
+    , 23_000
+    , 100
+    , 23_000
+    , 100
+    , 23_000
+    , 100
+    , 23_000
+    , 100
+    , 23_000
+    , 100
+    , 23_000
+    , 100
+    , 100
+    , 100
+    , 23_000
+    , 100
+    , 19_537
+    , 32
+    , 175_354
+    , 32
+    , 46_417
+    , 4
+    , 221_973
+    , 511
+    , 0
+    , 1
+    , 89_141
+    , 32
+    , 497_525
+    , 14_068
+    , 4
+    , 2
+    , 196_500
+    , 453_240
+    , 220
+    , 0
+    , 1
+    , 1
+    , 1000
+    , 28_662
+    , 4
+    , 2
+    , 245_000
+    , 216_773
+    , 62
+    , 1
+    , 1_060_367
+    , 12_586
+    , 1
+    , 208_512
+    , 421
+    , 1
+    , 187_000
+    , 1000
+    , 52_998
+    , 1
+    , 80_436
+    , 32
+    , 43_249
+    , 32
+    , 1000
+    , 32
+    , 80_556
+    , 1
+    , 57_667
+    , 4
+    , 1000
+    , 10
+    , 197_145
+    , 156
+    , 1
+    , 197_145
+    , 156
+    , 1
+    , 204_924
+    , 473
+    , 1
+    , 208_896
+    , 511
+    , 1
+    , 52_467
+    , 32
+    , 64_832
+    , 32
+    , 65_493
+    , 32
+    , 22_558
+    , 32
+    , 16_563
+    , 32
+    , 76_511
+    , 32
+    , 196_500
+    , 453_240
+    , 220
+    , 0
+    , 1
+    , 1
+    , 69_522
+    , 11_687
+    , 0
+    , 1
+    , 60_091
+    , 32
+    , 196_500
+    , 453_240
+    , 220
+    , 0
+    , 1
+    , 1
+    , 196_500
+    , 453_240
+    , 220
+    , 0
+    , 1
+    , 1
+    , 1_159_724
+    , 392_670
+    , 0
+    , 2
+    , 806_990
+    , 30_482
+    , 4
+    , 1_927_926
+    , 82_523
+    , 4
+    , 265_318
+    , 0
+    , 4
+    , 0
+    , 85_931
+    , 32
+    , 205_665
+    , 812
+    , 1
+    , 1
+    , 41_182
+    , 32
+    , 212_342
+    , 32
+    , 31_220
+    , 32
+    , 32_696
+    , 32
+    , 43_357
+    , 32
+    , 32_247
+    , 32
+    , 38_314
+    , 32
+    , 35_892_428
+    , 10
+    , 9_462_713
+    , 1021
+    , 10
+    , 38_887_044
+    , 32_947
+    , 10
+    ]
+
+defaultV1CostModel :: L.CostModel
+defaultV1CostModel =
+  either (error . show) id (L.mkCostModel PlutusV1 defaultV1CostModelValues)
+
+defaultV1CostModelValues :: [Int64]
+defaultV1CostModelValues =
+  [ 205_665
+  , 812
+  , 1
+  , 1
+  , 1000
+  , 571
+  , 0
+  , 1
+  , 1000
+  , 24_177
+  , 4
+  , 1
+  , 1000
+  , 32
+  , 117_366
+  , 10_475
+  , 4
+  , 23_000
+  , 100
+  , 23_000
+  , 100
+  , 23_000
+  , 100
+  , 23_000
+  , 100
+  , 23_000
+  , 100
+  , 23_000
+  , 100
+  , 100
+  , 100
+  , 23_000
+  , 100
+  , 19_537
+  , 32
+  , 175_354
+  , 32
+  , 46_417
+  , 4
+  , 221_973
+  , 511
+  , 0
+  , 1
+  , 89_141
+  , 32
+  , 497_525
+  , 14_068
+  , 4
+  , 2
+  , 196_500
+  , 453_240
+  , 220
+  , 0
+  , 1
+  , 1
+  , 1000
+  , 28_662
+  , 4
+  , 2
+  , 245_000
+  , 216_773
+  , 62
+  , 1
+  , 1_060_367
+  , 12_586
+  , 1
+  , 208_512
+  , 421
+  , 1
+  , 187_000
+  , 1000
+  , 52_998
+  , 1
+  , 80_436
+  , 32
+  , 43_249
+  , 32
+  , 1000
+  , 32
+  , 80_556
+  , 1
+  , 57_667
+  , 4
+  , 1000
+  , 10
+  , 197_145
+  , 156
+  , 1
+  , 197_145
+  , 156
+  , 1
+  , 204_924
+  , 473
+  , 1
+  , 208_896
+  , 511
+  , 1
+  , 52_467
+  , 32
+  , 64_832
+  , 32
+  , 65_493
+  , 32
+  , 22_558
+  , 32
+  , 16_563
+  , 32
+  , 76_511
+  , 32
+  , 196_500
+  , 453_240
+  , 220
+  , 0
+  , 1
+  , 1
+  , 69_522
+  , 11_687
+  , 0
+  , 1
+  , 60_091
+  , 32
+  , 196_500
+  , 453_240
+  , 220
+  , 0
+  , 1
+  , 1
+  , 196_500
+  , 453_240
+  , 220
+  , 0
+  , 1
+  , 1
+  , 806_990
+  , 30_482
+  , 4
+  , 1_927_926
+  , 82_523
+  , 4
+  , 265_318
+  , 0
+  , 4
+  , 0
+  , 85_931
+  , 32
+  , 205_665
+  , 812
+  , 1
+  , 1
+  , 41_182
+  , 32
+  , 212_342
+  , 32
+  , 31_220
+  , 32
+  , 32_696
+  , 32
+  , 43_357
+  , 32
+  , 32_247
+  , 32
+  , 38_314
+  , 32
+  , 57_996_947
+  , 18_975
+  , 10
+  ]
+
+-- | Convert Rational to a bounded rational. Throw an exception when the rational is out of bounds.
+unsafeBoundedRational
+  :: forall r
+   . (HasCallStack, Typeable r, BoundedRational r)
+  => Rational
+  -> r
+unsafeBoundedRational x = fromMaybe (error errMessage) $ boundRational x
+ where
+  errMessage = show (typeRep (Proxy @r)) <> " is out of bounds: " <> show x

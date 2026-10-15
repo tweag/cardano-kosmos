@@ -1,0 +1,289 @@
+name: Haskell CI (WASM)
+
+on:
+  merge_group:
+  pull_request:
+  push:
+    # we need this to populate cache for `master` branch to make it available to the child branches, see
+    # https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#restrictions-for-accessing-a-cache
+    branches:
+      - master
+  # GH caches are removed when not accessed within 7 days - this schedule runs the job every 6 days making
+  # sure that we always have some caches on master
+  schedule:
+    - cron: '0 0 */6 * *'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.sys.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sys:
+          - { os: ubuntu-latest, shell: bash }
+#          - { os: macos-latest, shell: bash }
+
+    defaults:
+        run:
+          shell: ${{ matrix.sys.shell }}
+
+    env:
+      # Modify this value to "invalidate" the cabal cache.
+      CABAL_CACHE_VERSION: "2026-05-29"
+
+    concurrency:
+      group: >
+        wasm
+        a+${{ github.event_name }}
+        b+${{ github.workflow_ref }}
+        c+${{ github.job }}
+        f+${{ matrix.sys.os }}
+        g+${{ (startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.run_id) || github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+
+    steps:
+    - name: Concurrency group
+      run: >
+        echo
+        wasm
+        a+${{ github.event_name }}
+        b+${{ github.workflow_ref }}
+        c+${{ github.job }}
+        f+${{ matrix.sys.os }}
+        g+${{ (startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.run_id) || github.event.pull_request.number || github.ref }}
+
+    - uses: actions/checkout@v6
+
+    - uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: |
+          accept-flake-config = true
+
+    # ghc-wasm-meta is the only flake input hosted on gitlab.haskell.org, whose
+    # availability is flaky, and an outage breaks every nix invocation below.
+    # Pre-fetch that input, falling back to a byte-identical mirror on
+    # archive.org. The narHash taken from flake.lock guarantees that whichever
+    # source responds yields exactly the locked content, and the nix
+    # invocations below then resolve the input locally without re-downloading.
+    - name: Fetch ghc-wasm-meta flake input (with archive.org mirror fallback)
+      run: |
+        rev=$(jq -r '.nodes["ghc-wasm-meta"].locked.rev' flake.lock)
+        narHash=$(jq -r '.nodes["ghc-wasm-meta"].locked.narHash' flake.lock)
+        hashQuery=${narHash//=/%3D}
+        if nix flake prefetch --option connect-timeout 60 --option download-attempts 2 \
+            "gitlab:haskell-wasm/ghc-wasm-meta/${rev}?host=gitlab.haskell.org&narHash=${hashQuery}"; then
+          echo "Fetched ghc-wasm-meta@${rev} from gitlab.haskell.org"
+        else
+          echo "::warning::gitlab.haskell.org is unavailable, falling back to the archive.org mirror of ghc-wasm-meta@${rev}"
+          nix flake prefetch \
+            "tarball+https://archive.org/download/ghc-wasm-meta-${rev}/ghc-wasm-meta-${rev}-${rev}.tar.gz?narHash=${hashQuery}" || {
+            echo "::error::The archive.org mirror does not serve ghc-wasm-meta@${rev}. If the flake input was re-pinned, upload the new GitLab archive tarball to an archive.org item named ghc-wasm-meta-${rev} (keeping GitLab's file name), or wait for gitlab.haskell.org to recover."
+            exit 1
+          }
+        fi
+
+    - uses: rrbutani/use-nix-shell-action@v1
+      with:
+        devShell: .#wasm
+
+    - name: Cabal update
+      run: |
+        wasm32-wasi-cabal update
+
+    # A dry run `build all` operation does *NOT* downlaod anything, it just looks at the package
+    # indices to generate an install plan.
+    - name: Build dry run
+      run: |
+        wasm32-wasi-cabal build cardano-wasm --dry-run
+
+    # From the install plan we generate a dependency list.
+    - name: Record dependencies
+      id: record-deps
+      run: |
+        cat dist-newstyle/cache/plan.json | jq -r '."install-plan"[] | select(.style != "local") | .id' | sort | uniq > dependencies.txt
+
+    - name: Store month number as environment variable used in cache version
+      run: |
+        cat <<EOF >> $GITHUB_ENV
+        MONTHNUM=$(date -u '+%m')
+        GHC=$(ghc --numeric-version)
+        STORE=$(wasm32-wasi-cabal path --store | tail -n 1)
+        EOF
+
+    # From the dependency list we restore the cached dependencies.
+    # We use the hash of `dependencies.txt` as part of the cache key because that will be stable
+    # until the `index-state` values in the `cabal.project` file changes.
+    - name: Restore cached dependencies
+      uses: actions/cache/restore@v4
+      id: cache
+      with:
+        path: |
+          ${{ env.STORE }}
+          dist-newstyle
+        key:
+          wasm-cache-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ env.GHC }}-${{ hashFiles('dependencies.txt') }}
+        restore-keys: |
+          wasm-cache-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ env.GHC }}-
+
+    # Now we install the dependencies. If the cache was found and restored in the previous step,
+    # this should be a no-op, but if the cache key was not found we need to build stuff so we can
+    # cache it for the next step.
+    - name: Install dependencies
+      run: |
+        wasm32-wasi-cabal build cardano-wasm --only-dependencies
+
+    # Store the cabal cache only when the build succeeds, and skip if dependencies already cached (hash matches).
+    - name: Cache Cabal store
+      uses: actions/cache/save@v4
+      if: steps.cache.outputs.cache-hit != 'true'
+      with:
+        path: |
+          ${{ env.STORE }}
+          dist-newstyle
+        key:
+          ${{ steps.cache.outputs.cache-primary-key }}
+
+    # Now we build.
+    - name: Build all
+      run: |
+        wasm32-wasi-cabal build cardano-wasm
+        wasm32-wasi-cabal build cardano-wasi
+        wasm-opt -O4 $(env -u CABAL_CONFIG wasm32-wasi-cabal list-bin exe:cardano-wasi | tail -n1) -o cardano-wasm/cardano-wasi.wasm
+
+    - name: Prepare example
+      run: |
+        wasm-opt -Oz $(env -u CABAL_CONFIG wasm32-wasi-cabal list-bin exe:cardano-wasm | tail -n1) -o cardano-wasm/lib-wrapper/cardano-wasm.wasm
+        $(wasm32-wasi-ghc --print-libdir)/post-link.mjs -i "$(env -u CABAL_CONFIG wasm32-wasi-cabal list-bin exe:cardano-wasm | tail -n1)" -o cardano-wasm/lib-wrapper/cardano-wasm.js
+        cp cardano-wasm/lib-wrapper/* cardano-wasm/examples/basic/
+
+    - name: Build grpc bridge
+      run: |
+        nix build .#proto-js-bundle
+
+    - name: Prepare NPM package
+      run: |
+        cp cardano-wasm/lib-wrapper/* cardano-wasm/npm-wrapper/src/
+        rm cardano-wasm/npm-wrapper/src/cardano-api.js
+        cp result/cardano_node_grpc_web_pb.js cardano-wasm/npm-wrapper/src/
+        cp -r result/node cardano-wasm/npm-wrapper/src/
+        cd cardano-wasm/npm-wrapper
+        npm install
+        npm run build
+        npm test
+        npm pack
+
+    - name: Prepare webpack test
+      run: |
+        cp cardano-wasm/npm-wrapper/*.tgz cardano-wasm/npm-test/webpack/
+        cd cardano-wasm/npm-test/webpack
+        npm install ./*.tgz
+        npx webpack serve --port 8081 &
+        cd ../../..
+
+    - uses: rrbutani/use-nix-shell-action@v1
+      with:
+        devShell: .#playwright
+
+    - name: Run playwright test in example and webpack test
+      run: |
+       httpserver -h localhost -a 127.0.0.1 -p 8080 cardano-wasm/examples/basic &
+       playwright test cardano-wasm/js-test/basic-test.spec.ts
+       playwright test cardano-wasm/npm-test/webpack-test.spec.ts
+
+    # - name: Run tests
+    #   env:
+    #     TMPDIR: ${{ runner.temp }}
+    #     TMP: ${{ runner.temp }}
+    #     KEEP_WORKSPACE: 1
+    #   run: cabal test all --enable-tests --test-show-details=direct
+
+    # Uncomment the following back in for debugging. Remember to launch a `pwsh` from
+    # the tmux session to debug `pwsh` issues. And be reminded that the `/msys2` and
+    # `/msys2/mingw64` paths are not in PATH by default for the workflow, but tmate
+    # will put them in.
+    # You may also want to run
+    #
+    #   $env:PATH=("C:\Program Files\PowerShell\7;{0}" -f $env:ORIGINAL_PATH)
+    #
+    # to restore the original path.  Do note that some test might need msys2
+    # and will silently fail if msys2 is not in path. See the "Run tests" step.
+    #
+    # - name: Setup tmate session
+    #  if: ${{ failure() }}
+    #  uses: mxschmitt/action-tmate@v3
+    #  with:
+    #     limit-access-to-actor: true
+
+    - name: Prepare wasm library
+      run: |
+        cp result/cardano_node_grpc_web_pb.js cardano-wasm/lib-wrapper/
+
+    - name: Test NPM package with node.js
+      run: |
+        export TMPDIR=$(mktemp -d)
+        cp cardano-wasm/npm-test/node.test.js $TMPDIR/
+        cp cardano-wasm/npm-wrapper/*.tgz $TMPDIR/
+        cd $TMPDIR
+        npm install ./*.tgz
+        node node.test.js
+        cd -
+
+    - uses: rrbutani/use-nix-shell-action@v1
+      with:
+        devShell: .#demo
+
+    - name: Build wallet demo
+      run: |
+        cd cardano-wasm/demo
+        elm-format --validate src/ tests/
+        elm-test
+        ./build.sh --wasm-dir ../lib-wrapper --out dist
+
+    - name: Demo wasm API regression tests
+      run: |
+        cd cardano-wasm/demo/tests/wasm
+        npm install
+        node api-regression.mjs
+
+    - name: Upload wallet demo
+      uses: actions/upload-artifact@v4
+      with:
+        name: cardano-wasm-demo
+        path: cardano-wasm/demo/dist
+        compression-level: 9
+
+    - name: Upload built wasm library
+      uses: actions/upload-artifact@v4
+      with:
+        name: cardano-wasm
+        path: cardano-wasm/lib-wrapper/*
+        compression-level: 9
+
+    - name: Upload pure WASI wasm binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: cardano-wasi
+        path: cardano-wasm/cardano-wasi.wasm
+        compression-level: 9
+
+    - name: Upload built NPM package
+      uses: actions/upload-artifact@v4
+      with:
+        name: npm-package
+        path: cardano-wasm/npm-wrapper/*.tgz
+
+  wasm-builds-complete:
+    needs: [build]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check if any previous job failed
+      run: |
+        if [[ "${{ needs.build.result }}" == "failure" ]]; then
+          # this ignores skipped dependencies
+          echo 'Required jobs failed to build.'
+          exit 1
+        else
+          echo 'Build complete'
+        fi

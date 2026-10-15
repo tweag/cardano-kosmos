@@ -1,0 +1,35 @@
+name: Actionlint
+
+on:
+  merge_group:
+  pull_request:
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Note that, because our Nix configuration provisions *both* shellcheck and actionlint,
+      # actionlint is not going to install its own shellcheck.
+      # This also makes sure that this pipeline runs using
+      # the same shellcheck as the ones in Nix shells of developers.
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - uses: rrbutani/use-nix-shell-action@v1
+
+      - name: Run Actionlint
+        run: |
+          for file in $(git ls-files ".github/workflows/*.y*ml")
+          do
+            if grep -q "$file" ".github/workflows/actionlint-exceptions.txt"
+            then
+              echo "⚠️ $file is ignored from actionlint's verifications. Please consider fixing it."
+            else
+              echo "actionlint $file"
+              actionlint "$file"
+            fi
+          done

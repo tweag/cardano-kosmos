@@ -1,0 +1,17 @@
+# Release manager added for notification on dependency updates
+cabal.project                                                 @Jimbo4350 @disassembler
+
+# General reviewers per PR
+#                        Jordan     Erik   Mateusz  Pablo  Carlos             Sam
+*                        @Jimbo4350 @erikd @carbolymer @palas @CarlosLopezDeLara @disassembler
+
+# Specific reviewers for code pieces
+# NB - The last matching pattern takes precedence
+
+*.nix                                                         @intersectmbo/core-tech-release-1
+flake.lock                                                    @intersectmbo/core-tech-release-1
+
+# Technical writers
+README.*                                                      @Jimbo4350 @olgahryniuk @disassembler @CarlosLopezDeLara
+
+.github                                                       @Jimbo4350 @carbolymer @palas @intersectmbo/core-tech-release-1

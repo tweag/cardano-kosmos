@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package cardano.rpc;
+
+import "google/protobuf/empty.proto";
+
+service Node {
+    rpc GetEra(google.protobuf.Empty) returns (CurrentEra) {}
+
+    rpc GetProtocolParamsJson(google.protobuf.Empty) returns (ProtocolParamsJson) {}
+}
+
+enum Era {
+    byron = 0;
+    shelley = 1;
+    allegra = 2;
+    mary = 3;
+    alonzo = 4;
+    babbage = 5;
+    conway = 6;
+}
+
+
+message CurrentEra {
+    Era era = 1;
+}
+
+message ProtocolParamsJson {
+    bytes json = 1; // JSON representation of the protocol parameters
+}

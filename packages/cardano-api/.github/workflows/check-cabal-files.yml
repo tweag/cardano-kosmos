@@ -1,0 +1,22 @@
+name: Check cabal files
+
+on:
+  merge_group:
+  pull_request:
+
+jobs:
+  check-cabal-files:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - uses: rrbutani/use-nix-shell-action@v1
+
+      - name: Cabal check
+        run: ./scripts/ci/check-cabal-files.sh

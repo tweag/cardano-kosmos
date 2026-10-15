@@ -1,0 +1,115 @@
+module Cardano.Api.Consensus
+  ( -- * Consensus modes
+
+    -- | Consensus modes. The node supports several different modes with different
+    -- combinations of consensus protocols and ledger eras.
+
+    -- ** The protocols supported in each era
+    ConsensusProtocol
+  , ChainDepStateProtocol
+
+    -- ** Connection parameters for each mode
+  , ConsensusModeParams (..)
+  , EpochSlots (..)
+
+    -- ** Conversions to and from types in the consensus library
+  , ConsensusCryptoForBlock
+  , ConsensusBlockForEra
+  , toConsensusEraIndex
+  , fromConsensusEraIndex
+
+    -- * Transactions in the consensus mode
+
+    -- | Transactions in the context of a consensus mode, and other types used in
+    -- the transaction submission protocol.
+
+    -- ** Transaction in a consensus mode
+  , TxInMode (..)
+  , fromConsensusGenTx
+  , toConsensusGenTx
+
+    -- ** Transaction id in a consensus mode
+  , TxIdInMode (..)
+  , toConsensusTxId
+
+    -- ** Transaction validation errors
+  , TxValidationError (..)
+  , TxValidationErrorInCardanoMode (..)
+  , fromConsensusApplyTxErr
+
+    -- * Consensus protocol
+  , BlockType (..)
+  , SomeBlockType (..)
+  , reflBlockType
+  , Protocol (..)
+  , ProtocolInfoArgs (..)
+  , cardanoLedgerTransitionConfig
+  , byronProtocolParams
+  , byronGenesis
+  , ProtocolClient (..)
+  , ProtocolClientInfoArgs (..)
+  , nodeSystemStart
+
+    -- * Reexports from @ouroboros-consensus@
+  , BlockComponent (..)
+  , ByronBlock
+  , ByronPartialLedgerConfig (..)
+  , CardanoBlock
+  , ChainDB.ChainDB
+  , ChainDB.ChainType (..)
+  , ChainDB.Follower (..)
+  , ChainDB.getBlockComponent
+  , ChainDB.getCurrentLedger
+  , ChainDB.getTipHeader
+  , ChainDB.newFollower
+  , ChainUpdate (..)
+  , ConfigSupportsNode
+  , ChainDepState
+  , GenTx (..)
+  , EraMismatch (..)
+  , HardForkLedgerConfig (..)
+  , HasHardForkHistory (..)
+  , HasHeader
+  , Header
+  , HeaderHash
+  , NodeKernel (..)
+  , OneEraHash (..)
+  , PastHorizonException
+  , PerEraLedgerConfig (..)
+  , PraosProtocolSupportsNode
+  , PraosProtocolSupportsNodeCrypto
+  , RealPoint (..)
+  , ResourceRegistry
+  , SecurityParam (..)
+  , ShelleyGenesisStaking (..)
+  , ShelleyPartialLedgerConfig (..)
+  , StandardCrypto
+  , TopLevelConfig
+  , WrapPartialLedgerConfig (..)
+  , ledgerState
+  , shelleyLedgerGenesis
+  , shelleyLedgerTranslationContext
+  , blockHash
+  , blockNo
+  , blockSlot
+  , byronBlockRaw
+  , byronIdTx
+  , configBlock
+  , configLedger
+  , configSecurityParam
+  , condense
+  , getOpCertCounters
+  , interpreterToEpochInfo
+  , mkInterpreter
+  , unsafeExtendSafeZone
+  , txId
+  , withRegistry
+  )
+where
+
+import Cardano.Api.Consensus.Internal.InMode
+import Cardano.Api.Consensus.Internal.Mode
+import Cardano.Api.Consensus.Internal.Protocol
+import Cardano.Api.Consensus.Internal.Reexport
+
+import Ouroboros.Consensus.Storage.ChainDB qualified as ChainDB

@@ -72,36 +72,37 @@ emptyDijkstraGenesis :: DijkstraGenesis
 emptyDijkstraGenesis =
   case L.mkCostModelsLenient plutusV4CostModel >>= Map.lookup L.PlutusV4 . L.costModelsValid of
     Nothing -> error "emptyDijkstraGenesis: missing PlutusV4 cost model in default cost models."
-    Just cm ->
-      let upgradePParamsDef = UpgradeDijkstraPParams
-                                { udppMaxRefScriptSizePerBlock = 1048576
-                                , udppMaxRefScriptSizePerTx = 204800
-                                , udppRefScriptCostStride = unsafeNonZero 25600
-                                , udppRefScriptCostMultiplier = fromMaybe (error "impossible") $ boundRational 1.2
-                                , udppMaxPledgeLeverage = MaxPledgeLeverage SNothing
-                                , udppMinPoolMargin = minBound
-                                , udppPlutusV4CostModel = cm
-                                , udppLeiosAnnouncementPeriodLength = Milliseconds32 1000
-                                , udppLeiosVotePeriodLength = Milliseconds32 1000
-                                , udppLeiosDiffusionPeriodLength = Milliseconds32 1000
-                                , udppLeiosCommitteeSize = 1
-                                , udppLeiosQuorumStakeThreshold = minBound
-                                , udppMaxEndorserBlockReferencesSize = 0
-                                , udppMaxEndorserBlockTxsSize = 0
-                                , udppMaxEndorserBlockExUnits = OrdExUnits (ExUnits 0 0)
-                                , udppMaxRefScriptSizePerEndorserBlock = 0
-                                , udppPerasMinCandidateBlockAge = SlotInterval 0
-                                -- The healing factor must be strictly positive.
-                                , udppPerasHealingFactor = fromMaybe (error "impossible") $ boundRational 0.5
-                                , udppPerasCertBoost = 0
-                                , udppPerasTargetCommitteeSize = 1
-                                , udppPerasBootstrapRound = SNothing
-                                , udppPerasQuorumThresholdSafetyMargin = minBound
-                                -- No pricing logic uses these yet, they are enabled by a later
-                                -- intra-era hard fork within the Dijkstra era.
-                                , udppRefInputsCostPerMultiAssetPolicy = Coin 0
-                                , udppRefInputsCostPerDatumByte = CoinPerByte (CompactCoin 0)
-                                }
+    Just costModel ->
+      let upgradePParamsDef =
+            UpgradeDijkstraPParams
+              { udppMaxRefScriptSizePerBlock = 1048576
+              , udppMaxRefScriptSizePerTx = 204800
+              , udppRefScriptCostStride = unsafeNonZero 25600
+              , udppRefScriptCostMultiplier = fromMaybe (error "impossible") $ boundRational 1.2
+              , udppMaxPledgeLeverage = MaxPledgeLeverage SNothing
+              , udppMinPoolMargin = minBound
+              , udppPlutusV4CostModel = costModel
+              , udppLeiosAnnouncementPeriodLength = Milliseconds32 1000
+              , udppLeiosVotePeriodLength = Milliseconds32 1000
+              , udppLeiosDiffusionPeriodLength = Milliseconds32 1000
+              , udppLeiosCommitteeSize = 1
+              , udppLeiosQuorumStakeThreshold = minBound
+              , udppMaxEndorserBlockReferencesSize = 0
+              , udppMaxEndorserBlockTxsSize = 0
+              , udppMaxEndorserBlockExUnits = OrdExUnits (ExUnits 0 0)
+              , udppMaxRefScriptSizePerEndorserBlock = 0
+              , udppPerasMinCandidateBlockAge = SlotInterval 0
+              -- The healing factor must be strictly positive.
+              , udppPerasHealingFactor = fromMaybe (error "impossible") $ boundRational 0.5
+              , udppPerasCertBoost = 0
+              , udppPerasTargetCommitteeSize = 1
+              , udppPerasBootstrapRound = SNothing
+              , udppPerasQuorumThresholdSafetyMargin = minBound
+              -- No pricing logic uses these yet, they are enabled by a later
+              -- intra-era hard fork within the Dijkstra era.
+              , udppRefInputsCostPerMultiAssetPolicy = Coin 0
+              , udppRefInputsCostPerDatumByte = CoinPerByte (CompactCoin 0)
+              }
       in DijkstraGenesis { dgUpgradePParams = upgradePParamsDef }
 
 

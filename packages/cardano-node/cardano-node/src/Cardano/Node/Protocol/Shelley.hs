@@ -41,7 +41,6 @@ import           Ouroboros.Consensus.Protocol.Praos.Common (PraosCanBeLeader (..
                    PraosCredentialsSource (..))
 import           Ouroboros.Consensus.Shelley.Node (Nonce (..), ProtocolParamsShelleyBased (..),
                    ShelleyLeaderCredentials (..))
-import           Ouroboros.Consensus.Tracing ()
 
 import           Control.Exception (IOException)
 import           Control.Monad
@@ -51,7 +50,7 @@ import qualified Data.Text as T
 import           System.Directory (getFileSize)
 import           System.FilePath (takeDirectory)
 import           System.FS.API (SomeHasFS (..))
-import           System.FS.API.Types (MountPoint (..))
+import           System.FS.API.Types (MountPoint (MountPoint))
 import           System.FS.IO (ioHasFS)
 import qualified System.IO.MMap as MMap
 

@@ -41,7 +41,8 @@ module Cardano.Benchmarking.Profile.Primitives (
   -- Set the epoch number from the "epoch-timeline".
   , pparamsEpoch
   -- Overlays to use.
-  , v8Preview, v9Preview, v11Preview
+  , v8Preview, v9Preview, v11Preview, v12Preview
+  , leios6912k
   -- Budget overlays:
   -- -- Block:
   -- -- -- Steps:
@@ -422,6 +423,15 @@ v9Preview = helper_addOverlayOrDie "v9-preview"
 
 v11Preview :: HasCallStack => Types.Profile -> Types.Profile
 v11Preview = helper_addOverlayOrDie "v11-preview"
+
+v12Preview :: HasCallStack => Types.Profile -> Types.Profile
+v12Preview = helper_addOverlayOrDie "v12-preview"
+
+-- Leios: a voting committee and endorser-block capacity, sized for a 6912k
+-- ranking block. Needs a Dijkstra genesis to land in, so it goes with
+-- 'v12Preview'.
+leios6912k :: HasCallStack => Types.Profile -> Types.Profile
+leios6912k = helper_addOverlayOrDie "leios-6912k"
 
 -- Budget:
 

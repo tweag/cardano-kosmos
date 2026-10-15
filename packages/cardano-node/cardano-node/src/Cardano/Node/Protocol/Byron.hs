@@ -31,7 +31,6 @@ import           Cardano.Prelude (canonicalDecodePretty)
 import           Ouroboros.Consensus.Cardano
 import qualified Ouroboros.Consensus.Cardano as Consensus
 import           Ouroboros.Consensus.HardFork.Combinator.AcrossEras ()
-import           Ouroboros.Consensus.Tracing ()
 
 import           Control.Exception
 import qualified Data.ByteString.Lazy as LB

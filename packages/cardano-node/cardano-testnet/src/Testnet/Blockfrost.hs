@@ -273,7 +273,7 @@ blockfrostToGenesis (shelleyGenesis', alonzoGenesis', conwayGenesis', dijkstraGe
       , sppExtraEntropy = bfgExtraEntropy
       , sppProtocolVersion = ProtVer
         { pvMajor = bfgProtocolMajorVer
-        , pvMinor = fromIntegral bfgProtocolMinorVer
+        , pvMinor = bfgProtocolMinorVer
         }
       , sppMinUTxOValue = compactCoinOrError bfgMinUTxO
       , sppMinPoolCost = compactCoinOrError bfgMinPoolCost

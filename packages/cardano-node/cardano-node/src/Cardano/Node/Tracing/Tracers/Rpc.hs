@@ -85,6 +85,7 @@ instance LogFormatting TraceRpc where
     TraceRpcQuery (TraceRpcQueryReadUtxosSpan (SpanBegin _)) -> [CounterM "rpc.request.QueryService.ReadUtxos" Nothing]
     TraceRpcQuery (TraceRpcQuerySearchUtxosSpan (SpanBegin _)) -> [CounterM "rpc.request.QueryService.SearchUtxos" Nothing]
     TraceRpcQuery (TraceRpcQueryReadGenesisSpan (SpanBegin _)) -> [CounterM "rpc.request.QueryService.ReadGenesis" Nothing]
+    TraceRpcQuery (TraceRpcQueryReadEraSummarySpan (SpanBegin _)) -> [CounterM "rpc.request.QueryService.ReadEraSummary" Nothing]
     TraceRpcSubmit (TraceRpcSubmitSpan (SpanBegin _)) -> [CounterM "rpc.request.SubmitService.SubmitTx" Nothing]
     TraceRpcSubmit (TraceRpcEvalTxSpan (SpanBegin _)) -> [CounterM "rpc.request.SubmitService.EvalTx" Nothing]
     TraceRpcSubmit (TraceRpcReadMempoolSpan (SpanBegin _)) -> [CounterM "rpc.request.SubmitService.ReadMempool" Nothing]
@@ -139,6 +140,7 @@ instance MetaTrace TraceRpc where
     ["QueryService", "ReadUtxos", "Span"] -> Just Debug
     ["QueryService", "SearchUtxos", "Span"] -> Just Debug
     ["QueryService", "ReadGenesis", "Span"] -> Just Debug
+    ["QueryService", "ReadEraSummary", "Span"] -> Just Debug
     ["SubmitService", "SubmitTx", "Span"] -> Just Debug
     ["SubmitService", "EvalTx", "Span"] -> Just Debug
     ["SubmitService", "ReadMempool", "Span"] -> Just Debug
@@ -163,6 +165,7 @@ instance MetaTrace TraceRpc where
     ["QueryService", "ReadUtxos", "Span"] -> Just "Span for the ReadUtxos UTXORPC method."
     ["QueryService", "SearchUtxos", "Span"] -> Just "Span for the SearchUtxos UTXORPC method."
     ["QueryService", "ReadGenesis", "Span"] -> Just "Span for the ReadGenesis UTXORPC method."
+    ["QueryService", "ReadEraSummary", "Span"] -> Just "Span for the ReadEraSummary UTXORPC method."
     ["SubmitService", "SubmitTx", "Span"] -> Just "Span for the SubmitTx UTXORPC method."
     ["SubmitService", "EvalTx", "Span"] -> Just "Span for the EvalTx UTXORPC method."
     ["SubmitService", "ReadMempool", "Span"] -> Just "Span for the ReadMempool UTXORPC method."
@@ -191,6 +194,8 @@ instance MetaTrace TraceRpc where
       [("rpc.request.QueryService.SearchUtxos", "Span for the SearchUtxos UTXORPC method.")]
     ["QueryService", "ReadGenesis", "Span"] ->
       [("rpc.request.QueryService.ReadGenesis", "Span for the ReadGenesis UTXORPC method.")]
+    ["QueryService", "ReadEraSummary", "Span"] ->
+      [("rpc.request.QueryService.ReadEraSummary", "Span for the ReadEraSummary UTXORPC method.")]
     ["SubmitService", "SubmitTx", "Span"] ->
       [("rpc.request.SubmitService.SubmitTx", "Span for the SubmitTx UTXORPC method.")]
     ["SubmitService", "EvalTx", "Span"] ->

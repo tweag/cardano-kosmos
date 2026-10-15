@@ -204,6 +204,7 @@
           default = shell.dev;
           cluster = shell;
           profiled = project.profiled.shell;
+          ghc9141 = project.ghc9141.shell;
         }
         # Shell used by the "Haddock documentation" workflow (github-page.yml)
         // optionalAttrs (hostPlatform.system == "x86_64-linux") {
@@ -273,6 +274,9 @@
 
       packages =
         exes
+        // {
+          inherit (pkgs) check-jsonschema;
+        }
         # Linux only packages:
         // optionalAttrs (elem system ["x86_64-linux" "aarch64-linux"])
         (let
@@ -381,7 +385,7 @@
             native =
               packages
               // {
-                shells = devShells;
+                shells = removeAttrs devShells ["ghc9141"];
                 internal = {
                   roots.project = project.roots;
                   plan-nix.project = project.plan-nix;
@@ -458,7 +462,7 @@
                     filterAttrs (n: _: elem n releaseBins && !(elem n linuxOnlyBins)) (collectExes project)
                   );
                 };
-                shells = removeAttrs devShells ["profiled"];
+                shells = removeAttrs devShells ["profiled" "ghc9141"];
                 internal = {
                   roots.project = project.roots;
                   plan-nix.project = project.plan-nix;
@@ -555,7 +559,8 @@
             # buildPlatform, not hostPlatform: herald is a developer tool that
             # runs on the machine, so cross shells (e.g. windows) must not try
             # to resolve it for a system cardano-dev does not build for.
-            herald = cardano-dev.packages.${final.stdenv.buildPlatform.system}.herald;
+            # null on systems cardano-dev does not publish herald for.
+            herald = cardano-dev.packages.${final.stdenv.buildPlatform.system}.herald or null;
           })
           .appendModule [
             customConfig.haskellNix

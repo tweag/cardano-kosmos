@@ -275,10 +275,6 @@ defaultYamlHardforkViaConfig sbe =
   hardforkViaConfig sbe' =
     Aeson.fromList $
       ("ExperimentalProtocolsEnabled", Aeson.Bool True)
-      -- Dijkstra is still experimental. Without this flag the node declares PV11 as its
-      -- maximum protocol version, so it cannot forge once the ledger is at PV12 (its own
-      -- blocks are rejected with ObsoleteNode), and it ignores the Dijkstra genesis file.
-      : ("ExperimentalHardForksEnabled", Aeson.Bool True)
       : (case sbe' of
             ShelleyBasedEraShelley ->
                 [ ("TestShelleyHardForkAtEpoch", Aeson.Number 0) ]
@@ -441,7 +437,7 @@ eraToProtocolVersion =
 -- TODO: Expose from cardano-api
 mkProtVer :: (Natural, Word32) -> ProtVer
 mkProtVer (majorProtVer, minorProtVer) =
-  case (`ProtVer` fromIntegral minorProtVer) <$> Ledger.mkVersion majorProtVer of
+  case (`ProtVer` minorProtVer) <$> Ledger.mkVersion majorProtVer of
     Just pVer -> pVer
     Nothing -> error "mkProtVer: invalid protocol version"
 

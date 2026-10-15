@@ -14,17 +14,15 @@ repository cardano-haskell-packages
 -- you need to run if you change them
 index-state:
   , hackage.haskell.org 2026-09-02T14:05:07Z
-  , cardano-haskell-packages 2026-10-05T13:20:29Z
+  , cardano-haskell-packages 2026-10-09T14:30:01Z
 
 constraints:
   -- haskell.nix patch does not work for 1.6.8
-  , any.crypton-x509-system < 1.6.8 || > 1.6.8
+  , any.crypton-x509-system < 1.6.8 || >= 1.7
   -- haskell.nix tries to use 0.7.1.5 for some reason
   , any.proto-lens >= 0.7.1.7
   -- https://github.com/channable/alfred-margaret/pull/76
   , any.alfred-margaret < 2.1.1.0 || > 2.1.1.0
-  -- Force cardano-crypto-class 2.6.x to avoid backtracking into 2.5.x
-  , any.cardano-crypto-class ^>= 2.6
 
 -- acts has a finitary flag; disabling it avoids pulling in finitary entirely,
 -- which sidesteps the GHC type-checker plugin incompatibility with
@@ -50,14 +48,9 @@ packages:
   bench/cardano-timeseries-io
   bench/trace-schemas/scripts/schema-gen
   trace-forward
---  ../ouroboros-consensus
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node
-
-allow-older:
-  , dmq-node:ouroboros-consensus
-
 
 program-options
   ghc-options: -Werror
@@ -79,31 +72,82 @@ package bitvec
 package plutus-scripts-bench
   haddock-options: "--optghc=-fplugin-opt=PlutusTx.Plugin:defer-errors"
 
--- There is a suspected bug in `cabal` (https://github.com/haskell/cabal/issues/11663)
--- that can be worked around with the following allow-newer stanzas
 allow-newer:
-  -- cborg-0.2.10.0 bounds base < 4.22 but GHC 9.14 ships base-4.22
-  , cborg:base
-  , io-sim:time
-  , io-classes:time
-  , cardano-ping:network-mux
-  , grapesy:aeson
-  , grapesy:crypton-x509
-  , grapesy:crypton-x509-store
-  , grapesy:crypton-x509-system
-  , grapesy:crypton-x509-validation
-  , grapesy:http2
-  , grapesy:http2-tls
-  , grapesy:network-run
-  , grapesy:tls
-  , grpc-spec:aeson
-  , http-api-data:text-iso8601
   -- plutus-scripts-bench bounds cardano-api ^>=11.5 but we have 11.6
   , plutus-scripts-bench:cardano-api
   -- plutus-scripts-bench bounds plutus-* ^>=1.65 but we have 1.68
   , plutus-scripts-bench:plutus-ledger-api
   , plutus-scripts-bench:plutus-tx
   , plutus-scripts-bench:plutus-tx-plugin
+
+if impl(ghc >= 9.14)
+  -- some-1.1 adds EqP/OrdP superclasses to GEq/GCompare, which plutus-core
+  -- 1.71.0.0 is not written against:
+  --
+  --   Universe/Core.hs:755:10: error: [GHC-39999]
+  --     Could not deduce 'Data.EqP.EqP (ValueOf uni)'
+  --       arising from the superclasses of an instance declaration
+  --
+  -- some-1.0.6 is what every other compiler resolves to and it already allows
+  -- base < 4.23, so it is usable on 9.14; the solver simply prefers the newest.
+  -- Pin it rather than relaxing dependent-sum's some >= 1.0.4 && < 1.0.7 bound.
+  constraints:
+    , any.some < 1.1
+
+  -- GHC 9.14.1 ships base-4.22, template-haskell-2.24, containers-0.8,
+  -- time-1.15 and ghc-9.14.1. Every entry below is a dependency whose upper
+  -- bound predates one of those and has no release on Hackage/CHaP that admits
+  -- it, so the solver has no plan without the relaxation.
+  allow-newer:
+    -- base < 4.22
+    , bytestring-trie:base
+    , cborg:base
+    , cborg-json:base
+    , compact:base
+    , ekg-json:base
+    , http-api-data:base
+    , serialise:base
+    , servant-server:base
+    , tdigest:base
+    , with-utf8:base
+    -- template-haskell < 2.24
+    , safe-wild-cards:template-haskell
+    , serdoc-core:template-haskell
+    -- containers < 0.8
+    , canonical-json:containers
+    , cborg:containers
+    , dependent-map:containers
+    , dictionary-sharing:containers
+    , ekg-prometheus-adapter:containers
+    , lens-family:containers
+    , lens-family-core:containers
+    , prometheus:containers
+    , serialise:containers
+    -- time < 1.15
+    , ekg-wai:time
+    , serialise:time
+    -- io-classes: io-sim requires ^>=1.11 while cardano-node and
+    -- ouroboros-network cap at ^>=1.8 || ^>=1.9. On 9.14 every older io-sim is
+    -- excluded by base < 4.22, so the solver is forced to io-classes 1.11 and
+    -- all of these bounds have to give way together.
+    , blockio:io-classes
+    , cardano-diffusion:io-classes
+    , cardano-node:io-classes
+    , cardano-node-chairman:io-classes
+    , fs-api:io-classes
+    , fs-sim:io-classes
+    , kes-agent:io-classes
+    , lsm-tree:io-classes
+    , network-mux:io-classes
+    , ouroboros-consensus:io-classes
+    , ouroboros-network:io-classes
+    -- Other
+    , cborg-json:aeson
+    , kes-agent:aeson
+    , vary:aeson
+    , errors:transformers-compat
+    , monad-control:transformers-compat
+    , servant-server:http-api-data
 
 -- IMPORTANT
 -- Do NOT add more source-repository-package stanzas here unless they are strictly

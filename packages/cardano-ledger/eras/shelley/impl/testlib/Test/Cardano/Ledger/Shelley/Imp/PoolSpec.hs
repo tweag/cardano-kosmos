@@ -492,7 +492,7 @@ spec = describe "POOL" $ do
     logDoc $ ansiExpr evs2
 
     -- Verify the pool distribution reflects all delegated stake.
-    pd <- getsNES nesPdL
+    pd <- getsNES nesStakePoolDistrG
     unNonZero (pdTotalActiveStake pd) `shouldBe` (aliceInitCoin <> bobInitCoin <> carlInitCoin)
 
     -- === Blocks 3–4, Epoch 2
@@ -601,4 +601,3 @@ spec = describe "POOL" $ do
       submitTx_ $
         mkBasicTx mkBasicTxBody
           & bodyTxL . certsTxBodyL .~ [RegPoolTxCert pps {sppPledge = Coin 0}]
-    getPState = getsNES @era $ nesEsL . esLStateL . lsCertStateL . certPStateL

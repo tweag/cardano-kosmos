@@ -17,7 +17,7 @@ import Cardano.Ledger.Alonzo.Plutus.Context (EraPlutusContext (..))
 import Cardano.Ledger.Alonzo.Plutus.Evaluate (CollectError (..))
 import qualified Cardano.Ledger.Alonzo.Plutus.TxInfo as Alonzo
 import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
-import Cardano.Ledger.Alonzo.Scripts (eraLanguages)
+import Cardano.Ledger.Alonzo.Scripts (eraLanguages, plutusScriptLanguage)
 import Cardano.Ledger.Babbage (BabbageEra)
 import qualified Cardano.Ledger.Babbage.Rules as Babbage
 import Cardano.Ledger.Babbage.TxInfo (BabbageContextError (..))
@@ -50,6 +50,7 @@ import Test.Cardano.Ledger.Plutus.Examples (
   alwaysFailsNoDatum,
   alwaysSucceedsNoDatum,
   evenRedeemerNoDatum,
+  purposeIsWellformedNoDatum,
   redeemerSameAsDatum,
  )
 
@@ -77,6 +78,26 @@ spec = describe "UTXOS" $ do
               tx
               [ injectFailure $ Alonzo.UnspendableUTxONoDatumHash $ NES.singleton txIn
               ]
+  describe "purposeIsWellformedNoDatum" $
+    for_ [l | l <- eraLanguages @era, l >= PlutusV3] $ \lang -> do
+      withSLanguage lang $ \slang -> describe (show slang) $ do
+        -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/1349
+        -- TODO: Re-enable this after issue is resolved, by removing this override
+        disableInConformanceIt "Passes with voting purpose" $ do
+          let sh = hashPlutusScript $ purposeIsWellformedNoDatum slang
+          coldCred : _ <- Set.toList <$> getCommitteeMembers
+          hotCred :| _ <- registerCommitteeHotKeys (pure $ ScriptHashObj sh) (coldCred :| [])
+          gaId <- submitGovAction InfoAction
+          submitYesVote_ (CommitteeVoter hotCred) gaId
+        it "Passes with proposing purpose" $ whenPostBootstrap $ do
+          let sh = hashPlutusScript $ purposeIsWellformedNoDatum slang
+          committee <- registerInitialCommittee
+          (dRep, _, _) <- setupSingleDRep 1_000_000
+          anchor <- arbitrary
+          void $ enactConstitution SNothing (Constitution anchor (SJust sh)) dRep committee
+          account <- registerAccountAddress
+          proposal <- mkProposal $ TreasuryWithdrawals (Map.singleton account (Coin 1000)) (SJust sh)
+          submitProposal_ proposal
 
 datumAndReferenceInputsSpec ::
   forall era.
@@ -598,8 +619,11 @@ mkRefTxOut ::
   ScriptHash ->
   ImpTestM era (TxOut era)
 mkRefTxOut sh = do
-  addr <- freshKeyAddr_
   let mbyPlutusScript = impLookupPlutusScript sh
+  addr <- case mbyPlutusScript of
+    Just plutusScript
+      | plutusScriptLanguage plutusScript >= PlutusV4 -> freshKeyAddrNoPtr_
+    _ -> freshKeyAddr_
   pure $
     mkBasicTxOut addr mempty
       & referenceScriptTxOutL .~ maybeToStrictMaybe (fromPlutusScript <$> mbyPlutusScript)

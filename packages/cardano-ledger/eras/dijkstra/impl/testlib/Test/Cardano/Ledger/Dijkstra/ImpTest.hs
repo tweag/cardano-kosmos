@@ -24,6 +24,8 @@ module Test.Cardano.Ledger.Dijkstra.ImpTest (
   switchTxToLegacyMode,
   switchTxToPhase2InvalidLegacyMode,
   mkTopTxWithSubTxs,
+  mkTopTxWithDistinctSubTxs,
+  distinctSubTxs,
   traverseSubTxs,
   withPostFixupSubTxs,
   submitFailingSubTx,
@@ -52,7 +54,7 @@ import Cardano.Ledger.Conway.Governance (
 import qualified Cardano.Ledger.Conway.Rules as Conway
 import Cardano.Ledger.Conway.TxCert
 import Cardano.Ledger.Credential
-import Cardano.Ledger.Dijkstra (ApplyTxError, DijkstraEra)
+import Cardano.Ledger.Dijkstra (ApplyTxError, DijkstraEra, DijkstraEraForecast)
 import Cardano.Ledger.Dijkstra.BlockBody (DijkstraEraBlockBody)
 import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.Rules
@@ -128,6 +130,7 @@ instance ConwayEraImp DijkstraEra
 class
   ( ConwayEraImp era
   , DijkstraEraTest era
+  , DijkstraEraForecast era
   , DijkstraEraBlockBody era
   , InjectRuleFailure "BBODY" DijkstraBbodyPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraLedgerPredFailure era
@@ -213,6 +216,18 @@ instance InjectRuleFailure "LEDGER" DijkstraSubLedgerPredFailure DijkstraEra whe
 mkTopTxWithSubTxs :: DijkstraEraImp era => [Tx SubTx era] -> Tx TopTx era
 mkTopTxWithSubTxs subTxs =
   mkBasicTx mkBasicTxBody & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable subTxs
+
+mkTopTxWithDistinctSubTxs :: DijkstraEraImp era => [Tx SubTx era] -> ImpTestM era (Tx TopTx era)
+mkTopTxWithDistinctSubTxs subTxs = mkTopTxWithSubTxs <$> distinctSubTxs subTxs
+
+-- | Give each sub-transaction a fresh input, so that otherwise identical
+-- sub-transactions get distinct transaction ids
+distinctSubTxs :: DijkstraEraImp era => [Tx SubTx era] -> ImpTestM era [Tx SubTx era]
+distinctSubTxs = traverse addFreshInput
+  where
+    addFreshInput subTx = do
+      input <- freshFundedTxIn
+      pure $ subTx & bodyTxL . inputsTxBodyL <>~ [input]
 
 -- | Apply an effectful modification to every sub-transaction of a top
 -- level transaction.
@@ -463,7 +478,7 @@ balanceSubTransactions ::
   ImpTestM era (Tx TopTx era)
 balanceSubTransactions topTx = do
   pp <- getsNES $ nesEsL . curPParamsEpochStateL
-  pools <- Map.keysSet <$> getsNES (nesEsL . esLStateL . lsCertStateL . certPStateL . psStakePoolsL)
+  pools <- Map.keysSet <$> getsNES (nesEsL . epochStateStakePoolsL)
   utxo <- getUTxO
   let
     subTransactions = topTx ^. bodyTxL . subTransactionsTxBodyL

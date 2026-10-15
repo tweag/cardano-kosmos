@@ -51,8 +51,9 @@ import Cardano.Ledger.Conway.Rules (
   updateNumDormantEpochs,
  )
 import Cardano.Ledger.Conway.State
-import Cardano.Ledger.Dijkstra.Era (EPOCH, SNAP)
+import Cardano.Ledger.Dijkstra.Era (EPOCH, POOLREAP, SNAP)
 import Cardano.Ledger.Dijkstra.PParams (DijkstraEraPParams)
+import Cardano.Ledger.Dijkstra.Rules.PoolReap ()
 import Cardano.Ledger.Dijkstra.Rules.Snap ()
 import Cardano.Ledger.Shelley.LedgerState (
   EpochState (..),
@@ -238,16 +239,16 @@ epochTransition = do
         , eNo
         )
   let
-    stakePoolDistr = ssStakeMarkPoolDistr snapshots1
+    stakePoolDistr = msStakePoolDistr (ssStakeMark snapshots1)
     epochState3 = epochState2 & esSnapshotsL .~ snapshots1
   liftSTS $ setFreshDRepPulsingState eNo stakePoolDistr epochState3
 
 instance
   ( Era era
-  , STS (Shelley.POOLREAP era)
+  , STS (POOLREAP era)
   , Event (EraRule "POOLREAP" era) ~ Shelley.ShelleyPoolreapEvent era
   ) =>
-  Embed (Shelley.POOLREAP era) (EPOCH era)
+  Embed (POOLREAP era) (EPOCH era)
   where
   wrapFailed = \case {}
   wrapEvent = PoolReapEvent

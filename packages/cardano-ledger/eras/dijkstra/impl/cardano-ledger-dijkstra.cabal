@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: cardano-ledger-dijkstra
-version: 0.4.0.0
+version: 0.5.0.0
 license: Apache-2.0
 maintainer: operations@iohk.io
 author: IOHK
@@ -36,6 +36,7 @@ library
     Cardano.Ledger.Dijkstra.BlockBody.Internal
     Cardano.Ledger.Dijkstra.Core
     Cardano.Ledger.Dijkstra.Era
+    Cardano.Ledger.Dijkstra.Forecast
     Cardano.Ledger.Dijkstra.Genesis
     Cardano.Ledger.Dijkstra.Governance
     Cardano.Ledger.Dijkstra.PParams
@@ -53,7 +54,6 @@ library
     Cardano.Ledger.Dijkstra.UTxO
 
   other-modules:
-    Cardano.Ledger.Dijkstra.Forecast
     Cardano.Ledger.Dijkstra.Rules.Bbody
     Cardano.Ledger.Dijkstra.Rules.Cert
     Cardano.Ledger.Dijkstra.Rules.Certs
@@ -66,6 +66,7 @@ library
     Cardano.Ledger.Dijkstra.Rules.Ledgers
     Cardano.Ledger.Dijkstra.Rules.Mempool
     Cardano.Ledger.Dijkstra.Rules.Pool
+    Cardano.Ledger.Dijkstra.Rules.PoolReap
     Cardano.Ledger.Dijkstra.Rules.Snap
     Cardano.Ledger.Dijkstra.Rules.SubCert
     Cardano.Ledger.Dijkstra.Rules.SubCerts
@@ -119,10 +120,10 @@ library
     cardano-ledger-alonzo ^>=1.17,
     cardano-ledger-babbage ^>=1.15,
     cardano-ledger-binary ^>=1.10,
-    cardano-ledger-conway ^>=1.24,
-    cardano-ledger-core:{cardano-ledger-core, internal} ^>=1.22,
+    cardano-ledger-conway ^>=1.25,
+    cardano-ledger-core:{cardano-ledger-core, internal} ^>=1.23,
     cardano-ledger-mary,
-    cardano-ledger-shelley ^>=1.20,
+    cardano-ledger-shelley ^>=1.21,
     cardano-slotting,
     cardano-strict-containers,
     containers,
@@ -167,6 +168,7 @@ library testlib
     Test.Cardano.Ledger.Dijkstra.Imp.SubUtxoSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SubUtxowSpec
     Test.Cardano.Ledger.Dijkstra.Imp.UtxoSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.UtxosSpec
     Test.Cardano.Ledger.Dijkstra.Imp.UtxowSpec
     Test.Cardano.Ledger.Dijkstra.ImpTest
     Test.Cardano.Ledger.Dijkstra.TreeDiff
@@ -212,6 +214,7 @@ library testlib
     cardano-slotting,
     cardano-strict-containers,
     containers,
+    fs-sim,
     generic-random,
     microlens,
     microlens-mtl,

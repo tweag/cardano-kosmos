@@ -1,0 +1,59 @@
+name: Check mainnet configuration
+
+on:
+  push:
+  merge_group:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+
+    - name: Install Nix
+      uses: cachix/install-nix-action@b97f05dcb019ddea06450a50ef6203d2fdc19fee # v31
+      with:
+        # Use last stable nixos channel and the same nix as in channel:
+        nix_path: nixpkgs=channel:nixos-24.05
+        github_access_token: ${{ secrets.GITHUB_TOKEN }}
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          allow-import-from-derivation = true
+          extra-substituters = https://cache.iog.io/
+          extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        persist-credentials: false
+
+    - name: Refresh cardano-node mainnet configuration
+      run: |
+        nix build --no-update-lock-file .#hydraJobs.cardano-deployment
+
+    - name: Check if configuration from nix is a superset of in-repo configuration
+      run: |
+        set -uo pipefail
+
+        test_files=(
+          'mainnet-alonzo-genesis.json'
+          'mainnet-byron-genesis.json'
+          'mainnet-checkpoints.json'
+          'mainnet-config.json'
+          'mainnet-peer-snapshot.json'
+          'mainnet-shelley-genesis.json'
+          'mainnet-topology.json'
+        )
+
+        for f in "${test_files[@]}"; do
+          nix_file="result/$f"
+          repo_file="configuration/cardano/$f"
+          if ! jq -e --slurpfile nix "$nix_file" --slurpfile repo "$repo_file" -n '$repo | reduce keys[] as $k (true; . and $repo[$k] == $nix[$k])' &>/dev/null ; then
+            echo "Nix file $nix_file does not have all the same top-level entries as the file from repository $repo_file"
+            diff "$nix_file" "$repo_file"
+            exit 1
+          fi
+        done

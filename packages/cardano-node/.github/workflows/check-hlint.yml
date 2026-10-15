@@ -1,0 +1,27 @@
+name: Check HLint
+
+on:
+  pull_request: # Required for workflows to be able to be approved from forks
+  merge_group:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        persist-credentials: false
+
+    - name: 'Set up HLint'
+      uses: rwe/actions-hlint-setup@9f5da5e7cd43663fb7b2e2154a087c17f0471ed1 # v1
+      with:
+        version: 3.8
+
+    - name: 'Run HLint'
+      uses: rwe/actions-hlint-run@c178fa6263930e604e377a21ef54403306bdc1c7 # v2

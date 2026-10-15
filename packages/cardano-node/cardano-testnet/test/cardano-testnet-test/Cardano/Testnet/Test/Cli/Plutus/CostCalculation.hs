@@ -1,0 +1,458 @@
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NumericUnderscores #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Cardano.Testnet.Test.Cli.Plutus.CostCalculation
+  ( hprop_ref_plutus_cost_calculation
+  , hprop_included_plutus_cost_calculation
+  , hprop_included_simple_script_cost_calculation
+    -- | Execute tests in this module with:
+    -- @DISABLE_RETRIES=1 cabal test cardano-testnet-test -- -p "/Spec.hs.Spec.Ledger Events.Plutus.Cost Calc/"@
+  )
+where
+
+import           Cardano.Api hiding (Value)
+import           Cardano.Api.Experimental (Some (Some))
+import           Cardano.Api.Ledger (EpochInterval (..))
+
+import           Cardano.Testnet
+
+import           Prelude
+
+import           Control.Monad (void)
+import           Data.Aeson (Value, encodeFile)
+import qualified Data.Aeson.KeyMap as KeyMap
+import           Data.Aeson.Types (Value (..), object)
+import           Data.Bifunctor (first)
+import qualified Data.ByteString as BS
+import           Data.Default.Class (Default (def))
+import qualified Data.List.NonEmpty as NEL
+import qualified Data.Text as Text
+import           Data.Text.Encoding (decodeLatin1)
+import qualified Data.Vector as Vector
+import           System.Directory (makeAbsolute)
+import           System.FilePath ((</>))
+import qualified System.Info as SYS
+
+import           Testnet.Components.Query (TestnetWaitPeriod (..), findLargestUtxoForPaymentKey,
+                   getEpochStateDetails, getEpochStateView, getTxIx, retryUntilJustM)
+import qualified Testnet.Defaults as Defaults
+import           Testnet.Process.Cli.Transaction (TxOutAddress (..), mkSpendOutputsOnlyTx,
+                   retrieveTransactionId, signTx, submitTx)
+import           Testnet.Process.Run (execCli', mkExecConfig)
+import           Testnet.Process.RunIO (liftIOAnnotated)
+import           Testnet.Property.Util (integrationRetryWorkspace)
+import           Testnet.Start.Types (eraToString)
+import           Testnet.Types
+
+import           Hedgehog (Property)
+import qualified Hedgehog as H
+import qualified Hedgehog.Extras.Test.Base as H
+import qualified Hedgehog.Extras.Test.File as H
+import qualified Hedgehog.Extras.Test.Golden as H
+import qualified Hedgehog.Extras.Test.TestWatchdog as H
+
+-- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/Ref Script/"'@
+hprop_ref_plutus_cost_calculation :: Property
+hprop_ref_plutus_cost_calculation = integrationRetryWorkspace 2 "ref-plutus-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+  H.note_ SYS.os
+  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let tempAbsPath' = unTmpAbsPath tempAbsPath
+  work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
+
+  let
+    sbe = ShelleyBasedEraConway
+    era = toCardanoEra sbe
+    cEra = AnyCardanoEra era
+    eraName = eraToString era
+    tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
+    creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
+
+  TestnetRuntime
+    { configurationFile
+    , testnetMagic
+    , testnetNodes
+    , wallets = wallet0 : wallet1 : _
+    } <-
+    createAndRunTestnet creationOptions def conf
+
+  let poolNode1 = NEL.head testnetNodes
+  poolSprocket1 <- H.noteShow $ nodeSprocket poolNode1
+  execConfig <- mkExecConfig tempBaseAbsPath poolSprocket1 testnetMagic
+  epochStateView <- getEpochStateView configurationFile (nodeSocketPath poolNode1)
+
+  refScriptSizeWork <- H.createDirectoryIfMissing $ work </> "ref-script-publish"
+  plutusV3Script <-
+    File <$> liftIOAnnotated (makeAbsolute "test/cardano-testnet-test/files/plutus/v3/always-succeeds.plutus")
+
+  let scriptPublishUTxOAmount = 10_000_000
+
+  -- Submit a transaction to publish the reference script
+  txBodyPublishRefScript <-
+    mkSpendOutputsOnlyTx
+      execConfig
+      epochStateView
+      sbe
+      refScriptSizeWork
+      "tx-body"
+      wallet0
+      [(ScriptAddress plutusV3Script, scriptPublishUTxOAmount, Just plutusV3Script)]
+  signedTxPublishRefScript <-
+    signTx
+      execConfig
+      cEra
+      refScriptSizeWork
+      "signed-tx"
+      txBodyPublishRefScript
+      [Some $ paymentKeyInfoPair wallet0]
+  submitTx execConfig cEra signedTxPublishRefScript
+
+  -- Wait until transaction is on chain and obtain transaction identifier
+  txIdPublishRefScript <- retrieveTransactionId execConfig signedTxPublishRefScript
+  txIxPublishRefScript <-
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $
+      getEpochStateDetails epochStateView >>= getTxIx sbe txIdPublishRefScript scriptPublishUTxOAmount
+
+  -- Submit a transaction to lock money in the reference script
+  refScriptLock <- H.createDirectoryIfMissing $ work </> "ref-script-lock"
+
+  let transferAmount = 20_000_000
+      enoughAmountForFees = 2_000_000 -- Needs to be more than min ada
+  txBodyLock <-
+    mkSpendOutputsOnlyTx
+      execConfig
+      epochStateView
+      sbe
+      refScriptLock
+      "tx-body"
+      wallet0
+      [(ScriptAddress plutusV3Script, transferAmount, Nothing)]
+  signedTxLock <-
+    signTx execConfig cEra refScriptLock "signed-tx" txBodyLock [Some $ paymentKeyInfoPair wallet0]
+  submitTx execConfig cEra signedTxLock
+
+  -- Wait until transaction is on chain and obtain transaction identifier
+  txIdLock <- retrieveTransactionId execConfig signedTxLock
+  txIxLock <-
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $
+      getEpochStateDetails epochStateView >>= getTxIx sbe txIdLock transferAmount
+
+  -- Create transaction that uses reference script
+  refScriptUnlock <- H.createDirectoryIfMissing $ work </> "ref-script-unlock"
+  let unsignedUnlockTx = File $ refScriptUnlock </> "unsigned-tx.tx"
+  largestUTxO <- findLargestUtxoForPaymentKey epochStateView sbe wallet1
+  refScriptHash <- execCli' execConfig [ eraName, "transaction", "policyid", "--script-file", unFile plutusV3Script]
+  H.note_ $ "Reference script hash: " <> refScriptHash
+
+  void $ execCli' execConfig
+      [ eraName, "query", "utxo"
+      , "--whole-utxo"
+      , "--cardano-mode"
+      , "--out-file", work </> "utxo-1.json"
+      ]
+  H.cat $ work </> "utxo-1.json"
+  void $
+    execCli'
+      execConfig
+      [ eraName
+      , "transaction", "build"
+      , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet1
+      , "--tx-in", prettyShow (TxIn txIdLock txIxLock)
+      , "--spending-reference-tx-in-inline-datum-present"
+      , "--spending-tx-in-reference", prettyShow (TxIn txIdPublishRefScript txIxPublishRefScript)
+      , "--spending-plutus-script-v3"
+      , "--spending-reference-tx-in-redeemer-value", "42"
+      , "--tx-in-collateral", prettyShow largestUTxO
+      , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet1) <> "+" <> show (unCoin (transferAmount - enoughAmountForFees))
+      , "--out-file", unFile unsignedUnlockTx
+      ]
+
+  signedUnlockTx <-
+    signTx
+      execConfig
+      cEra
+      refScriptUnlock
+      "signed-tx"
+      unsignedUnlockTx
+      [Some $ paymentKeyInfoPair wallet1]
+
+  -- Calculate cost of the transaction before submitting, because once the tx is
+  -- included in a block the spending input UTxOs are consumed and the online
+  -- query can no longer resolve the reference script.
+  let txCostOutput = File $ refScriptUnlock </> "unsigned-tx.tx"
+  H.noteM_ $
+    execCli'
+      execConfig
+      [ eraName
+      , "transaction", "calculate-plutus-script-cost", "online"
+      , "--tx-file", unFile signedUnlockTx
+      , "--out-file", unFile txCostOutput
+      ]
+
+  H.diffFileVsGoldenFile
+    (unFile txCostOutput)
+    "test/cardano-testnet-test/files/calculatePlutusScriptCost.json"
+
+  -- Compare to stdout
+
+  output <-
+    H.noteM $
+      execCli'
+        execConfig
+        [ eraName
+        , "transaction", "calculate-plutus-script-cost", "online"
+        , "--tx-file", unFile signedUnlockTx
+        ]
+
+  H.diffVsGoldenFile output "test/cardano-testnet-test/files/calculatePlutusScriptCost.json"
+
+  submitTx execConfig cEra signedUnlockTx
+
+-- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/Spec.hs.Spec.Ledger Events.Plutus.Cost Calc.Normal Script/"'@
+hprop_included_plutus_cost_calculation :: Property
+hprop_included_plutus_cost_calculation = integrationRetryWorkspace 2 "included-plutus-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+  H.note_ SYS.os
+  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let tempAbsPath' = unTmpAbsPath tempAbsPath
+  work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
+
+  let
+    sbe = ShelleyBasedEraConway
+    era = toCardanoEra sbe
+    cEra = AnyCardanoEra era
+    eraName = eraToString era
+    tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
+    creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
+
+  TestnetRuntime
+    { configurationFile
+    , testnetMagic
+    , testnetNodes
+    , wallets = wallet0 : wallet1 : _
+    } <-
+    createAndRunTestnet creationOptions def conf
+
+  let poolNode1 = NEL.head testnetNodes
+  poolSprocket1 <- H.noteShow $ nodeSprocket poolNode1
+  execConfig <- mkExecConfig tempBaseAbsPath poolSprocket1 testnetMagic
+  epochStateView <- getEpochStateView configurationFile (nodeSocketPath poolNode1)
+
+  includedScriptLockWork <- H.createDirectoryIfMissing $ work </> "included-script-lock"
+
+  plutusScriptFp <- H.note $ work </> "always-succeeds-script.plutusV3"
+  H.writeFile plutusScriptFp $ Text.unpack Defaults.plutusV3Script
+
+  --_plutusV3Script <-
+  --  File <$> liftIOAnnotated (makeAbsolute "test/cardano-testnet-test/files/plutus/v3/always-succeeds.plutus")
+
+  let includedScriptLockAmount = 10_000_000
+      enoughAmountForFees = 2_000_000 -- Needs to be more than min ada
+
+  -- Submit a transaction to publish the reference script
+  txBodyIncludedScriptLock <-
+    mkSpendOutputsOnlyTx
+      execConfig
+      epochStateView
+      sbe
+      includedScriptLockWork
+      "tx-body"
+      wallet0
+      [(ScriptAddress $ File plutusScriptFp, includedScriptLockAmount, Nothing)]
+  signedTxIncludedScriptLock <-
+    signTx
+      execConfig
+      cEra
+      includedScriptLockWork
+      "signed-tx"
+      txBodyIncludedScriptLock
+      [Some $ paymentKeyInfoPair wallet0]
+  submitTx execConfig cEra signedTxIncludedScriptLock
+
+  -- Wait until transaction is on chain and obtain transaction identifier
+  txIdIncludedScriptLock <- retrieveTransactionId execConfig signedTxIncludedScriptLock
+  txIxIncludedScriptLock <-
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $
+      getEpochStateDetails epochStateView >>= getTxIx sbe txIdIncludedScriptLock includedScriptLockAmount
+
+  -- Create transaction that uses reference script
+  includedScriptUnlock <- H.createDirectoryIfMissing $ work </> "included-script-unlock"
+  let unsignedIncludedScript = File $ includedScriptUnlock </> "unsigned-tx.tx"
+  newLargestUTxO <- findLargestUtxoForPaymentKey epochStateView sbe wallet1
+  scriptHash <- execCli' execConfig [ eraName, "transaction", "policyid", "--script-file", plutusScriptFp]
+  H.note_ $ "Script hash: " <> scriptHash
+  void $
+    execCli'
+      execConfig
+      [ eraName
+      , "transaction", "build"
+      , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet1
+      , "--tx-in", prettyShow (TxIn txIdIncludedScriptLock txIxIncludedScriptLock)
+      , "--tx-in-script-file", plutusScriptFp
+      , "--tx-in-redeemer-value", "42"
+      , "--tx-in-collateral", prettyShow newLargestUTxO
+      , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet1) <> "+" <> show (unCoin (includedScriptLockAmount - enoughAmountForFees))
+      , "--out-file", unFile unsignedIncludedScript
+      ]
+
+  signedIncludedScript <-
+    signTx
+      execConfig
+      cEra
+      includedScriptUnlock
+      "signed-tx"
+      unsignedIncludedScript
+      [Some $ paymentKeyInfoPair wallet1]
+
+  submitTx execConfig cEra signedIncludedScript
+
+  -- Calculate cost of the transaction
+  let includedScriptCostOutput = File $ includedScriptUnlock </> "scriptCost.json"
+  H.noteM_ $
+    execCli'
+      execConfig
+      [ eraName
+      , "transaction", "calculate-plutus-script-cost", "online"
+      , "--tx-file", unFile signedIncludedScript
+      , "--out-file", unFile includedScriptCostOutput
+      ]
+
+  H.diffFileVsGoldenFile
+    (unFile includedScriptCostOutput)
+    "test/cardano-testnet-test/files/calculatePlutusScriptCost.json"
+
+-- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options  '-p "/Spec.hs.Spec.Ledger Events.Plutus.Cost Calc.Simple Script/"'@
+hprop_included_simple_script_cost_calculation :: Property
+hprop_included_simple_script_cost_calculation = integrationRetryWorkspace 2 "included-simple-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+  H.note_ SYS.os
+  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let tempAbsPath' = unTmpAbsPath tempAbsPath
+  work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
+
+  let
+    sbe = ShelleyBasedEraConway
+    era = toCardanoEra sbe
+    cEra = AnyCardanoEra era
+    eraName = eraToString era
+    tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
+    creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
+
+  TestnetRuntime
+    { configurationFile
+    , testnetMagic
+    , testnetNodes
+    , wallets = wallet0 : wallet1 : _
+    } <-
+    createAndRunTestnet creationOptions def conf
+
+  let poolNode1 = NEL.head testnetNodes
+  poolSprocket1 <- H.noteShow $ nodeSprocket poolNode1
+  execConfig <- mkExecConfig tempBaseAbsPath poolSprocket1 testnetMagic
+  epochStateView <- getEpochStateView configurationFile (nodeSocketPath poolNode1)
+
+  -- We write a simple script that allows any of the two payment keys to spend the money
+
+  addrHash1 <- H.evalEitherM $ liftIOAnnotated $ runExceptT $ paymentKeyInfoHash wallet0
+  addrHash2 <- H.evalEitherM $ liftIOAnnotated $ runExceptT $ paymentKeyInfoHash wallet1
+
+  simpleScriptLockWork <- H.createDirectoryIfMissing $ work </> "simple-script-lock"
+  let simpleScript = File $ simpleScriptLockWork </> "simple-script.json"
+  liftIOAnnotated $ encodeFile (unFile simpleScript) $ generateSimpleAnyKeyScript [addrHash1, addrHash2]
+
+  -- We now submit a transaction to the script address
+  let lockedAmount = 10_000_000
+      enoughAmountForFees = 2_000_000 -- Needs to be more than min ada
+
+  txBodySimpleScriptLock <-
+    mkSpendOutputsOnlyTx
+      execConfig
+      epochStateView
+      sbe
+      simpleScriptLockWork
+      "tx-body"
+      wallet0
+      [(ScriptAddress simpleScript, lockedAmount, Nothing)]
+
+  signedTxSimpleScriptLock <-
+    signTx
+      execConfig
+      cEra
+      simpleScriptLockWork
+      "signed-tx"
+      txBodySimpleScriptLock
+      [Some $ paymentKeyInfoPair wallet0]
+  submitTx execConfig cEra signedTxSimpleScriptLock
+
+  -- Wait until transaction is on chain and obtain transaction identifier
+  txIdSimpleScriptLock <- retrieveTransactionId execConfig signedTxSimpleScriptLock
+  txIxSimpleScriptLock <-
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $
+      getEpochStateDetails epochStateView >>= getTxIx sbe txIdSimpleScriptLock lockedAmount
+
+  -- Create transaction that unlocks the simple script UTxO we just created
+  simpleScriptUnlockWork <- H.createDirectoryIfMissing $ work </> "simple-script-unlock"
+  let unsignedUnlockSimpleScript = File $ simpleScriptUnlockWork </> "unsigned-tx.tx"
+
+  void $
+    execCli'
+      execConfig
+      [ eraName
+      , "transaction", "build"
+      , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet1
+      , "--tx-in", prettyShow (TxIn txIdSimpleScriptLock txIxSimpleScriptLock)
+      , "--tx-in-script-file", unFile simpleScript
+      , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet1) <> "+" <> show (unCoin (lockedAmount - enoughAmountForFees))
+      , "--witness-override", "2"
+      , "--out-file", unFile unsignedUnlockSimpleScript
+      ]
+
+  signedScriptUnlock <-
+    signTx
+      execConfig
+      cEra
+      simpleScriptUnlockWork
+      "signed-tx"
+      unsignedUnlockSimpleScript
+      [Some $ paymentKeyInfoPair wallet1]
+
+  submitTx execConfig cEra signedScriptUnlock
+
+  -- Calculate cost of the transaction
+
+  output <-
+    H.noteM $
+      execCli'
+        execConfig
+        [ eraName
+        , "transaction", "calculate-plutus-script-cost", "online"
+        , "--tx-file", unFile signedScriptUnlock
+        ]
+
+  H.diffVsGoldenFile output "test/cardano-testnet-test/files/calculateSimpleScriptCost.json"
+
+ where
+  generateSimpleAnyKeyScript :: [Text] -> Value
+  generateSimpleAnyKeyScript keyHashes =
+    object
+      [ ("type", "any")
+      ,
+        ( "scripts"
+        , Array $
+            Vector.fromList
+              [ Object $
+                  KeyMap.fromList
+                    [ ("type", "sig")
+                    , ("keyHash", String keyHash)
+                    ]
+              | keyHash <- keyHashes
+              ]
+        )
+      ]
+
+  paymentKeyInfoHash :: PaymentKeyInfo -> ExceptT String IO Text
+  paymentKeyInfoHash wallet = do
+    vkBs <- liftIOAnnotated $ BS.readFile (unFile $ verificationKey $ paymentKeyInfoPair wallet)
+    svk <- liftEither $ first show $ deserialiseAnyVerificationKey vkBs
+    return $
+      decodeLatin1 $
+        mapSomeAddressVerificationKey (serialiseToRawBytesHex . verificationKeyHash) svk

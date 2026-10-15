@@ -1,0 +1,273 @@
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Cardano.Node.Startup
+  ( module Cardano.Node.Startup
+  , module Cardano.Logging.Types.NodeInfo
+  , module Cardano.Logging.Types.NodeStartupInfo
+  ) where
+
+import qualified Cardano.Api as Api
+
+import           Cardano.Git.Rev (gitRev)
+import           Cardano.Ledger.Shelley.Genesis (sgSystemStart)
+import           Cardano.Logging
+import           Cardano.Logging.Types.NodeInfo (NodeInfo (..))
+import           Cardano.Logging.Types.NodeStartupInfo (NodeStartupInfo (..))
+import           Cardano.Network.Diffusion (CardanoLocalRootConfig)
+import           Cardano.Network.NodeToClient (NodeToClientVersion)
+import           Cardano.Network.NodeToNode (DiffusionMode (..), NodeToNodeVersion, PeerAdvertise)
+import           Cardano.Node.Configuration.POM (NodeConfiguration (..), ncProtocol)
+import           Cardano.Node.Configuration.Socket
+import           Cardano.Node.Protocol (ProtocolInstantiationError)
+import           Cardano.Node.Types (PeerSnapshotFile (..))
+import           Cardano.Rpc.Server.Config (RpcEndpoint (..))
+import           Cardano.Slotting.Slot (SlotNo)
+import qualified Ouroboros.Consensus.BlockchainTime.WallClock.Types as WCT
+import           Ouroboros.Consensus.Cardano.Block
+import           Ouroboros.Consensus.Cardano.CanHardFork (shelleyLedgerConfig)
+import           Ouroboros.Consensus.Config
+import           Ouroboros.Consensus.HardFork.Combinator.Degenerate
+import           Ouroboros.Consensus.Ledger.Query (getSystemStart)
+import           Ouroboros.Consensus.Node.NetworkProtocolVersion (BlockNodeToClientVersion,
+                   BlockNodeToNodeVersion)
+import           Ouroboros.Consensus.Shelley.Ledger.Ledger (shelleyLedgerGenesis)
+import           Ouroboros.Network.Magic (NetworkMagic (..))
+import           Ouroboros.Network.PeerSelection.LedgerPeers.Type (UseLedgerPeers)
+import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint)
+import           Ouroboros.Network.PeerSelection.State.LocalRootPeers (HotValency, WarmValency)
+
+import           Prelude
+
+import           Control.Exception (Exception (..))
+import           Data.Map.Strict (Map)
+import           Data.Monoid (Last (..))
+import           Data.Text (Text, pack)
+import           Data.Time.Clock (NominalDiffTime, UTCTime)
+import           Data.Version (showVersion)
+import           Data.Word (Word64)
+import           Network.HostName (getHostName)
+import qualified Network.Socket as Socket
+
+import           Paths_cardano_node (version)
+
+data StartupTrace blk =
+  -- | Log startup information.
+  --
+    StartupInfo
+      [Socket.SockAddr]
+      -- ^ node-to-node addresses
+      (Maybe LocalSocketOrSocketInfo)
+      -- ^ node-to-client socket path
+      (Map NodeToNodeVersion (BlockNodeToNodeVersion blk))
+      -- ^ supported node-to-node versions
+      (Map NodeToClientVersion (BlockNodeToClientVersion blk))
+      -- ^ supported node-to-client versions
+
+  -- | Log peer-to-peer diffusion mode
+  | StartupP2PInfo DiffusionMode
+
+  | StartupTime UTCTime
+
+  | StartupNetworkMagic NetworkMagic
+
+  | StartupSocketConfigError SocketConfigError
+
+  | StartupDBValidation
+
+  -- | Log that the block forging is being updated
+  | BlockForgingUpdate EnabledBlockForging
+
+  -- | Protocol instantiation error when updating block forging
+  | BlockForgingUpdateError ProtocolInstantiationError
+
+  -- | Mismatched block type
+  | BlockForgingBlockTypeMismatch
+       Api.SomeBlockType -- ^ expected
+       Api.SomeBlockType -- ^ provided
+
+  -- | Log that the network configuration is being updated.
+  --
+  | NetworkConfigUpdate
+
+  -- | Re-configuration of network config is not supported.
+  --
+  | NetworkConfigUpdateUnsupported
+
+  -- | Log network configuration update error.
+  --
+  | NetworkConfigUpdateError Text
+
+  -- | Log network configuration update warning.
+  --
+  | NetworkConfigUpdateWarning Text
+
+  -- | Log network configuration update info.
+  --
+  | NetworkConfigUpdateInfo Text
+
+  -- | Log peer-to-peer network configuration, either on startup or when its
+  -- updated.
+  --
+  | NetworkConfig [(HotValency, WarmValency, Map RelayAccessPoint CardanoLocalRootConfig)]
+                  (Map RelayAccessPoint PeerAdvertise)
+                  UseLedgerPeers
+                  (Maybe PeerSnapshotFile)
+
+  -- | Warn when 'DisabledP2P' is set.
+  | NonP2PWarning
+
+  -- | Warn when 'ExperimentalProtocolsEnabled' is set and affects
+  -- node-to-node protocol.
+  --
+  | WarningDevelopmentNodeToNodeVersions [NodeToNodeVersion]
+
+  -- | Warn when 'ExperimentalProtocolsEnabled' is set and affects
+  -- node-to-client protocol.
+  --
+  | WarningDevelopmentNodeToClientVersions [NodeToClientVersion]
+
+  | BICommon BasicInfoCommon
+  | BIShelley BasicInfoShelleyBased
+  | BIByron BasicInfoByron
+  | BINetwork BasicInfoNetwork
+  | LedgerPeerSnapshotLoaded SlotNo
+  -- | Log that RPC configuration has been updated
+  | RpcConfigUpdate Text
+  -- | Log RPC configuration update error
+  | RpcConfigUpdateError Text
+  -- | Log that node kernel access is not supported for the running block type.
+  | RpcUnsupportedBlockType Text
+  -- | Log RPC is forcefully disabled after a RPC server crash.
+  | RpcForceDisabled
+  -- | Warn that the RPC (gRPC) server is enabled on a block-producing node.
+  | RpcEnabledOnBlockProducer
+  -- | Warn that the RPC (gRPC) server is listening on a non-loopback address.
+  | RpcListeningOnPublicAddress RpcEndpoint
+  -- | Warn that 'SSLKEYLOGFILE' is set, so the RPC TLS listener will write TLS session key-log material.
+  | RpcTlsKeyLogEnabled Text
+  -- | Warn that the RPC TLS private key file is readable by group or others.
+  | RpcTlsPrivateKeyPermissive Text
+
+  | MovedTopLevelOption String
+
+data LedgerPeerSnapshotError = LedgerPeerSnapshotTooOld SlotNo SlotNo PeerSnapshotFile
+  deriving Show
+
+instance Exception LedgerPeerSnapshotError where
+  displayException (LedgerPeerSnapshotTooOld useLedgerAfterSlot peerSnapshotSlot (PeerSnapshotFile snapshotFile)) =
+      "The ledger peer snapshot slot "
+    <> show peerSnapshotSlot
+    <> " is older than the 'useLedgerAfterSlot' entry in the topology file: "
+    <> show useLedgerAfterSlot
+    <> ".\n"
+    <> "Possible fix: update the ledger peer snapshot file: " <> show snapshotFile
+
+
+data EnabledBlockForging
+  = EnabledBlockForging
+  | DisabledBlockForging
+  | NotEffective
+    -- ^ one needs to send `SIGHUP` after consensus
+    -- initialised itself (especially after replying all
+    -- blocks).
+  deriving stock
+    (Eq, Show)
+
+data BasicInfoCommon = BasicInfoCommon {
+    biConfigPath    :: FilePath
+  , biNetworkMagic  :: NetworkMagic
+  , biProtocol      :: Text
+  , biVersion       :: Text
+  , biCommit        :: Text
+  , biNodeStartTime :: UTCTime
+  }
+
+-- Fields of this type are made strict to be sure no path from GC roots to genesis is retained
+data BasicInfoShelleyBased = BasicInfoShelleyBased {
+    bisEra               :: !Text
+  , bisSystemStartTime   :: !UTCTime
+  , bisSlotLength        :: !NominalDiffTime
+  , bisEpochLength       :: !Word64
+  , bisSlotsPerKESPeriod :: !Word64
+  }
+
+data BasicInfoByron = BasicInfoByron {
+    bibSystemStartTime :: UTCTime
+  , bibSlotLength      :: NominalDiffTime
+  , bibEpochLength     :: Word64
+  }
+
+data BasicInfoNetwork = BasicInfoNetwork {
+    niAddresses     :: [SocketOrSocketInfo]
+  , niDiffusionMode :: DiffusionMode
+  }
+
+-- | Prepare basic info about the node. This info will be sent to 'cardano-tracer'.
+prepareNodeInfo
+  :: Api.ConfigSupportsNode blk
+  => NodeConfiguration
+  -> Api.BlockType blk
+  -> TopLevelConfig blk
+  -> TraceConfig
+  -> UTCTime
+  -> IO NodeInfo
+prepareNodeInfo nc blockType cfg tc nodeStartTime = do
+  nodeName <- prepareNodeName
+  let getSystemStartByron = WCT.getSystemStart . getSystemStart . configBlock $ cfg
+      systemStartTime :: UTCTime
+      systemStartTime =
+        case blockType of
+          Api.ByronBlockType ->
+            getSystemStartByron
+          Api.ShelleyBlockType ->
+            let DegenLedgerConfig cfgShelley = configLedger cfg
+            in getSystemStartShelley cfgShelley
+          Api.CardanoBlockType ->
+            let CardanoLedgerConfig _ cfgShelley cfgAllegra cfgMary cfgAlonzo cfgBabbage cfgConway cfgDijkstra = configLedger cfg
+            in minimum [ getSystemStartByron
+                       , getSystemStartShelley cfgShelley
+                       , getSystemStartShelley cfgAllegra
+                       , getSystemStartShelley cfgMary
+                       , getSystemStartShelley cfgAlonzo
+                       , getSystemStartShelley cfgBabbage
+                       , getSystemStartShelley cfgConway
+                       , getSystemStartShelley cfgDijkstra
+                       ]
+  return $ NodeInfo
+    { niName            = nodeName
+    , niProtocol        = pack . show . ncProtocol $ nc
+    , niVersion         = pack . showVersion $ version
+    , niCommit          = $(gitRev)
+    , niStartTime       = nodeStartTime
+    , niSystemStartTime = systemStartTime
+    }
+ where
+  getSystemStartShelley = sgSystemStart . shelleyLedgerGenesis . shelleyLedgerConfig
+
+  prepareNodeName =
+    case tcNodeName tc of
+      Just aName -> return aName
+      Nothing -> do
+        -- The user didn't specify node's name in the configuration.
+        -- In this case we should form node's name as "host_port",
+        -- where 'host' is the machine's host name and 'port' is taken
+        -- from the '--port' CLI-parameter.
+
+        let suffix :: String
+            suffix
+              | SocketConfig{ncNodePortNumber = Last (Just port)} <- ncSocketConfig nc
+              = "_" <> show port
+              | otherwise
+              = ""
+
+        hostName <- getHostName
+        return (pack (hostName <> suffix))

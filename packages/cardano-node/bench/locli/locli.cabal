@@ -1,0 +1,224 @@
+cabal-version: 3.0
+
+name:                   locli
+version:                2.4
+synopsis:               Cardano log analysis CLI
+description:            Cardano log analysis CLI.
+category:               Cardano,
+                        Logging,
+copyright:              2021-2023 Input Output Global Inc (IOG), 2023-2026 Intersect.
+author:                 IOHK
+maintainer:             operations@iohk.io
+license:                Apache-2.0
+license-files:          LICENSE
+                        LICENSE_easyplot
+                        NOTICE
+                        -- The module src-quick/Graphics/EasyPlot.hs is a forked, and heavily modded,
+                        -- version of the easyplot-1.0 package by Julian Bertram.
+extra-doc-files:        CHANGELOG.md
+data-files:             report-templates/typst/*.ede
+build-type:             Simple
+
+common project-config
+  default-language:     Haskell2010
+
+  ghc-options:          -Wall
+                        -Wincomplete-record-updates
+                        -Wincomplete-uni-patterns
+                        -Wredundant-constraints
+                        -Wpartial-fields
+                        -Wcompat
+                        -Wno-all-missed-specialisations
+
+  if impl(ghc >= 9.8)
+    ghc-options:        -Wno-x-partial
+
+  build-depends:        base >= 4.14 && < 5,
+
+  if os(windows)
+    buildable: False
+
+common extensions
+  default-extensions:   BangPatterns
+                        BlockArguments
+                        DataKinds
+                        DeriveGeneric
+                        DerivingStrategies
+                        DerivingVia
+                        FlexibleContexts
+                        FlexibleInstances
+                        GADTs
+                        ImportQualifiedPost
+                        LambdaCase
+                        MultiParamTypeClasses
+                        NamedFieldPuns
+                        NoImplicitPrelude
+                        OverloadedStrings
+                        PartialTypeSignatures
+                        RankNTypes
+                        RecordWildCards
+                        ScopedTypeVariables
+                        StandaloneDeriving
+                        TupleSections
+                        TypeApplications
+                        TypeFamilies
+                        ViewPatterns
+
+library
+  import:               project-config
+                      , extensions
+
+  hs-source-dirs:       src
+
+  exposed-modules:      Data.Accum
+                        Data.CDF
+                        Data.DataDomain
+                        Data.Profile
+
+                        Cardano.Command
+                        Cardano.Report
+                        Cardano.TopHandler
+                        Cardano.Util
+
+                        Cardano.Analysis.API
+                        Cardano.Analysis.API.Chain
+                        Cardano.Analysis.API.ChainFilter
+                        Cardano.Analysis.API.Context
+                        Cardano.Analysis.API.Dictionary
+                        Cardano.Analysis.API.Field
+                        Cardano.Analysis.API.Ground
+                        Cardano.Analysis.API.Metrics
+                        Cardano.Analysis.API.Run
+                        Cardano.Analysis.API.Types
+                        Cardano.Analysis.API.LocliVersion
+
+                        Cardano.Analysis.BlockProp
+                        Cardano.Analysis.MachPerf
+                        Cardano.Analysis.Summary
+
+                        Cardano.JSON
+                        Cardano.Org
+                        Cardano.Render
+
+                        Cardano.Unlog.BackendDB
+                        Cardano.Unlog.BackendFile
+                        Cardano.Unlog.LogObject
+                        Cardano.Unlog.LogObjectDB
+                        Cardano.Unlog.PlutusBudgetSummary
+                        Cardano.Unlog.Resources
+
+  other-modules:        Paths_locli
+  autogen-modules:      Paths_locli
+
+  build-depends:        aeson
+                      , aeson-pretty
+                      , async
+                      , bytestring
+                      , cardano-git-rev ^>= 0.2.2
+                      , cardano-ledger-core
+                      , cardano-prelude
+                      , cardano-slotting
+                      , containers
+                      , deepseq
+                      , directory
+                      , ede
+                      , extra
+                      , filepath
+                      , fingertree ^>= 0.1.6.1
+                      , hashable
+                      , optparse-applicative
+                      , ouroboros-consensus:ouroboros-consensus
+                      , ouroboros-network:api ^>= 1.3
+                      , sop-core
+                      , split
+                      , sqlite-easy >= 1.1.0.1
+                      , statistics
+                      , strict-sop-core
+                      , text
+                      , text-short
+                      , time
+                      , trace-resources
+                      , transformers
+                      , transformers-except
+                      , unix
+                      , unordered-containers
+                      , vector
+                      , witherable
+
+executable locli
+  import:               project-config
+                      , extensions
+
+  hs-source-dirs:       app
+  main-is:              locli.hs
+  ghc-options:          -threaded
+                        -rtsopts
+                        "-with-rtsopts=-T -N7 -A2m -c -H64m"
+
+  build-depends:        aeson
+                      , cardano-prelude
+                      , locli
+                      , optparse-applicative
+                      , text
+                      , text-short
+                      , transformers
+                      , transformers-except
+
+executable locli-quick
+  import:               project-config
+
+  default-extensions:   NamedFieldPuns
+                        LambdaCase
+                        TypeFamilies
+                        TypeOperators
+
+  hs-source-dirs:       app
+                        src-quick
+  main-is:              locli-quick.hs
+
+  other-modules:        Cardano.Analysis.Reducer
+                        Cardano.Analysis.Reducer.Util
+                        Data.Reducer
+                        Graphics.EasyPlot
+
+  ghc-options:          -threaded
+                        -rtsopts
+                        "-with-rtsopts=-T -N7 -A2m -c -H64m"
+
+  build-depends:        locli
+                      , aeson
+                      , async
+                      , bytestring
+                      , cardano-slotting
+                      , containers
+                      , directory
+                      , extra
+                      , mtl
+                      , process
+                      , split
+                      , text
+                      , text-short
+                      , time
+                      , trace-resources
+                      , sqlite-easy >= 1.1.0.1
+                      , unordered-containers
+
+test-suite test-locli
+  import:               project-config
+                      , extensions
+
+  hs-source-dirs:       test
+  main-is:              test-locli.hs
+  type:                 exitcode-stdio-1.0
+  ghc-options:          -threaded -rtsopts "-with-rtsopts=-N -T"
+
+  build-depends:        cardano-prelude
+                      , containers
+                      , hedgehog
+                      , hedgehog-extras ^>= 0.10
+                      , locli
+                      , text
+
+  other-modules:        Test.Analysis.CDF
+                        Test.Unlog.LogObjectDB
+                        Test.Unlog.Org

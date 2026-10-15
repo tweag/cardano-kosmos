@@ -1,0 +1,219 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
+module Cardano.Testnet.Test.Rpc.Query
+  ( hprop_rpc_query_pparams
+  )
+where
+
+import           Cardano.Api
+import qualified Cardano.Api.Experimental as Exp
+import qualified Cardano.Api.Ledger as L
+
+import           Cardano.CLI.Type.Output (QueryTipLocalStateOutput (..))
+import qualified Cardano.Ledger.Api as L
+import qualified Cardano.Ledger.Binary.Version as L
+import qualified Cardano.Ledger.Conway.Core as L
+import qualified Cardano.Ledger.Conway.PParams as L
+import qualified Cardano.Rpc.Client as Rpc
+import qualified Cardano.Rpc.Proto.Api.UtxoRpc.Query as U5c
+import           Cardano.Rpc.Server.Internal.UtxoRpc.Query ()
+import           Cardano.Rpc.Server.Internal.UtxoRpc.Type (anyUtxoDataUtxoRpcToUtxo,
+                   utxoRpcBigIntToInteger, utxoRpcRationalNumberToRational)
+import           Cardano.Testnet
+
+import           Prelude
+
+import           Control.Exception
+import           Control.Monad
+import qualified Data.ByteString.Short as SBS
+import           Data.Default.Class
+import           Data.List.NonEmpty (NonEmpty ((:|)))
+import qualified Data.Map.Strict as M
+import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import           Data.Word (Word64)
+import           GHC.Exts (toList)
+import           Lens.Micro
+
+import           Testnet.Components.Query
+import           Testnet.Process.Run
+import           Testnet.Property.Util (integrationRetryWorkspace)
+import           Testnet.Start.Types
+import           Testnet.Types (nodeConnectionInfo)
+
+import           Hedgehog
+import qualified Hedgehog as H
+import qualified Hedgehog.Extras.Test.Base as H
+import qualified Hedgehog.Extras.Test.TestWatchdog as H
+
+-- | Run with:
+-- @TASTY_PATTERN='/RPC Query Protocol Params/' cabal test cardano-testnet-test@
+hprop_rpc_query_pparams :: Property
+hprop_rpc_query_pparams = integrationRetryWorkspace 2 "rpc-query-pparams" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let tempAbsPath' = unTmpAbsPath tempAbsPath
+
+  let era = Exp.ConwayEra
+      sbe = convert era
+      eraName = eraToString sbe
+      creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
+      runtimeOptions = def{runtimeEnableRpc = RpcEnabledUnixSocket}
+
+  tr@TestnetRuntime
+    { testnetMagic
+    , configurationFile
+    , testnetNodes = node0@TestnetNode{nodeSprocket} :| _
+    } <-
+    createAndRunTestnet creationOptions runtimeOptions conf
+
+  execConfig <- mkExecConfig tempAbsPath' nodeSprocket testnetMagic
+  epochStateView <- getEpochStateView configurationFile (nodeSocketPath node0)
+  pparams <- unLedgerProtocolParameters <$> getProtocolParams epochStateView (convert era)
+  utxos <- findAllUtxos epochStateView sbe
+  H.noteShowPretty_ utxos
+  rpcSocket <- H.note . unFile $ nodeRpcSocketPath node0
+
+  ----------
+  -- Get tip
+  ----------
+  QueryTipLocalStateOutput{localStateChainTip} <-
+    H.noteShowM $ execCliStdoutToJson execConfig [eraName, "query", "tip"]
+  (slot, blockHash', blockNo') <- case localStateChainTip of
+    ChainTipAtGenesis -> H.failure -- impossible
+    ChainTip (SlotNo slot) (HeaderHash hash) (BlockNo blockNo') -> pure (slot, SBS.fromShort hash, blockNo')
+
+  -----------------------------------
+  -- Compute expected tip timestamp
+  -----------------------------------
+  connectionInfo <- nodeConnectionInfo tr 0
+  (systemStart, eraHistory) <-
+    (H.leftFail <=< H.leftFailM) . H.evalIO $
+      executeLocalStateQueryExpr connectionInfo VolatileTip $ do
+        ss <- querySystemStart
+        eh <- queryEraHistory
+        pure $ (,) <$> ss <*> eh
+  expectedTimestampMs :: Word64 <- H.leftFail $ do
+    utcTime <- slotToUTCTime systemStart eraHistory (SlotNo slot)
+    pure . round $ utcTimeToPOSIXSeconds utcTime * 1000
+
+  --------------
+  -- RPC queries
+  --------------
+  let rpcServer = Rpc.ServerUnix rpcSocket
+  (pparamsResponse, utxosResponse) <- H.noteShowM . H.evalIO . Rpc.withConnection def rpcServer $ \conn -> do
+    pparams' <- do
+      let req = Rpc.defMessage
+      Rpc.nonStreaming conn (Rpc.rpc @(Rpc.Protobuf U5c.QueryService "readParams")) req
+
+    utxos' <- do
+      let req = Rpc.defMessage & U5c.keys .~
+            [ def & U5c.hash .~ serialiseToRawBytes tid & U5c.index .~ fromIntegral tix
+            | (TxIn tid (TxIx tix), _) <- toList utxos
+            ]
+      Rpc.nonStreaming conn (Rpc.rpc @(Rpc.Protobuf U5c.QueryService "readUtxos")) req
+    pure (pparams', utxos')
+
+  ---------------------------
+  -- Test readParams response
+  ---------------------------
+  pparamsResponse ^. U5c.ledgerTip . U5c.slot === slot
+  pparamsResponse ^. U5c.ledgerTip . U5c.hash === blockHash'
+  pparamsResponse ^. U5c.ledgerTip . U5c.height === blockNo'
+  H.assertWithinTolerance (pparamsResponse ^. U5c.ledgerTip . U5c.timestamp) expectedTimestampMs 1000
+
+  -- https://docs.cardano.org/about-cardano/explore-more/parameter-guide
+  let chainParams = pparamsResponse ^. U5c.values . U5c.cardano
+  Exp.obtainCommonConstraints era $ do
+    pparams ^. L.ppCoinsPerUTxOByteL . to L.unCoinPerByte . to L.fromCompact . to L.unCoin
+      ===^ chainParams ^. U5c.coinsPerUtxoByte . to utxoRpcBigIntToInteger
+    pparams ^. L.ppMaxTxSizeL === chainParams ^. U5c.maxTxSize . to fromIntegral
+    pparams ^. L.ppTxFeeFixedL . to L.unCoin
+      ===^ chainParams ^. U5c.minFeeConstant . to utxoRpcBigIntToInteger
+    pparams ^. L.ppTxFeePerByteL . to L.unCoinPerByte . to L.fromCompact . to L.unCoin
+      ===^ chainParams ^. U5c.minFeeCoefficient . to utxoRpcBigIntToInteger
+    pparams ^. L.ppMaxBBSizeL === chainParams ^. U5c.maxBlockBodySize . to fromIntegral
+    pparams ^. L.ppMaxBHSizeL === chainParams ^. U5c.maxBlockHeaderSize . to fromIntegral
+    pparams ^. L.ppKeyDepositL ===^ chainParams ^. U5c.stakeKeyDeposit . to (fmap L.Coin . utxoRpcBigIntToInteger)
+    pparams ^. L.ppPoolDepositL ===^ chainParams ^. U5c.poolDeposit . to (fmap L.Coin . utxoRpcBigIntToInteger)
+    pparams ^. L.ppEMaxL . to L.unEpochInterval === chainParams ^. U5c.poolRetirementEpochBound . to fromIntegral
+    pparams ^. L.ppNOptL === chainParams ^. U5c.desiredNumberOfPools . to fromIntegral
+    Just (pparams ^. L.ppA0L . to L.unboundRational) === chainParams ^. U5c.poolInfluence . to utxoRpcRationalNumberToRational
+    Just (pparams ^. L.ppTauL . to L.unboundRational) === chainParams ^. U5c.treasuryExpansion . to utxoRpcRationalNumberToRational
+    Just (pparams ^. L.ppRhoL . to L.unboundRational) === chainParams ^. U5c.monetaryExpansion . to utxoRpcRationalNumberToRational
+    pparams ^. L.ppMinPoolCostL ===^ chainParams ^. U5c.minPoolCost . to (fmap L.Coin . utxoRpcBigIntToInteger)
+    ( pparams ^. L.ppProtocolVersionL . to L.pvMajor . to L.getVersion
+      , pparams ^. L.ppProtocolVersionL . to L.pvMinor
+      )
+      === ( chainParams ^. U5c.protocolVersion . U5c.major
+          , chainParams ^. U5c.protocolVersion . U5c.minor . to fromIntegral
+          )
+    pparams ^. L.ppMaxValSizeL === chainParams ^. U5c.maxValueSize . to fromIntegral
+    pparams ^. L.ppCollateralPercentageL === chainParams ^. U5c.collateralPercentage . to fromIntegral
+    pparams ^. L.ppMaxCollateralInputsL === chainParams ^. U5c.maxCollateralInputs . to fromIntegral
+    let pparamsCostModels = L.getCostModelParams <$> pparams ^. L.ppCostModelsL . to L.costModelsValid
+        wrapInMaybe v = if v == mempty then Nothing else Just v
+    M.lookup L.PlutusV1 pparamsCostModels === chainParams ^. U5c.costModels . U5c.plutusV1 . U5c.values . to wrapInMaybe
+    M.lookup L.PlutusV2 pparamsCostModels === chainParams ^. U5c.costModels . U5c.plutusV2 . U5c.values . to wrapInMaybe
+    M.lookup L.PlutusV3 pparamsCostModels === chainParams ^. U5c.costModels . U5c.plutusV3 . U5c.values . to wrapInMaybe
+    M.lookup L.PlutusV4 pparamsCostModels === chainParams ^. U5c.costModels . U5c.plutusV4 . U5c.values . to wrapInMaybe
+    Just (pparams ^. L.ppPricesL . to L.prSteps . to L.unboundRational) === chainParams ^. U5c.prices . U5c.steps . to utxoRpcRationalNumberToRational
+    Just (pparams ^. L.ppPricesL . to L.prMem . to L.unboundRational) === chainParams ^. U5c.prices . U5c.memory . to utxoRpcRationalNumberToRational
+    pparams ^. L.ppMaxTxExUnitsL === chainParams ^. U5c.maxExecutionUnitsPerTransaction . to inject
+    pparams ^. L.ppMaxBlockExUnitsL === chainParams ^. U5c.maxExecutionUnitsPerBlock . to inject
+    Just (pparams ^. L.ppMinFeeRefScriptCostPerByteL . to L.unboundRational)
+      === chainParams ^. U5c.minFeeScriptRefCostPerByte . to utxoRpcRationalNumberToRational
+    let poolVotingThresholds :: L.PoolVotingThresholds =
+          conwayEraOnwardsConstraints (convert era) $
+            pparams ^. L.ppPoolVotingThresholdsL
+    ( Just . L.unboundRational
+        <$> [ poolVotingThresholds ^. L.pvtMotionNoConfidenceL
+            , poolVotingThresholds ^. L.pvtCommitteeNormalL
+            , poolVotingThresholds ^. L.pvtCommitteeNoConfidenceL
+            , poolVotingThresholds ^. L.pvtHardForkInitiationL
+            , poolVotingThresholds ^. L.pvtPPSecurityGroupL
+            ]
+      )
+      === chainParams ^. U5c.poolVotingThresholds . U5c.thresholds . to (map utxoRpcRationalNumberToRational)
+    let drepVotingThresholds :: L.DRepVotingThresholds =
+          conwayEraOnwardsConstraints (convert era) $
+            pparams ^. L.ppDRepVotingThresholdsL
+    ( Just . L.unboundRational
+        <$> [ drepVotingThresholds ^. L.dvtMotionNoConfidenceL
+            , drepVotingThresholds ^. L.dvtCommitteeNormalL
+            , drepVotingThresholds ^. L.dvtCommitteeNoConfidenceL
+            , drepVotingThresholds ^. L.dvtUpdateToConstitutionL
+            , drepVotingThresholds ^. L.dvtHardForkInitiationL
+            , drepVotingThresholds ^. L.dvtPPNetworkGroupL
+            , drepVotingThresholds ^. L.dvtPPEconomicGroupL
+            , drepVotingThresholds ^. L.dvtPPTechnicalGroupL
+            , drepVotingThresholds ^. L.dvtPPGovGroupL
+            , drepVotingThresholds ^. L.dvtTreasuryWithdrawalL
+            ]
+      )
+      === chainParams ^. U5c.drepVotingThresholds . U5c.thresholds . to (map utxoRpcRationalNumberToRational)
+    pparams ^. L.ppCommitteeMinSizeL === chainParams ^. U5c.minCommitteeSize . to fromIntegral
+    pparams ^. L.ppCommitteeMaxTermLengthL . to L.unEpochInterval
+      === chainParams ^. U5c.committeeTermLimit . to fromIntegral
+    pparams ^. L.ppGovActionLifetimeL . to L.unEpochInterval
+      === chainParams ^. U5c.governanceActionValidityPeriod . to fromIntegral
+    pparams ^. L.ppGovActionDepositL ===^ chainParams ^. U5c.governanceActionDeposit . to (fmap L.Coin . utxoRpcBigIntToInteger)
+    pparams ^. L.ppDRepDepositL ===^ chainParams ^. U5c.drepDeposit . to (fmap L.Coin . utxoRpcBigIntToInteger)
+    pparams ^. L.ppDRepActivityL . to L.unEpochInterval === chainParams ^. U5c.drepInactivityPeriod . to fromIntegral
+
+  --------------------------
+  -- Test readUtxos response
+  --------------------------
+
+  utxoFromUtxoRpc <- H.leftFail $ utxosResponse ^. U5c.items . to (anyUtxoDataUtxoRpcToUtxo era)
+  utxos === utxoFromUtxoRpc
+
+(===^) :: (Eq a, Show a, H.MonadTest m) => a -> Either SomeException a -> m ()
+expected ===^ actual = do
+  v <- H.leftFail actual
+  expected === v
+
+infix 4 ===^

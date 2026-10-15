@@ -1,0 +1,16 @@
+{
+    "contents": {
+        "contents": {
+            "contents": {
+                "era": "ShelleyBasedEraConway",
+                "error": [
+                    "ConwayMempoolFailure \"All inputs are spent. Transaction has probably already been included\""
+                ],
+                "kind": "ShelleyTxValidationError"
+            },
+            "tag": "TxValidationErrorInCardanoMode"
+        },
+        "tag": "TxCmdTxSubmitValidationError"
+    },
+    "tag": "TxSubmitFail"
+}

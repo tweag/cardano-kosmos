@@ -1,0 +1,69 @@
+# ntp-client changelog
+
+<!-- scriv-insert-here -->
+
+<a id='changelog-0.1.0.0'></a>
+## 0.1.0.0 -- 2026-07-28
+
+### Breaking
+
+- Upgraded to `contra-tracer ^>=0.2.1`. The `Tracer` data constructor is no
+  longer exported; use `mkTracer` instead.
+
+### Non-Breaking
+
+- Replaced `showTracing` with `show >$<`.
+
+- Removed the `QuickCheck < 2.18` upper bound, allowing QuickCheck 2.18+.
+
+<a id='changelog-0.0.1.7'></a>
+## 0.0.1.7 -- 2026-01-15
+
+### Non-Breaking
+
+- Update dependencies.
+<!-- scriv-end-here -->
+
+## 0.0.1.6 -- 2024-08-07
+
+### Breaking changes
+
+### Non-breaking changes
+
+* Make it build with ghc-9.10
+
+## 0.0.1.5 -- 2024-06-07
+
+### Breaking changes
+
+### Non-breaking changes
+
+- Bump `Win32-network` package version
+
+## 0.0.1.4 -- 2024-01-22
+
+### Non-breaking changes
+
+* ghc-9.8 support.
+
+## 0.0.1.3 -- 2023-11-02
+
+### Non-breaking changes
+
+* Created a new `CompletedNtpStatus` to represent the subset of `NtpStatus`
+  produced by `ntpQuery` and used it to eliminate an impossible case in
+  `ntpClientThread` and its associated error.
+
+## 0.0.1.2 -- 2023-10-26
+
+* fixed cabal warnings
+
+## 0.0.1.1 -- 2023-04-28
+
+### Non-breaking changes
+
+* `ghc-9.4` and `ghc-9.6` compatibility.
+
+## 0.0.1.0 -- 2022-12-13
+
+* Initial release

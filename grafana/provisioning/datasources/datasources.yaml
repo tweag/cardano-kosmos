@@ -1,0 +1,29 @@
+# Grafana datasources for the Cardano Kosmos devnet.
+#
+# The dashboards imported from ignite reference datasources by UID
+# (`prometheus_uid`, `loki_uid`, ...). We keep those UIDs stable here and point
+# them at the kosmos observability stack:
+#   - VictoriaMetrics exposes a Prometheus-compatible query API (port 8428).
+#   - VictoriaLogs exposes a Loki-compatible query API (port 9428).
+#
+# NOTE: the ignite dashboards also reference postgres datasources
+# (`dbsync_uid`, `sidecar_uid`) that have no equivalent in the kosmos devnet;
+# panels relying on those simply won't render data.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus_uid
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:8428
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+
+  - name: Loki
+    uid: loki_uid
+    type: loki
+    access: proxy
+    url: http://127.0.0.1:9428/select/logsql
+    isDefault: false

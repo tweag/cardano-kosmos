@@ -37,6 +37,9 @@ let export = {
       logs_port | Number | default = 9428,
       metrics_port | Number | default = 8428,
     },
+    grafana = {
+      port | Number | default = 3000,
+    },
     prometheus = {
       address | String | default = "127.0.0.1",
       port | Number | default = 9090,

@@ -176,8 +176,9 @@ poolStateDesc = case useEra @era of
   Exp.DijkstraEra ->
     mconcat
       [ "Dump the pool state. For pools that have registered a BLS voting key, the "
-      , "bksRegisteredIn epoch reported is the current epoch rather than the epoch "
-      , "the key was registered in, as the node does not expose that value yet."
+      , "bksRegisteredIn epoch reported is the epoch the parameters take effect in "
+      , "rather than the epoch the key was registered in, as the node does not "
+      , "expose that value yet."
       ]
 
 pPoolState :: forall era. IsEra era => EnvCli -> Parser (QueryCmds era)

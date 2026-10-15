@@ -3,6 +3,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Cardano.CLI.Compatible.StakePool.Run
   ( runCompatibleStakePoolCmds
@@ -46,6 +47,7 @@ runStakePoolRegistrationCertificateCmd
     { sbe = sbe :: ShelleyBasedEra era
     , poolVerificationKeyOrFile
     , vrfVerificationKeyOrFile
+    , blsSkeyFile
     , poolPledge
     , poolCost
     , poolMargin
@@ -80,11 +82,20 @@ runStakePoolRegistrationCertificateCmd
       sPoolOwnerVkeys <- forM ownerStakeVerificationKeyOrFiles readVerificationKeyOrFile
       let stakePoolOwners' = map verificationKeyHash sPoolOwnerVkeys
 
+      -- BLS signing key for Leios voting registration (Dijkstra era only)
+      mLeiosKey <- case blsSkeyFile of
+        Nothing -> pure Nothing
+        Just skeyFile -> do
+          blsSkey <-
+            fromEitherIOCli @(FileError TextEnvelopeError) $
+              readFileTextEnvelope @(SigningKey BlsKey) skeyFile
+          pure $ Just $ toLedgerBlsKey blsSkey
+
       let stakePoolParams =
             StakePoolParameters
               { stakePoolId = stakePoolId'
               , stakePoolVRF = vrfKeyHash'
-              , stakePoolBlsKey = Nothing
+              , stakePoolBlsKey = mLeiosKey
               , stakePoolCost = poolCost
               , stakePoolMargin = poolMargin
               , stakePoolRewardAccount = rewardAccountAddr

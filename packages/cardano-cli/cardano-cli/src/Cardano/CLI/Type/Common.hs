@@ -42,7 +42,6 @@ module Cardano.CLI.Type.Common
   , GenesisFile (..)
   , GenesisKeyFile (..)
   , IncludeStake (..)
-  , InputSubTxFile (..)
   , InputTxBodyOrTxFile (..)
   , MetadataFile (..)
   , MustCheckHash (..)
@@ -77,8 +76,6 @@ module Cardano.CLI.Type.Common
   , SupportedSchemes
   , TransferDirection (..)
   , TxBodyFile
-  , UnsignedSubTxFile
-  , SignedSubTxFile
   , TxBuildOutputOptions (..)
   , TxByronWitnessCount (..)
   , TxFile
@@ -114,7 +111,6 @@ import Cardano.Api.Ledger qualified as L
 
 import Cardano.Ledger.Api.State.Query qualified as L
 import Cardano.Ledger.Plutus.Language qualified as L
-import Cardano.Ledger.State qualified as L
 
 import Data.Aeson (object, pairs, (.=))
 import Data.Aeson qualified as Aeson
@@ -367,46 +363,34 @@ data AllOrOnly a = All | Only [a] deriving (Eq, Show)
 -- | This data structure is used to allow nicely formatted output in the query pool-params command.
 -- params are the current pool parameter settings, futureparams are new parameters, retiringEpoch is the
 -- epoch that has been set for pool retirement.  Any of these may be Nothing.
-data PoolParams = PoolParams
-  { poolParameters :: Maybe L.StakePoolState
-  , futurePoolParameters :: Maybe L.StakePoolState
+data PoolParams era = PoolParams
+  { poolParameters :: Maybe (L.StakePoolParams era)
+  , futurePoolParameters :: Maybe (L.StakePoolParams era)
+  -- ^ Staged changes, so these are parameters rather than state: they have no
+  -- deposit, delegators or voting-key registration epoch until they take effect.
   , retiringEpoch :: Maybe EpochNo
   }
   deriving Show
 
--- | The current epoch is needed to reconstruct a 'L.StakePoolState' from the
--- query result. 'L.QueryPoolStateResult' does not report the epoch in which a
--- pool's BLS voting key was registered, so the current epoch is used instead.
--- This only affects pools that have registered a BLS key, and it means the
--- @bksRegisteredIn@ field in the @query pool-state@ output is a placeholder.
---
--- TODO: use the real registration epoch once the ledger exposes it through a
--- query. See https://github.com/IntersectMBO/cardano-ledger/issues/6147.
-mkPoolStates :: EpochNo -> PoolState era -> Map (L.KeyHash L.StakePool) PoolParams
 mkPoolStates
-  currentEpoch
+  :: PoolState era -> Map (L.KeyHash L.StakePool) (PoolParams (ShelleyLedgerEra era))
+mkPoolStates
   ( PoolState
       ( L.QueryPoolStateResult
           { L.qpsrStakePoolParams
           , L.qpsrFutureStakePoolParams
           , L.qpsrRetiring
-          , L.qpsrDeposits
           }
         )
-    ) = (`Map.mapWithKey` qpsrStakePoolParams) $ \kh pp -> do
-    let mDeposit = L.toCompact =<< Map.lookup kh qpsrDeposits
-        stakingCredentials = mempty -- QueryPoolStateResult does not provide delegators
+    ) = (`Map.mapWithKey` qpsrStakePoolParams) $ \kh sps ->
     PoolParams
-      { poolParameters =
-          (\deposit -> L.mkStakePoolState currentEpoch deposit stakingCredentials pp) <$> mDeposit
-      , futurePoolParameters = do
-          futurePp <- Map.lookup kh qpsrFutureStakePoolParams
-          (\deposit -> L.mkStakePoolState currentEpoch deposit stakingCredentials futurePp) <$> mDeposit
+      { poolParameters = Just sps
+      , futurePoolParameters = Map.lookup kh qpsrFutureStakePoolParams
       , retiringEpoch = Map.lookup kh qpsrRetiring
       }
 
 -- | Pretty printing for pool parameters
-instance ToJSON PoolParams where
+instance ToJSON (PoolParams era) where
   toJSON (PoolParams p fp r) =
     object
       [ "poolParams" .= p
@@ -518,17 +502,6 @@ data TxBodyTag
 type TxBodyFile = File TxBodyTag
 
 type TxFile = File (Tx ())
-
-data UnsignedSubTxTag
-
--- | A Dijkstra sub-transaction without key witnesses.
-type UnsignedSubTxFile = File UnsignedSubTxTag
-
-data SignedSubTxTag
-
--- | A Dijkstra sub-transaction carrying its key witnesses, ready to be
--- embedded in a top-level transaction.
-type SignedSubTxFile = File SignedSubTxTag
 
 newtype TxTreasuryDonation = TxTreasuryDonation {unTxTreasuryDonation :: Lovelace}
   deriving Show
@@ -678,11 +651,6 @@ data WitnessSigningData
   deriving Show
 
 data InputTxBodyOrTxFile = InputTxBodyFile (TxBodyFile In) | InputTxFile (TxFile In)
-  deriving Show
-
-data InputSubTxFile
-  = InputUnsignedSubTxFile (UnsignedSubTxFile In)
-  | InputSignedSubTxFile (SignedSubTxFile In)
   deriving Show
 
 data ParserFileDirection

@@ -43,6 +43,7 @@ runNodeCmds = \case
   Cmd.NodeKeyGenVRFCmd args -> runNodeKeyGenVrfCmd args
   Cmd.NodeKeyGenBLSCmd args -> runNodeKeyGenBLSCmd args
   Cmd.NodeKeyHashVRFCmd args -> runNodeKeyHashVrfCmd args
+  Cmd.NodeKeyHashBLSCmd args -> runNodeKeyHashBlsCmd args
   Cmd.NodeNewCounterCmd args -> runNodeNewCounterCmd args
   Cmd.NodeIssueOpCertCmd args -> runNodeIssueOpCertCmd args
 
@@ -262,6 +263,22 @@ runNodeKeyHashVrfCmd
   -> CIO e ()
 runNodeKeyHashVrfCmd
   Cmd.NodeKeyHashVRFCmdArgs
+    { vkeySource
+    , mOutFile
+    } = do
+    vkey <-
+      readVerificationKeyOrFile vkeySource
+
+    let hexKeyHash = serialiseToRawBytesHex (verificationKeyHash vkey)
+
+    fromEitherIOCli @(FileError ()) $
+      writeByteStringOutput mOutFile hexKeyHash
+
+runNodeKeyHashBlsCmd
+  :: Cmd.NodeKeyHashBLSCmdArgs
+  -> CIO e ()
+runNodeKeyHashBlsCmd
+  Cmd.NodeKeyHashBLSCmdArgs
     { vkeySource
     , mOutFile
     } = do

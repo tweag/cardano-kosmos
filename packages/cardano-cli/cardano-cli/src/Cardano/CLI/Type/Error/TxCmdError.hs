@@ -79,9 +79,6 @@ data TxCmdError
   | TxCmdUtxoJsonError String
   | forall era. TxCmdDeprecatedEra (Exp.DeprecatedEra era)
   | TxCmdGenesisDataError GenesisDataError
-  | -- | The same sub-transaction was given more than once.
-    TxCmdDuplicateSubTransaction !TxId
-  | TxCmdSubTxByronWitnessUnsupported
 
 instance Show TxCmdError where
   show = show . renderTxCmdError
@@ -188,12 +185,6 @@ renderTxCmdError = \case
   TxCmdUtxoFileError e ->
     "Error while reading UTxO set from JSON file: " <> prettyError e
   TxCmdDeprecatedEra e -> pretty e
-  TxCmdDuplicateSubTransaction subTxId ->
-    "The sub-transaction with id "
-      <> pretty (serialiseToRawBytesHexText subTxId)
-      <> " was provided more than once."
-  TxCmdSubTxByronWitnessUnsupported ->
-    "Byron (bootstrap) witnesses are not supported for sub-transactions."
   TxCmdUtxoJsonError e ->
     "Error while decoding JSON from UTxO set file: " <> pretty e
   TxCmdGenesisDataError genesisDataError ->

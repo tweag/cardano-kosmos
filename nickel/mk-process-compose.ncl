@@ -21,11 +21,13 @@ let logs_path = "%{input.directory}/logs" in
         exec = {
           command = "[ -S ./%{input.directory}/socket/node1/sock ]",
         },
-        initial_delay_seconds = 1,
-        period_seconds = 1,
-        timeout_seconds = 5,
-        success_threshold = 1,
-        failure_threshold = 60,
+        initial_delay_seconds = 15,
+        period_seconds = 5,
+        max_failure = 5,
+      },
+      shutdown = {
+        command = "pkill -9 -P $$",
+        signal = 9
       }
     },
 

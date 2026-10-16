@@ -194,6 +194,7 @@
               pkgs.toxiproxy
               pkgs.gnused
               pkgs.moreutils
+              pkgs.ripgrep
               freshPkgs.victoriametrics
               freshPkgs.victorialogs
               freshPkgs.vlagent

@@ -4,13 +4,25 @@ set -e
 
 cleanup() {
   echo "Shutting down process-compose and child processes..."
-  pkill -TERM -P $$ 2>/dev/null
-  sleep 1
-  pkill -KILL -P $$ 2>/dev/null
+  process-compose down -p 3030 || true
 
-  # annoying
-  pkill cardano-node
-  pkill cardano-tracer
+  timeout_limit=15
+  elapsed_wait=0
+
+  while pgrep -f "process-compose" > /dev/null && [ $elapsed_wait -lt $timeout_limit ]; do
+    sleep 1
+    elapsed_wait=$((elapsed_wait + 1))
+  done
+
+  sleep 5
+
+  pkill -9 -f cardano-node-chairman || true
+  pkill -9 -f cardano-testnet || true
+  pkill -9 -f cardano-node || true
+  pkill -9 -f cardano-tracer || true
+  pkill -9 -f victoria-logs || true
+  pkill -9 -f victoria-metrics || true
+  pkill -9 -f vlagent || true
 }
 trap cleanup EXIT INT TERM
 
@@ -24,8 +36,20 @@ usage() {
 }
 
 DEVENV_PATH="devnet-env"
+# run process-compose with tui by default
+PC_DISABLE_TUI=false
 
 runTestnet() {
+    for arg in "$@"; do
+        case "$arg" in
+            --no-tui)
+                # otherwise in detached mode
+                PC_DISABLE_TUI=true
+                shift
+                ;;
+        esac
+    done
+
     scenarioArg="${1:-vanilla}"
     scenarioFile="$scenarioArg"
     if [ ! -f "$scenarioArg" ]; then
@@ -42,13 +66,13 @@ runTestnet() {
       bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
     fi
 
-    echo "Using: $scenarioFile"
+    echo "Running: $scenarioFile"
+    export PC_DISABLE_TUI
     echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml > "$DEVENV_PATH"/process-compose.yaml
-    process-compose \
+    process-compose up \
         -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \
-        -L "$DEVENV_PATH"/logs/process-compose.log &
-    wait $!
+        -L "$DEVENV_PATH"/logs/process-compose.log 2>/dev/null
 }
 
 case "${1:-}" in

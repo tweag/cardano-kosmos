@@ -81,13 +81,14 @@ echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then
   jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
+  jq '.ExperimentalHardForksEnabled = true' $configurationFile | sponge $configurationFile
 fi
 
 # TODO: implement redistribution of stakes
 
 
 # TODO: move to the nickel config
-trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]}}'
+trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"}}'
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
 

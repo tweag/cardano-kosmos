@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/ouroboros-consensus.git
-	branch = b12e35581cc4f46cfaf5005d9a6f38e9613c2e0a
-	commit = b12e35581cc4f46cfaf5005d9a6f38e9613c2e0a
-	parent = 80939ccf5ef82a0bebeac1c9d09a0f809f630e10
+	branch = qnikst/testnet-configure-peras
+	commit = cba94c1e21438c3eacfc7389a7827622e0fe37dd
+	parent = 943e9ce9105d0edf3e7ab2789b67dbb88abc5d5e
 	method = merge
 	cmdver = 0.4.9

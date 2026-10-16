@@ -180,9 +180,16 @@
       # This is used by `nix develop .` to open a devShell
       devShells = let
         shell = import ./shell.nix {inherit pkgs customConfig;};
+        grafanaPlugins =
+          freshPkgs.linkFarm "grafana-plugins"
+          (map (p: {
+            name = p.pname;
+            path = p;
+          }) (with freshPkgs.grafanaPlugins; [prometheus loki]));
       in
         {
           default = shell.dev.overrideAttrs (attrs: {
+            GRAFANA_CORE_PLUGINS = grafanaPlugins;
             nativeBuildInputs = (attrs.nativeBuildInputs or []) ++ [
               pkgs.process-compose
               pkgs.curl
@@ -198,6 +205,7 @@
               freshPkgs.victoriametrics
               freshPkgs.victorialogs
               freshPkgs.vlagent
+              freshPkgs.grafana
               freshPkgs.nickel
             ];
           });

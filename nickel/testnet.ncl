@@ -6,6 +6,9 @@ in
     logs_port = 9428,
     metrics_port = 8428,
   },
+  grafana = {
+    port = 3000,
+  },
   prometheus = {
     port = 9090,
   },

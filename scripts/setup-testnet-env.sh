@@ -87,7 +87,7 @@ fi
 
 
 # TODO: move to the nickel config
-trace_options='{"" : {"severity": "Notice", "backends": ["Stdout HumanFormatColoured"]}}'
+trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]}}'
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
 

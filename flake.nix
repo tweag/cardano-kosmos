@@ -193,6 +193,7 @@
               pkgs.jq
               pkgs.toxiproxy
               pkgs.gnused
+              pkgs.moreutils
               freshPkgs.victoriametrics
               freshPkgs.victorialogs
               freshPkgs.vlagent

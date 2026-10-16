@@ -37,10 +37,13 @@ runTestnet() {
       fi
     fi
 
-    # Setup devnet-env
-    if [ ! -d "$DEVENV_PATH" ]; then
-      bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
+    echo "Setting up: $DEVENV_PATH"
+    if [ -d "$DEVENV_PATH" ]; then
+      echo "./$DEVENV_PATH exists, removing"
+      rm -rf "$DEVENV_PATH"
     fi
+    
+    bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
 
     echo "Using: $scenarioFile"
     echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml > "$DEVENV_PATH"/process-compose.yaml

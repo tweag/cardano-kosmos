@@ -19,7 +19,8 @@ let
     'none => {},
     'envoy params => { envoy = mk_envoy input.directory input.ip params.port, }
   } input.proxy,
-in fun input scenario portsOfNodes =>
+in fun old_input cardano_bins scenario portsOfNodes =>
+let input = old_input & { cardano_binaries = cardano_bins } in
 {
   version = "0.5",
   name = "peras-testnet-" ++ scenario.name,

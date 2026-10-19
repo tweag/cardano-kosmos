@@ -4,12 +4,23 @@ set -e
 
 echo "Building cardano packages..."
 
-cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
+if command -v buck2 >/dev/null 2>&1; then
+  CARDANO_CLI=$(buck2 build root//packages/cardano-cli/cardano-cli:cardano-cli-exe -m static --show-full-simple-output)
+  CARDANO_TESTNET=$(buck2 build root//packages/cardano-node/cardano-testnet:cardano-testnet-exe -m static --show-full-simple-output)
+  CARDANO_NODE_CHAIRMAN=$(buck2 build root//packages/cardano-node/cardano-node-chairman:cardano-node-chairman -m static --show-full-simple-output)
+  CARDANO_NODE=$(buck2 build root//packages/cardano-node/cardano-node:cardano-node-exe -m static --show-full-simple-output)
+  CARDANO_TRACER=$(buck2 build root//packages/cardano-node/cardano-tracer:cardano-tracer-exe -m static --show-full-simple-output)
+else
+  cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
 
-CARDANO_CLI=$(cabal list-bin cardano-cli)
-CARDANO_TESTNET=$(cabal list-bin cardano-testnet)
+  CARDANO_CLI=$(cabal list-bin cardano-cli)
+  CARDANO_TESTNET=$(cabal list-bin cardano-testnet)
+  CARDANO_NODE=$(cabal list-bin cardano-node)
+  CARDANO_NODE_CHAIRMAN=$(cabal list-bin cardano-node-chairman)
+  CARDANO_TRACER=$(cabal list-bin cardano-tracer:cardano-tracer)
+fi
 
-export CARDANO_CLI CARDANO_TESTNET
+export CARDANO_CLI CARDANO_TESTNET CARDANO_NODE CARDANO_NODE_CHAIRMAN CARDANO_TRACER
 
 DEVENV_PATH="${1:-devnet-env}"
 
@@ -34,7 +45,17 @@ fi
 
 echo "Using: $scenarioFile"
 
-testnet_config=$(echo '(import "nickel/mk-testnet-config.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format json)
+cardano_binaries='{
+  "cardano_node": "'"$CARDANO_NODE"'",
+  "cardano_cli": "'"$CARDANO_CLI"'",
+  "cardano_testnet": "'"$CARDANO_TESTNET"'",
+  "cardano_node_chairman": "'"$CARDANO_NODE_CHAIRMAN"'",
+  "cardano_tracer": "'"$CARDANO_TRACER"'"
+}'
+
+echo $cardano_binaries > "$DEVENV_PATH/cardano_binaries.json"
+
+testnet_config=$(echo '(import "nickel/mk-testnet-config.ncl") (import "'"$DEVENV_PATH/cardano_binaries.json"'") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format json)
 
 trace_options=$(echo $testnet_config | jq -r '.trace_options')
 
@@ -54,7 +75,6 @@ read -r \
   < <(echo $testnet_config | jq -r '[
     .nodes_arg,
     .testnet_magic,
-
     .genesis.epoch_length_slots,
     .genesis.slot_length_seconds,
     .genesis.security_param_k,

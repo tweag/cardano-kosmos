@@ -18,9 +18,8 @@ let labels = scenario.topology.node_labels |> std.string.join "," in
     "NODE_ROLES=%{roles}",
     "NODE_LABELS=%{labels}",
     "TESTNET_MAGIC=%{std.string.from_number scenario.topology.magic}",
-    "CARDANO_CLI=%{input.cardano_binaries.cardano_cli}",
     "VM_URL=http://%{input.ip}:%{std.string.from_number input.victoria.metrics_port}",
-  ],
+  ] @ input.cardano_binaries_env,
   depends_on = {
     cardano-testnet = { condition = 'process_healthy },
   },

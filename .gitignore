@@ -29,3 +29,13 @@ result-*
 #testnet
 devnet-env
 scripts/oracle.sh
+
+# buck2
+BUCK
+PACKAGE
+buck2
+**/cabal-buck2/
+buck-out
+third-party
+.buckconfig
+*.bzl

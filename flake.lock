@@ -292,11 +292,11 @@
     },
     "freshNixpkgs": {
       "locked": {
-        "lastModified": 1791456040,
-        "narHash": "sha256-H83yz/do+hjOO0uujHyH8RgtIQP2v7Mw+cLwcZK/xKc=",
+        "lastModified": 1793726008,
+        "narHash": "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=",
         "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "e7439b6b14ad3cc35d05608ebca9bce01a25f5f8",
+        "rev": "1d060086d60cb76a40cf37109f979d88a5bd6396",
         "type": "github"
       },
       "original": {
@@ -391,11 +391,11 @@
     "hackageNix": {
       "flake": false,
       "locked": {
-        "lastModified": 1793351153,
-        "narHash": "sha256-3CdY4Is9pqMBIkfPOEZh6n0ENhUDfDc9nJgh5ZddwEs=",
+        "lastModified": 1793958416,
+        "narHash": "sha256-JfX1Xl+/T0EtRWM4RaSXo99zZAD1l5c6m4Yf4eOznrA=",
         "owner": "input-output-hk",
         "repo": "hackage.nix",
-        "rev": "7ba58412cce3d49068b3d7f992f55534968e0e7c",
+        "rev": "a1821fffcf1ab094e369b3691e137d9d6e4b6657",
         "type": "github"
       },
       "original": {

@@ -70,12 +70,16 @@ let
 
         withHoogle = false;
 
-        # https://github.com/channable/alfred-margaret/pull/76
-        tools.hoogle = {
-          cabalProjectLocal = ''
-            constraints: any.alfred-margaret <2.1.1.0 || >2.1.1.0
-          '';
+        tools = {
+          cabal-buck2 = "0.5.0.0";
         };
+
+        # https://github.com/channable/alfred-margaret/pull/76
+#        tools.hoogle = {
+#          cabalProjectLocal = ''
+#            constraints: any.alfred-margaret <2.1.1.0 || >2.1.1.0
+#          '';
+#        };
       };
 
 

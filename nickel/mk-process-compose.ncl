@@ -25,15 +25,11 @@ let logs_path = "%{input.directory}/logs" in
         period_seconds = 5,
         max_failure = 5,
       },
-      shutdown = {
-        command = "pkill -9 -P $$",
-        signal = 9
-      }
     },
 
     chairman = {
       command = "%{input.cardano_binaries.cardano_node_chairman} run --config %{input.directory}/configuration.yaml --timeout %{24 * 60 * 60} --require-progress 10" ++ " " ++ mkSocketPaths (count_nodes scenario.topology.groups) input.directory,
-      depends_on = { 
+      depends_on = {
         cardano-testnet = { condition = 'process_healthy },
       },
     },

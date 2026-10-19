@@ -35,6 +35,12 @@ package acts
 package cardano-api
   ghc-options: -XUndecidableSuperClasses
 
+
+
+-- NOTE:
+-- if you want to set your local path like `../ouroboros-consensus/`
+-- you need to enter `nix develop` BEFORE that, and only
+-- when you are in the dev shell, you can change the path
 packages:
    -- intersectmbo
 

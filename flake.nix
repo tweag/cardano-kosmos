@@ -195,6 +195,7 @@
               pkgs.gnused
               pkgs.moreutils
               pkgs.ripgrep
+              pkgs.git-subrepo
               freshPkgs.victoriametrics
               freshPkgs.victorialogs
               freshPkgs.vlagent

@@ -7,6 +7,6 @@
 	remote = git@github.com:tweag/cardano-api.git
 	branch = 0024a90d94db11818c03a02da412904f12e147f6
 	commit = 0024a90d94db11818c03a02da412904f12e147f6
-	parent = c5ed8a363836f184bc2735cac50fcc39e92ea1e5
+	parent = d4d1c1d5a04ac214cd450b10874d374733c2e7c9
 	method = merge
 	cmdver = 0.4.9

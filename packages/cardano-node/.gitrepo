@@ -7,6 +7,6 @@
 	remote = git@github.com:tweag/cardano-node.git
 	branch = df5e84e85ebbb4012fced1e7af010161449aa80d
 	commit = df5e84e85ebbb4012fced1e7af010161449aa80d
-	parent = 4482fbe336a61976f442e433b2a7410df796a826
+	parent = 16bb80cda4b90659078e44e1da70bc2b2175429f
 	method = merge
 	cmdver = 0.4.9

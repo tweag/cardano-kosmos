@@ -30,7 +30,7 @@ Peras simulator (https://peras-simulation.cardano-scaling.org):
 
 Hover over any element for the full details.
 """
-import argparse, collections, glob, html, json, os, re, sys
+import argparse, bisect, collections, glob, html, json, os, re, sys
 from fractions import Fraction as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,8 +40,11 @@ COLOUR = dict(vote_yes="#5cc96e", vote_no="#e45b5b", block="skyblue", block_cert
               cert="turquoise", node="tomato", link="#999")
 ROW_H, LEFT, TOP = 34, 80, 40
 # Colour of every object-diffusion message type, shared by the Vote and the Cert protocol.
-MSG_COLOUR = {"MsgInit": "#888888", "MsgRequestObjectIds": "#2563eb", "MsgReplyObjectIds": "#7c3aed",
-              "MsgRequestObjects": "#a16207", "MsgReplyObjects": "#db2777", "MsgDone": "#000000"}
+MSG_COLOUR = {"MsgInit": "#888888", "MsgRequestObjectIds": "#777777", "MsgReplyObjectIds": "#777777",
+              "MsgRequestObjects": "#7c3aed", "MsgReplyObjects": "#7c3aed", "MsgDone": "#000000"}
+# message -> (stroke width, dash pattern); requests are dashed, replies solid
+MSG_STYLE = {"MsgRequestObjectIds": (0.5, "6 3"), "MsgReplyObjectIds": (0.5, "none"),
+             "MsgRequestObjects": (0.5, "6 3"), "MsgReplyObjects": (0.8, "none")}
 HL_CSS = (".edge{cursor:pointer}.vnode{cursor:pointer}"
           "svg.hovering .vnode:not(.hl){opacity:.4}svg.hovering .edge:not(.hl){opacity:.12}"
           ".edge.hl .vis{stroke-width:3!important;stroke-opacity:1!important;opacity:1!important}"
@@ -146,6 +149,47 @@ def load(root):
                     ev["incl"][x["slot"]] = x["round"]
         nodes[n] = ev
     return nodes
+
+
+def resolve_peers(nodes):
+    """Map (node, peer port in its connectionId) -> the node at the other end of the connection.
+    Peers are either 500N (node N) or an ephemeral port of a connection the other node opened. The latter
+    is resolved by time: the messages node n sends/receives on that connection are received/sent by the
+    other node on its 500n connection a moment later/earlier."""
+    res = {}
+    for n, ev in nodes.items():
+        for _, _, _, _, peer in ev["net"]:
+            if 5000 < peer < 5000 + 100 and peer - 5000 in nodes:
+                res[n, peer] = peer - 5000
+    # (node, peer) -> sorted times per (way, proto, msg), for the 500N connections
+    idx = collections.defaultdict(list)
+    for n, ev in nodes.items():
+        for t, proto, way, msg, peer in ev["net"]:
+            if (n, peer) in res:
+                idx[n, res[n, peer], way, proto, msg].append(t)
+    for v in idx.values():
+        v.sort()
+    mine = collections.defaultdict(list)
+    for n, ev in nodes.items():
+        for t, proto, way, msg, peer in ev["net"]:
+            if (n, peer) not in res:
+                mine[n, peer].append((t, proto, way, msg))
+    for (n, peer), evs in mine.items():
+        score = {}
+        for m in nodes:
+            if m == n:
+                continue
+            sc = 0
+            for t, proto, way, msg in evs:
+                other = idx.get((m, n, "Receive" if way == "Send" else "Send", proto, msg), [])
+                i = bisect.bisect_left(other, t - 0.005)
+                if i < len(other) and other[i] <= t + 0.05:
+                    sc += 1
+            score[m] = sc
+        best = max(score, key=score.get, default=None)
+        if best is not None and score[best] > 0:
+            res[n, peer] = best
+    return res
 
 
 def genesis_stakes(root):
@@ -390,12 +434,12 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
     net = []
     hops = []                                    # {id, a, b, t1, t2, votes} of the arrows that carry votes
     if network:
-        port2n = {ev["port"]: n for n, ev in nodes.items()}
+        peer_node = resolve_peers(nodes)
         inside = lambda t: lo <= t - t0 <= hi and (linear or any(a <= t - t0 <= b for a, b, _, _ in clusters))
         sent, recvd = collections.defaultdict(list), collections.defaultdict(list)
         for n, ev in nodes.items():
             for t, proto, way, msg, peer in ev["net"]:
-                m = port2n.get(str(peer))
+                m = peer_node.get((n, peer))
                 if m is None or proto not in network:
                     continue
                 if way == "Send":
@@ -406,10 +450,11 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
         carry = collections.defaultdict(list)    # (node, peer port) -> [(time, votes)] of MsgReplyObjects
         for n, ev in nodes.items():
             for t, peer, votes in ev["carry"]:
-                carry[n, str(peer)].append((t, votes))
+                if (n, peer) in peer_node:
+                    carry[n, peer_node[n, peer]].append((t, votes))
 
         def votes_in(a_, b_, t1):
-            best = min(carry.get((a_, nodes[b_]["port"]), []), key=lambda c: abs(c[0] - t1), default=None)
+            best = min(carry.get((a_, b_), []), key=lambda c: abs(c[0] - t1), default=None)
             return best[1] if best and abs(best[0] - t1) < 0.005 else []
 
         def pairs(snd, rcv):
@@ -437,8 +482,8 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                     hops.append(dict(id=aid, a=a_, b=b_, t1=t1, t2=t2, votes=vs))
                 net.append(edge(
                     (X(t1), Y(a_, row["net " + proto.lower()])), (X(t2), Y(b_, row["net " + proto.lower()])),
-                    f'stroke="{c}" stroke-width="0.6" stroke-opacity="0.75" marker-end="url(#m{c[1:]})"'
-                    + (' stroke-dasharray="5 3"' if proto == "Cert" else ""),
+                    f'stroke="{c}" stroke-width="{MSG_STYLE.get(msg, (0.6, "6 3"))[0]}" stroke-opacity="0.8" '
+                    f'stroke-dasharray="{MSG_STYLE.get(msg, (0.6, "6 3"))[1]}" marker-end="url(#m{c[1:]})"',
                     f"{proto} {msg}\nnode {a_} -> node {b_}\nsent t = {t1-t0:.3f}s, "
                     f"received {(t2-t1)*1000:.1f} ms later"
                     + ("\ncarries votes (round, seat): " + ", ".join(f"({r_}, {s_})" for r_, s_ in vs) if vs else ""),
@@ -461,8 +506,7 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                       f'orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{c}"/></marker>' for c in MSG_COLOUR.values())
     netlegend = ("".join(f"<span style='color:#fff;background:{c}'>{m[3:]}</span>"
                          for m, c in MSG_COLOUR.items() if m in used) +
-                 ("<span style='border:1px solid #888'>solid: Vote protocol</span>" if "Vote" in network else "") +
-                 ("<span style='border:1px dashed #888'>dashed: Cert protocol</span>" if "Cert" in network else "")
+                 "<span style='border:1px solid #888'>grey: object ids, purple: objects; dashed: request, solid: reply</span>"
                  ) if network else ""
     legend = ("<div class=legend>"
               + (f"<span style='background:{COLOUR['block']}'>block</span>"

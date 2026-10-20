@@ -90,9 +90,10 @@ if [ $start_directly_in_dijkstra ]; then
 fi
 
 # TODO: move to the nickel config
-trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"}}'
+trace_options='{"" : {"severity": "Notice", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Debug", "backends": ["EKGBackend", "Forwarder"],"detail":"DNormal"},"ChainDB.PerasVoteDbEvent": {"severity": "Debug", "backends": ["EKGBackend", "Forwarder"]},"Startup": {"severity": "Info", "backends": ["EKGBackend", "Forwarder"]},"ChainDB.PerasCertDbEvent":{"severity": "Debug", "backends": ["EKGBackend", "Forwarder"]}}'
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
+jq '.TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 # substitute ports for toxiproxy
 read -r \

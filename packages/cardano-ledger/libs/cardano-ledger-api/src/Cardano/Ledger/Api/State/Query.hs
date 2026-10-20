@@ -75,6 +75,10 @@ module Cardano.Ledger.Api.State.Query (
   QueryPoolStateResult (..),
   mkQueryPoolStateResult,
 
+  -- * @GetStakePoolState@
+  queryStakePoolState,
+  QueryResultStakePoolState (..),
+
   -- * @GetPoolDistr2@
   querySetSnapshotStakePoolDistr,
   QueryResultPoolDistr (..),
@@ -94,6 +98,10 @@ module Cardano.Ledger.Api.State.Query (
   queryNonMyopicMemberRewards,
   QueryResultNonMyopicMemberRewards (..),
 
+  -- * @GetLeiosCommittee@
+  queryLeiosCommittee,
+  QueryResultLeiosCommittee (..),
+
   -- * For testing
   getNextEpochCommitteeMembers,
 ) where
@@ -109,6 +117,8 @@ import Cardano.Ledger.BaseTypes (
   ProtVer (..),
   StrictMaybe (..),
   ToKeyValuePairs (..),
+  UnitInterval,
+  maybeToStrictMaybe,
   strictMaybeToMaybe,
  )
 import Cardano.Ledger.Binary
@@ -534,6 +544,121 @@ queryPoolParameters network nes poolKeys =
   let pools = nes ^. nesEsL . esLStateL . lsCertStateL . certPStateL . psStakePoolsL
    in Map.mapWithKey (stakePoolStateToStakePoolParams network) $ Map.restrictKeys pools poolKeys
 
+-- | State of a registered stake pool, as reported by `queryStakePoolState`.
+--
+-- NOTE: `BlsKeyState` is assumed to be a stable type here, because its CBOR
+-- and JSON encodings are part of the encodings of this stable type.
+data QueryResultStakePoolState era = QueryResultStakePoolState
+  { qrspsVrf :: !(VRFVerKeyHash StakePoolVRF)
+  , qrspsBlsKey :: !(StrictMaybe BlsKeyState)
+  , qrspsPledge :: !Coin
+  , qrspsCost :: !Coin
+  , qrspsMargin :: !UnitInterval
+  , qrspsAccountId :: !AccountId
+  , qrspsOwners :: !(Set (KeyHash Staking))
+  , qrspsRelays :: !(StrictSeq StakePoolRelay)
+  , qrspsMetadata :: !(StrictMaybe PoolMetadata)
+  , qrspsDeposit :: !Coin
+  , qrspsNumDelegators :: !Int
+  , qrspsDelegators :: !(StrictMaybe (Set (Credential Staking)))
+  , qrspsRetiring :: !(StrictMaybe EpochNo)
+  , qrspsFutureStakePoolParams :: !(StrictMaybe (StakePoolParams era))
+  }
+  deriving (Eq, Show, Generic)
+  deriving (ToJSON) via KeyValuePairs (QueryResultStakePoolState era)
+
+instance EncCBOR (QueryResultStakePoolState era) where
+  encCBOR x@(QueryResultStakePoolState _ _ _ _ _ _ _ _ _ _ _ _ _ _) =
+    let QueryResultStakePoolState {..} = x
+     in encodeListLen 14
+          <> encCBOR qrspsVrf
+          <> encodeNullStrictMaybe encCBOR qrspsBlsKey
+          <> encCBOR qrspsPledge
+          <> encCBOR qrspsCost
+          <> encCBOR qrspsMargin
+          <> encCBOR qrspsAccountId
+          <> encCBOR qrspsOwners
+          <> encCBOR qrspsRelays
+          <> encodeNullStrictMaybe encCBOR qrspsMetadata
+          <> encCBOR qrspsDeposit
+          <> encCBOR qrspsNumDelegators
+          <> encodeNullStrictMaybe encCBOR qrspsDelegators
+          <> encodeNullStrictMaybe encCBOR qrspsRetiring
+          <> encodeNullStrictMaybe encCBOR qrspsFutureStakePoolParams
+
+instance Era era => DecCBOR (QueryResultStakePoolState era) where
+  decCBOR =
+    decodeRecordNamed "QueryResultStakePoolState" (const 14) $
+      QueryResultStakePoolState
+        <$> decCBOR
+        <*> decodeNullStrictMaybe decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decodeNullStrictMaybe decCBOR
+        <*> decCBOR
+        <*> decCBOR
+        <*> decodeNullStrictMaybe decCBOR
+        <*> decodeNullStrictMaybe decCBOR
+        <*> decodeNullStrictMaybe decCBOR
+
+instance ToKeyValuePairs (QueryResultStakePoolState era) where
+  toKeyValuePairs x@(QueryResultStakePoolState _ _ _ _ _ _ _ _ _ _ _ _ _ _) =
+    let QueryResultStakePoolState {..} = x
+     in [ "vrf" .= qrspsVrf
+        , "blsKey" .= qrspsBlsKey
+        , "pledge" .= qrspsPledge
+        , "cost" .= qrspsCost
+        , "margin" .= qrspsMargin
+        , "accountId" .= qrspsAccountId
+        , "owners" .= qrspsOwners
+        , "relays" .= qrspsRelays
+        , "metadata" .= qrspsMetadata
+        , "deposit" .= qrspsDeposit
+        , "numDelegators" .= qrspsNumDelegators
+        , "delegators" .= qrspsDelegators
+        , "retiring" .= qrspsRetiring
+        , "futureStakePoolParams" .= qrspsFutureStakePoolParams
+        ]
+
+-- | Query the state of all registered stake pools, or only of the requested ones when
+-- pool ids are supplied, in which case requested pools that are not registered are left
+-- out. The delegators of each pool are only included when the last argument is `True`.
+queryStakePoolState ::
+  EraCertState era =>
+  NewEpochState era ->
+  Maybe (Set (KeyHash StakePool)) ->
+  Bool ->
+  Map (KeyHash StakePool) (QueryResultStakePoolState era)
+queryStakePoolState nes mPoolKeys includeDelegators =
+  Map.mapWithKey toQueryResultStakePoolState $
+    maybe stakePools (Map.restrictKeys stakePools) mPoolKeys
+  where
+    pState = nes ^. nesEsL . esLStateL . lsCertStateL . certPStateL
+    stakePools = psStakePools pState
+    toQueryResultStakePoolState poolId stakePoolState =
+      QueryResultStakePoolState
+        { qrspsVrf = spsVrf stakePoolState
+        , qrspsBlsKey = spsBlsKey stakePoolState
+        , qrspsPledge = spsPledge stakePoolState
+        , qrspsCost = spsCost stakePoolState
+        , qrspsMargin = spsMargin stakePoolState
+        , qrspsAccountId = spsAccountId stakePoolState
+        , qrspsOwners = spsOwners stakePoolState
+        , qrspsRelays = spsRelays stakePoolState
+        , qrspsMetadata = spsMetadata stakePoolState
+        , qrspsDeposit = fromCompact $ spsDeposit stakePoolState
+        , qrspsNumDelegators = Set.size $ spsDelegators stakePoolState
+        , qrspsDelegators =
+            if includeDelegators then SJust $ spsDelegators stakePoolState else SNothing
+        , qrspsRetiring = maybeToStrictMaybe $ Map.lookup poolId $ psRetiring pState
+        , qrspsFutureStakePoolParams =
+            maybeToStrictMaybe $ Map.lookup poolId $ psFutureStakePoolParams pState
+        }
+
 -- | The stake snapshot returns information about the mark, set, go ledger snapshots for a pool,
 -- plus the total active stake for each snapshot that can be used in a 'sigma' calculation.
 --
@@ -860,3 +985,42 @@ queryNonMyopicMemberRewards ::
   QueryResultNonMyopicMemberRewards
 queryNonMyopicMemberRewards g st s =
   QueryResultNonMyopicMemberRewards $ Wallet.getNonMyopicMemberRewards g st s
+
+data QueryResultLeiosCommittee = QueryResultLeiosCommittee
+  { qrlcCurrentLeiosCommittee :: !LeiosCommittee
+  -- ^ Committee voting on Leios endorser blocks in the current epoch, from the "Set" snapshot.
+  , qrlcFutureLeiosCommittee :: !(StrictMaybe LeiosCommittee)
+  -- ^ Committee from the "Mark" snapshot that will be used for Leios voting next epoch.
+  -- It is marked as Maybe, because with full utilization of LedgerHD an answer for this field
+  -- will not be available until somewhere in the middle of the epoch.
+  }
+  deriving (Eq, Show, Generic)
+  deriving (ToJSON) via KeyValuePairs QueryResultLeiosCommittee
+
+instance NFData QueryResultLeiosCommittee
+
+instance ToKeyValuePairs QueryResultLeiosCommittee where
+  toKeyValuePairs (QueryResultLeiosCommittee current mFuture) =
+    [ "currentLeiosCommittee" .= leiosCommitteeToJSON current
+    , "futureLeiosCommittee" .= fmap leiosCommitteeToJSON mFuture
+    ]
+
+instance EncCBOR QueryResultLeiosCommittee where
+  encCBOR (QueryResultLeiosCommittee current mFuture) =
+    encodeListLen 2
+      <> encCBOR current
+      <> encCBOR mFuture
+
+instance DecCBOR QueryResultLeiosCommittee where
+  decCBOR =
+    decodeRecordNamed "QueryResultLeiosCommittee" (const 2) $
+      QueryResultLeiosCommittee <$> decCBOR <*> decCBOR
+
+queryLeiosCommittee :: NewEpochState era -> QueryResultLeiosCommittee
+queryLeiosCommittee nes =
+  QueryResultLeiosCommittee
+    { qrlcCurrentLeiosCommittee = snapShots ^. ssStakeSetL . ssLeiosCommitteeL
+    , qrlcFutureLeiosCommittee = SJust $ msLeiosCommittee (snapShots ^. ssStakeMarkL)
+    }
+  where
+    snapShots = nes ^. nesEsL . esSnapshotsL

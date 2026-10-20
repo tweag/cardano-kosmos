@@ -17,8 +17,8 @@ pathOutput="$2"
 
 output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml)
 
-if [ $pathOutput ]; then
-  echo "$output" > $pathOutput
+if [ -n "$pathOutput" ]; then
+  echo "$output" > "$pathOutput"
 else
   echo "$output"
 fi

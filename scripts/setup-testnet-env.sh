@@ -73,7 +73,7 @@ configurationFile="${DEVENV_PATH}/configuration.yaml"
 
 echo "Changing genesis params"
 
-new_initial_funds=$(./scripts/redistribute-stakes.sh $scenarioArg $DEVENV_PATH)
+new_initial_funds=$(./scripts/redistribute-stakes.sh "$scenarioArg" "$DEVENV_PATH")
 
 jq ".securityParam = $security_param_k |
     .slotLength = $slot_length_seconds |

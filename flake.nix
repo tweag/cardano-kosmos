@@ -189,6 +189,7 @@
             pkgs.jq
             pkgs.gnused
             pkgs.moreutils
+            pkgs.python3
             pkgs.ripgrep
             pkgs.git-subrepo
             freshPkgs.victoriametrics

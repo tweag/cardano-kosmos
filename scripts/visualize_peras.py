@@ -40,8 +40,11 @@ COLOUR = dict(vote_yes="#5cc96e", vote_no="#e45b5b", block="skyblue", block_cert
               cert="turquoise", node="tomato", link="#999")
 ROW_H, LEFT, TOP = 34, 80, 40
 # Colour of every object-diffusion message type, shared by the Vote and the Cert protocol.
-MSG_COLOUR = {"MsgInit": "#888888", "MsgRequestObjectIds": "#2563eb", "MsgReplyObjectIds": "#7c3aed",
-              "MsgRequestObjects": "#a16207", "MsgReplyObjects": "#db2777", "MsgDone": "#000000"}
+MSG_COLOUR = {"MsgInit": "#888888", "MsgRequestObjectIds": "#777777", "MsgReplyObjectIds": "#777777",
+              "MsgRequestObjects": "#7c3aed", "MsgReplyObjects": "#7c3aed", "MsgDone": "#000000"}
+# message -> (stroke width, dash pattern); requests are dashed, replies solid
+MSG_STYLE = {"MsgRequestObjectIds": (0.5, "6 3"), "MsgReplyObjectIds": (0.5, "none"),
+             "MsgRequestObjects": (0.5, "6 3"), "MsgReplyObjects": (0.8, "none")}
 HL_CSS = (".edge{cursor:pointer}.vnode{cursor:pointer}"
           "svg.hovering .vnode:not(.hl){opacity:.4}svg.hovering .edge:not(.hl){opacity:.12}"
           ".edge.hl .vis{stroke-width:3!important;stroke-opacity:1!important;opacity:1!important}"
@@ -437,8 +440,8 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                     hops.append(dict(id=aid, a=a_, b=b_, t1=t1, t2=t2, votes=vs))
                 net.append(edge(
                     (X(t1), Y(a_, row["net " + proto.lower()])), (X(t2), Y(b_, row["net " + proto.lower()])),
-                    f'stroke="{c}" stroke-width="0.6" stroke-opacity="0.75" marker-end="url(#m{c[1:]})"'
-                    + (' stroke-dasharray="5 3"' if proto == "Cert" else ""),
+                    f'stroke="{c}" stroke-width="{MSG_STYLE.get(msg, (0.6, "6 3"))[0]}" stroke-opacity="0.8" '
+                    f'stroke-dasharray="{MSG_STYLE.get(msg, (0.6, "6 3"))[1]}" marker-end="url(#m{c[1:]})"',
                     f"{proto} {msg}\nnode {a_} -> node {b_}\nsent t = {t1-t0:.3f}s, "
                     f"received {(t2-t1)*1000:.1f} ms later"
                     + ("\ncarries votes (round, seat): " + ", ".join(f"({r_}, {s_})" for r_, s_ in vs) if vs else ""),
@@ -461,8 +464,7 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                       f'orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{c}"/></marker>' for c in MSG_COLOUR.values())
     netlegend = ("".join(f"<span style='color:#fff;background:{c}'>{m[3:]}</span>"
                          for m, c in MSG_COLOUR.items() if m in used) +
-                 ("<span style='border:1px solid #888'>solid: Vote protocol</span>" if "Vote" in network else "") +
-                 ("<span style='border:1px dashed #888'>dashed: Cert protocol</span>" if "Cert" in network else "")
+                 "<span style='border:1px solid #888'>grey: object ids, purple: objects; dashed: request, solid: reply</span>"
                  ) if network else ""
     legend = ("<div class=legend>"
               + (f"<span style='background:{COLOUR['block']}'>block</span>"

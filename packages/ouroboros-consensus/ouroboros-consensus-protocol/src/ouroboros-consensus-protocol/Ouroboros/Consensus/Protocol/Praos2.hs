@@ -18,11 +18,11 @@
 module Ouroboros.Consensus.Protocol.Praos2
   ( LeiosOnly (..)
   , LeiosCrypto
+  , PerasOnly (..)
   , Praos2
   , ConsensusConfig (..)
   ) where
 
-import Cardano.Ledger.BaseTypes (StrictMaybe (..))
 import Cardano.Ledger.Chain (ChainChecksPParams (..))
 import Cardano.Ledger.Core (TranslationContext)
 import qualified Cardano.Ledger.Dijkstra.Forecast as Dijkstra
@@ -34,14 +34,19 @@ import Cardano.Protocol.Crypto (Crypto, StandardCrypto)
 import qualified Cardano.Protocol.Leios.BlockHeader as LeiosCodec
 import Data.Kind (Type)
 import Data.Proxy (Proxy (Proxy))
+import qualified Data.Strict.Either as Strict
 import GHC.Generics (Generic)
 import Lens.Micro ((^.))
 import NoThunks.Class (NoThunks)
 import Ouroboros.Consensus.Leios.Protocol (LeiosLedgerView (..), LeiosProtocol (..))
+import Ouroboros.Consensus.Peras.Protocol (PerasLedgerView (..), PerasProtocol (..))
 import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Protocol.PolyPraos
-  ( getLeiosAnnouncementPolyPraos
+  ( WhyNotCertifiable (..)
+  , getLeiosAnnouncementPolyPraos
   , getLeiosLedgerViewPolyPraos
+  , getPerasLedgerViewPolyPraos
+  , markUncertifiable
   , validateLeiosAnnouncementPolyPraos
   )
 import Ouroboros.Consensus.Protocol.Praos
@@ -100,6 +105,30 @@ instance TypeSwitch (LeiosOnly (Praos2 c)) where
   typeSwitchL = Praos2HasLeios ()
   typeSwitchR = Praos2HasLeios (Praos2HasLeios ())
 
+-- | This protocol is Peras, so it holds the right alternative.
+newtype instance PerasOnly (Praos2 c) a b = Praos2HasPeras b
+  deriving (Eq, Generic, Show)
+
+deriving anyclass instance
+  NoThunks b => NoThunks (PerasOnly (Praos2 c) a b)
+
+instance Functor (PerasOnly (Praos2 c) a) where
+  fmap f (Praos2HasPeras b) = Praos2HasPeras (f b)
+
+instance Applicative (PerasOnly (Praos2 c) a) where
+  pure = Praos2HasPeras
+  Praos2HasPeras f <*> Praos2HasPeras b = Praos2HasPeras (f b)
+
+instance Foldable (PerasOnly (Praos2 c) a) where
+  foldMap f (Praos2HasPeras b) = f b
+
+instance Traversable (PerasOnly (Praos2 c) a) where
+  traverse f (Praos2HasPeras b) = Praos2HasPeras <$> f b
+
+instance TypeSwitch (PerasOnly (Praos2 c)) where
+  typeSwitchL = Praos2HasPeras ()
+  typeSwitchR = Praos2HasPeras (Praos2HasPeras ())
+
 {-------------------------------------------------------------------------------
   Configuration
 -------------------------------------------------------------------------------}
@@ -128,6 +157,9 @@ instance LeiosCrypto c => LeiosProtocol (Praos2 c) where
   validateLeiosAnnouncement (LeiosConfig (PraosConfig prms _ei)) b _slot =
     validateLeiosAnnouncementPolyPraos prms b
   getLeiosLedgerView _proxy = getLeiosLedgerViewPolyPraos
+
+instance LeiosCrypto c => PerasProtocol (Praos2 c) where
+  getPerasLedgerView _proxy = getPerasLedgerViewPolyPraos
 
 instance LeiosCrypto c => ConsensusProtocol (Praos2 c) where
   type ChainDepState (Praos2 c) = PolyPraosState (Praos2 c)
@@ -167,6 +199,16 @@ instance Dijkstra.DijkstraEraForecast era => Views.ForecastToPolyPraosLedgerView
               , llvMaxEbBodySize = f ^. Dijkstra.maxEndorserBlockReferencesSizeForecastL @era @t
               , llvMaxEbTxsSize = f ^. Dijkstra.maxEndorserBlockTxsSizeForecastL @era @t
               }
+      , Views.plvPeras =
+          Praos2HasPeras
+            MkPerasLedgerView
+              { plvMinCandidateBlockAge = f ^. Dijkstra.perasMinCandidateBlockAgeForecastL @era @t
+              , plvHealingFactor = f ^. Dijkstra.perasHealingFactorForecastL @era @t
+              , plvCertBoost = f ^. Dijkstra.perasCertBoostForecastL @era @t
+              , plvTargetCommitteeSize = f ^. Dijkstra.perasTargetCommitteeSizeForecastL @era @t
+              , plvBootstrapRound = f ^. Dijkstra.perasBootstrapRoundForecastL @era @t
+              , plvQuorumThresholdSafetyMargin = f ^. Dijkstra.perasQuorumThresholdSafetyMarginForecastL @era @t
+              }
       }
    where
     cc = SL.forecastChainChecks @t @era f
@@ -178,8 +220,8 @@ instance Dijkstra.DijkstraEraForecast era => Views.ForecastToPolyPraosLedgerView
 -- | Crossing from Praos into Praos with Leios.
 --
 -- Everything carries over unchanged; the Leios fields merely have to be
--- introduced. The announcement starts empty, since no header of the protocol
--- being left could have carried one. The Leios parameters come from the
+-- introduced. Nothing has been announced, since no header of the protocol being
+-- left could have carried an announcement. The Leios parameters come from the
 -- Dijkstra genesis. The committee is empty: none is seated until a stake
 -- snapshot rotation within the new era, beyond any forecast from the old one.
 instance
@@ -203,6 +245,16 @@ instance
               , llvMaxEbBodySize = udppMaxEndorserBlockReferencesSize upgrade
               , llvMaxEbTxsSize = udppMaxEndorserBlockTxsSize upgrade
               }
+      , Views.plvPeras =
+          Praos2HasPeras
+            MkPerasLedgerView
+              { plvMinCandidateBlockAge = udppPerasMinCandidateBlockAge upgrade
+              , plvHealingFactor = udppPerasHealingFactor upgrade
+              , plvCertBoost = udppPerasCertBoost upgrade
+              , plvTargetCommitteeSize = udppPerasTargetCommitteeSize upgrade
+              , plvBootstrapRound = udppPerasBootstrapRound upgrade
+              , plvQuorumThresholdSafetyMargin = udppPerasQuorumThresholdSafetyMargin upgrade
+              }
       }
 
   translateChainDepState _ st =
@@ -215,7 +267,25 @@ instance
       , praosStatePreviousEpochNonce = praosStatePreviousEpochNonce st
       , praosStateLabNonce = praosStateLabNonce st
       , praosStateLastEpochBlockNonce = praosStateLastEpochBlockNonce st
-      , praosStateLeiosAnnouncement = Praos2HasLeios SNothing
+      , praosStateLeiosAnnouncement = Praos2HasLeios (Strict.Left NothingAnnounced)
+      }
+
+-- | Crossing from one era with Leios into another.
+--
+-- Everything carries over unchanged except the announcement: it was made in the
+-- era being left, so it is no longer certifiable, since an endorser block may
+-- not be certified across an era boundary (to keep the design simpler).
+--
+-- Nothing uses this yet: it's dead code until two adjacent eras use 'Praos2'.
+-- Even so, it's important to implement it _now_, because it would be easy to
+-- forget, and doing so could introduce blindspots in the rest of the Leios
+-- rules.
+instance TranslateProto (Praos2 c) (Praos2 c) era where
+  translateLedgerView _prx _ctx = id
+  translateChainDepState _ st =
+    st
+      { praosStateLeiosAnnouncement =
+          markUncertifiable AnnouncedInPreviousEra <$> praosStateLeiosAnnouncement st
       }
 
 instance

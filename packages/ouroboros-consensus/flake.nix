@@ -20,7 +20,7 @@
       flake = false;
     };
     CHaP = {
-      url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
+      url = "github:intersectmbo/cardano-haskell-packages?ref=index-only";
       flake = false;
     };
     iohkNix = {
@@ -50,7 +50,7 @@
     let
       supportedSystems = [
         "x86_64-linux"
-        "aarch64-linux"
+        #"aarch64-linux"
         "aarch64-darwin"
       ];
     in

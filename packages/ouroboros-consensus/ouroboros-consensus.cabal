@@ -201,6 +201,8 @@ library
     Ouroboros.Consensus.Ledger.Tables.Kinds
     Ouroboros.Consensus.Ledger.Tables.MapKind
     Ouroboros.Consensus.Ledger.Tables.Utils
+    Ouroboros.Consensus.Leios.AnnounceState
+    Ouroboros.Consensus.Leios.NotifyLog
     Ouroboros.Consensus.Leios.Protocol
     Ouroboros.Consensus.Leios.Types
     Ouroboros.Consensus.Mempool
@@ -254,6 +256,7 @@ library
     Ouroboros.Consensus.Peras.Error.Mock
     Ouroboros.Consensus.Peras.Error.V1
     Ouroboros.Consensus.Peras.Params
+    Ouroboros.Consensus.Peras.Protocol
     Ouroboros.Consensus.Peras.SelectView
     Ouroboros.Consensus.Peras.Types
     Ouroboros.Consensus.Peras.Void
@@ -461,6 +464,7 @@ library tracing
   other-modules:
     Ouroboros.Consensus.Tracing.BlockReplayProgress
     Ouroboros.Consensus.Tracing.ChainDB
+    Ouroboros.Consensus.Tracing.Committee
     Ouroboros.Consensus.Tracing.Consensus
     Ouroboros.Consensus.Tracing.ConsensusStartupException
     Ouroboros.Consensus.Tracing.ConvertTxId
@@ -470,6 +474,7 @@ library tracing
     Ouroboros.Consensus.Tracing.Formatting
     Ouroboros.Consensus.Tracing.HasIssuer
     Ouroboros.Consensus.Tracing.KESInfo
+    Ouroboros.Consensus.Tracing.Peras
 
   build-depends:
     aeson,
@@ -512,6 +517,7 @@ test-suite tracing-test
   hs-source-dirs: tracing/test
   main-is: Main.hs
   other-modules:
+    Test.Consensus.Tracing.Dijkstra
     Test.Consensus.Tracing.Golden
     Test.Consensus.Tracing.MetaTrace
 
@@ -526,6 +532,7 @@ test-suite tracing-test
     cardano-ledger-core,
     cardano-ledger-dijkstra,
     cardano-ledger-mary,
+    cardano-ledger-shelley,
     cardano-protocol-tpraos,
     containers,
     filepath,
@@ -563,7 +570,6 @@ library lsm
     primitive,
     random,
     resource-registry,
-    serialise,
     streaming,
     text,
     transformers,
@@ -1248,6 +1254,7 @@ library protocol
     ouroboros-consensus,
     ouroboros-network:{framework, tests-lib},
     serialise,
+    strict,
     text,
     Win32-network ^>=0.2,
 
@@ -1275,6 +1282,7 @@ library unstable-protocol-testlib
     containers,
     ouroboros-consensus:{ouroboros-consensus, protocol},
     QuickCheck,
+    strict,
     text,
 
 test-suite protocol-test
@@ -1284,16 +1292,19 @@ test-suite protocol-test
   main-is: Main.hs
   other-modules:
     Test.Consensus.Protocol.Praos.SelectView
+    Test.Consensus.Protocol.Praos2
 
   build-depends:
     base,
     cardano-crypto-class,
     cardano-ledger-core:{cardano-ledger-core, testlib},
     cardano-protocol-tpraos,
+    cardano-slotting,
     containers,
-    ouroboros-consensus:{ouroboros-consensus, protocol, unstable-consensus-testlib},
+    ouroboros-consensus:{ouroboros-consensus, protocol, unstable-consensus-testlib, unstable-protocol-testlib},
     QuickCheck,
     serialise,
+    strict,
     tasty,
     tasty-quickcheck,
 
@@ -1494,6 +1505,7 @@ test-suite consensus-diffusion-test
     Test.Consensus.Leios.LeiosNotify.Node
     Test.Consensus.Leios.LeiosNotify.Protocol
     Test.Consensus.Leios.NodeUnderTest
+    Test.Consensus.Leios.Relay
     Test.Consensus.Leios.TestBlock
     Test.Consensus.Network.AnchoredFragment.Extras
     Test.Consensus.PeerSimulator.BlockFetch
@@ -1825,8 +1837,9 @@ library unstable-shelley-testlib
     cardano-crypto-class,
     cardano-data,
     cardano-ledger-allegra:cardano-ledger-allegra,
+    cardano-ledger-api:testlib,
     cardano-ledger-babbage:testlib,
-    cardano-ledger-conway:testlib,
+    cardano-ledger-conway:{cardano-ledger-conway, testlib},
     cardano-ledger-core:{cardano-ledger-core, testlib},
     cardano-ledger-dijkstra:testlib,
     cardano-ledger-mary:cardano-ledger-mary,

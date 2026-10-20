@@ -17,7 +17,7 @@ module Ouroboros.Consensus.Node.Tracers
   , TraceLabelCreds (..)
   , TracePerasCertInclusionEvent (..)
   , TracePerasVoteForgingEvent (..)
-  , TestnetTrace(..)
+  , TestnetTrace (..)
   ) where
 
 import Control.Exception (SomeException)
@@ -116,16 +116,24 @@ data Tracers' remotePeer localPeer blk f = Tracers
   }
 
 data TestnetTrace
-  = DebugLog
-      Text -- ^ log message
+  = -- | log message
+    DebugLog
+      Text
   | AdvertLog
-      Int -- ^ number of certs
-      Int -- ^ number of votes
-      Int  -- ^ chain length
-      Word64  -- ^ boost
-      Word64 -- ^ slot no
-      String -- ^ block hash
-      Word64 -- ^ block no
+      -- | number of certs
+      Int
+      -- | number of votes
+      Int
+      -- | chain length
+      Int
+      -- | boost
+      Word64
+      -- | slot no
+      Word64
+      -- | block hash
+      String
+      -- | block no
+      Word64
   deriving (Eq, Ord, Show)
 
 instance

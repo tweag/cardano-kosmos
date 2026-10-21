@@ -9,6 +9,8 @@ cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node carda
 CARDANO_CLI=$(cabal list-bin cardano-cli)
 CARDANO_TESTNET=$(cabal list-bin cardano-testnet)
 
+export CARDANO_CLI CARDANO_TESTNET
+
 DEVENV_PATH="${1:-devnet-env}"
 
 echo "Setting up Peras devenv at ./${DEVENV_PATH}"
@@ -71,9 +73,12 @@ configurationFile="${DEVENV_PATH}/configuration.yaml"
 
 echo "Changing genesis params"
 
+new_initial_funds=$(./scripts/redistribute-stakes.sh "$scenarioArg" "$DEVENV_PATH")
+
 jq ".securityParam = $security_param_k |
     .slotLength = $slot_length_seconds |
-    .epochLength = $epoch_length_slots" $shelleyGenesisFile | sponge $shelleyGenesisFile
+    .epochLength = $epoch_length_slots |
+    .extraConfig.initialFunds = $new_initial_funds" $shelleyGenesisFile | sponge $shelleyGenesisFile
 
 jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGenesisFile
 
@@ -83,9 +88,6 @@ if [ $start_directly_in_dijkstra ]; then
   jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
   jq '.ExperimentalHardForksEnabled = true' $configurationFile | sponge $configurationFile
 fi
-
-# TODO: implement redistribution of stakes
-
 
 # TODO: move to the nickel config
 trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"}}'

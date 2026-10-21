@@ -27,6 +27,7 @@ import Ouroboros.Consensus.Block
   , CannotForge
   , ForgeStateInfo
   , ForgeStateUpdateError
+  , PerasError
   , PerasWeight (..)
   )
 import Ouroboros.Consensus.BlockchainTime (getSlotLength)
@@ -34,6 +35,7 @@ import Ouroboros.Consensus.Cardano.Condense ()
 import Ouroboros.Consensus.HardFork.Combinator
 import Ouroboros.Consensus.HardFork.Combinator.AcrossEras
   ( EraMismatch (..)
+  , HardForkPerasError (..)
   , OneEraCannotForge (..)
   , OneEraEnvelopeErr (..)
   , OneEraForgeStateInfo (..)
@@ -41,10 +43,9 @@ import Ouroboros.Consensus.HardFork.Combinator.AcrossEras
   , OneEraLedgerError (..)
   , OneEraLedgerUpdate (..)
   , OneEraLedgerWarning (..)
+  , OneEraPerasError (..)
   , OneEraTiebreakerView (..)
   , OneEraValidationErr (..)
-  , OneEraPerasError (..)
-  , HardForkPerasError (..)
   , mkEraMismatch
   )
 import Ouroboros.Consensus.HardFork.Combinator.Condense ()
@@ -379,33 +380,20 @@ instance All (LogFormatting `Compose` WrapTiebreakerView) xs => LogFormatting (O
 instance LogFormatting (TiebreakerView (BlockProtocol blk)) => LogFormatting (WrapTiebreakerView blk) where
   forMachine dtal = forMachine dtal . unwrapTiebreakerView
 
-
---
--- instances for OneEraPerasError
---
-instance All (LogFormatting `Compose` WrapApplyTxErr) xs => LogFormatting (OneEraPerasError xs) where
-  forMachine dtal =
-    hcollapse
-      . hcmap (Proxy @(LogFormatting `Compose` WrapApplyTxErr)) (K . forMachine dtal)
-      . getOneEraPerasError
-
-instance LogFormatting (WrapPerasError blk) where
-  forMachine _dtal _perasError = 
-    mconcat
-      [ "kind" .= String "WrapPerasError"
-      ]
-
 --
 -- instances for HardForkPerasError
 --
 
-instance All (LogFormatting `Compose` WrapApplyTxErr) xs => LogFormatting (HardForkPerasError xs) where
-  forMachine _dtal HardForkPerasErrorEraMismatch = 
+instance All (LogFormatting `Compose` WrapPerasError) xs => LogFormatting (HardForkPerasError xs) where
+  forMachine _dtal HardForkPerasErrorEraMismatch =
     mconcat
       [ "kind" .= String "HardForkLedgerErrorWrongEra"
       ]
   forMachine dtal (HardForkPerasErrorOneEraPerasError err) =
-    forMachine dtal err
+    mconcat
+      [ "kind" .= String "HardForkPerasErrorOneEraPerasError"
+      , forMachine dtal err
+      ]
   forMachine _dtal HardForkPerasErrorConversionError =
     mconcat
       [ "kind" .= String "HardForkPerasErrorConversionError"
@@ -418,3 +406,12 @@ instance All (LogFormatting `Compose` WrapApplyTxErr) xs => LogFormatting (HardF
     mconcat
       [ "kind" .= String "HardForkPerasErrorCommitteeError"
       ]
+
+instance All (LogFormatting `Compose` WrapPerasError) xs => LogFormatting (OneEraPerasError xs) where
+  forMachine dtal =
+    hcollapse
+      . hcmap (Proxy @(LogFormatting `Compose` WrapPerasError)) (K . forMachine dtal)
+      . getOneEraPerasError
+
+instance LogFormatting (PerasError blk) => LogFormatting (WrapPerasError blk) where
+  forMachine dtal = forMachine dtal . unwrapPerasError

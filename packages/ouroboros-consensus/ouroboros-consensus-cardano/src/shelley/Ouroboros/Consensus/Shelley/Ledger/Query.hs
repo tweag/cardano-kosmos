@@ -5,7 +5,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE RankNTypes #-}
@@ -22,7 +21,6 @@
 
 module Ouroboros.Consensus.Shelley.Ledger.Query
   ( BlockQuery (..)
-  , NonMyopicMemberRewards (..)
 
     -- * Serialisation
   , decodeShelleyQuery
@@ -107,27 +105,14 @@ import Ouroboros.Network.Point (Block (..))
   BlockSupportsLedgerQuery
 -------------------------------------------------------------------------------}
 
-newtype NonMyopicMemberRewards = NonMyopicMemberRewards
-  { unNonMyopicMemberRewards ::
-      Map
-        (Either SL.Coin (SL.Credential SL.Staking))
-        (Map (SL.KeyHash SL.StakePool) SL.Coin)
-  }
-  deriving stock Show
-  deriving newtype (Eq, ToCBOR, FromCBOR)
-
-type Delegations = Map (SL.Credential SL.Staking) (SL.KeyHash SL.StakePool)
-
-type VoteDelegatees = Map (SL.Credential SL.Staking) SL.DRep
-
 data instance BlockQuery (ShelleyBlock proto era) fp result where
   GetLedgerTip :: BlockQuery (ShelleyBlock proto era) QFNoTables (Point (ShelleyBlock proto era))
   GetEpochNo :: BlockQuery (ShelleyBlock proto era) QFNoTables EpochNo
   -- | Calculate the Non-Myopic Pool Member Rewards for a set of
-  -- credentials. See 'SL.getNonMyopicMemberRewards'
+  -- credentials. See 'SL.queryNonMyopicMemberRewards'
   GetNonMyopicMemberRewards ::
     Set (Either SL.Coin (SL.Credential SL.Staking)) ->
-    BlockQuery (ShelleyBlock proto era) QFNoTables NonMyopicMemberRewards
+    BlockQuery (ShelleyBlock proto era) QFNoTables SL.QueryResultNonMyopicMemberRewards
   GetCurrentPParams ::
     BlockQuery (ShelleyBlock proto era) QFNoTables (LC.PParams era)
   -- | Get a subset of the UTxO, filtered by address. Although this will
@@ -167,7 +152,9 @@ data instance BlockQuery (ShelleyBlock proto era) fp result where
     BlockQuery
       (ShelleyBlock proto era)
       QFNoTables
-      (Delegations, Map (SL.Credential SL.Staking) Coin)
+      ( Map (SL.Credential SL.Staking) (SL.KeyHash SL.StakePool)
+      , Map (SL.Credential SL.Staking) Coin
+      )
   GetGenesisConfig ::
     BlockQuery (ShelleyBlock proto era) QFNoTables CompactGenesis
   -- | Only for debugging purposes, we make no effort to ensure binary
@@ -275,7 +262,7 @@ data instance BlockQuery (ShelleyBlock proto era) fp result where
   GetFilteredVoteDelegatees ::
     CG.ConwayEraGov era =>
     Set (SL.Credential SL.Staking) ->
-    BlockQuery (ShelleyBlock proto era) QFNoTables VoteDelegatees
+    BlockQuery (ShelleyBlock proto era) QFNoTables (Map (SL.Credential SL.Staking) SL.DRep)
   GetAccountState ::
     BlockQuery (ShelleyBlock proto era) QFNoTables SL.ChainAccountState
   -- | Query the SPO voting stake distribution.
@@ -329,6 +316,16 @@ data instance BlockQuery (ShelleyBlock proto era) fp result where
       (ShelleyBlock proto era)
       QFNoTables
       (Map SL.DRep (Set (SL.Credential SL.Staking)))
+  GetStakePoolState ::
+    Maybe (Set (KeyHash LC.StakePool)) ->
+    Bool ->
+    BlockQuery
+      (ShelleyBlock proto era)
+      QFNoTables
+      (Map (KeyHash LC.StakePool) (SL.QueryResultStakePoolState era))
+  -- | The Leios voting committees of the current and the next epoch.
+  GetLeiosCommittee ::
+    BlockQuery (ShelleyBlock proto era) QFNoTables SL.QueryResultLeiosCommittee
 
 -- WARNING: please add new queries to the end of the list and stick to this
 -- order in all other pattern matches on queries. This helps in particular
@@ -365,8 +362,7 @@ instance
       GetEpochNo ->
         SL.nesEL st
       GetNonMyopicMemberRewards creds ->
-        NonMyopicMemberRewards $
-          SL.getNonMyopicMemberRewards globals st creds
+        SL.queryNonMyopicMemberRewards globals st creds
       GetCurrentPParams ->
         getPParams st
       DebugEpochState ->
@@ -454,6 +450,10 @@ instance
           $ cfg
       GetDRepDelegations dreps ->
         SL.queryDRepDelegations st dreps
+      GetStakePoolState mset b ->
+        SL.queryStakePoolState st mset b
+      GetLeiosCommittee ->
+        SL.queryLeiosCommittee st
    where
     lcfg = configLedger $ getExtLedgerCfg cfg
     globals = shelleyLedgerGlobals lcfg
@@ -511,6 +511,8 @@ instance
     GetStakeDistribution2{} -> const True
     GetMaxMajorProtocolVersion -> const True
     GetDRepDelegations{} -> const True
+    GetStakePoolState{} -> (> ShelleyNodeToClientVersion16)
+    GetLeiosCommittee{} -> (> ShelleyNodeToClientVersion16)
 
 instance SameDepIndex2 (BlockQuery (ShelleyBlock proto era)) where
   sameDepIndex2 GetLedgerTip GetLedgerTip =
@@ -662,6 +664,10 @@ instance SameDepIndex2 (BlockQuery (ShelleyBlock proto era)) where
     | otherwise =
         Nothing
   sameDepIndex2 GetDRepDelegations{} _ = Nothing
+  sameDepIndex2 GetStakePoolState{} GetStakePoolState{} = Just Refl
+  sameDepIndex2 GetStakePoolState{} _ = Nothing
+  sameDepIndex2 GetLeiosCommittee GetLeiosCommittee = Just Refl
+  sameDepIndex2 GetLeiosCommittee _ = Nothing
 
 deriving instance Eq (BlockQuery (ShelleyBlock proto era) fp result)
 deriving instance Show (BlockQuery (ShelleyBlock proto era) fp result)
@@ -705,6 +711,8 @@ instance ShelleyCompatible proto era => ShowQuery (BlockQuery (ShelleyBlock prot
     GetStakeDistribution2{} -> show
     GetMaxMajorProtocolVersion{} -> show
     GetDRepDelegations{} -> show
+    GetStakePoolState{} -> show
+    GetLeiosCommittee -> show
 
 {-------------------------------------------------------------------------------
   Auxiliary
@@ -806,6 +814,10 @@ encodeShelleyQuery query = case query of
     CBOR.encodeListLen 1 <> CBOR.encodeWord8 38
   GetDRepDelegations dreps ->
     CBOR.encodeListLen 2 <> CBOR.encodeWord8 39 <> LC.toEraCBOR @era dreps
+  GetStakePoolState mset b ->
+    CBOR.encodeListLen 3 <> CBOR.encodeWord8 40 <> toCBOR mset <> toCBOR b
+  GetLeiosCommittee ->
+    CBOR.encodeListLen 1 <> CBOR.encodeWord8 41
 
 decodeShelleyQuery ::
   forall era proto.
@@ -886,6 +898,11 @@ decodeShelleyQuery = do
     (1, 37) -> return $ SomeBlockQuery GetStakeDistribution2
     (1, 38) -> return $ SomeBlockQuery GetMaxMajorProtocolVersion
     (2, 39) -> requireCG $ SomeBlockQuery . GetDRepDelegations <$> LC.fromEraCBOR @era
+    (3, 40) -> do
+      mset <- fromCBOR
+      b <- fromCBOR
+      return $ SomeBlockQuery $ GetStakePoolState mset b
+    (1, 41) -> return $ SomeBlockQuery GetLeiosCommittee
     _ -> failmsg "invalid"
 
 encodeShelleyResult ::
@@ -898,7 +915,7 @@ encodeShelleyResult ::
 encodeShelleyResult v query = case query of
   GetLedgerTip -> encodePoint encode
   GetEpochNo -> toCBOR
-  GetNonMyopicMemberRewards{} -> toCBOR
+  GetNonMyopicMemberRewards{} -> LC.toEraCBOR @era
   GetCurrentPParams -> toCBOR
   GetUTxOByAddress{} -> toCBOR
   GetUTxOWhole -> toCBOR
@@ -933,6 +950,8 @@ encodeShelleyResult v query = case query of
   GetStakeDistribution2{} -> LC.toEraCBOR @era
   GetMaxMajorProtocolVersion -> toCBOR
   GetDRepDelegations{} -> LC.toEraCBOR @era
+  GetStakePoolState{} -> LC.toEraCBOR @era
+  GetLeiosCommittee -> LC.toEraCBOR @era
 
 decodeShelleyResult ::
   forall proto era fp result.
@@ -944,7 +963,7 @@ decodeShelleyResult ::
 decodeShelleyResult v query = case query of
   GetLedgerTip -> decodePoint decode
   GetEpochNo -> fromCBOR
-  GetNonMyopicMemberRewards{} -> fromCBOR
+  GetNonMyopicMemberRewards{} -> LC.fromEraCBOR @era
   GetCurrentPParams -> fromCBOR
   GetUTxOByAddress{} -> fromCBOR
   GetUTxOWhole -> fromCBOR
@@ -979,6 +998,8 @@ decodeShelleyResult v query = case query of
   GetStakeDistribution2 -> LC.fromEraCBOR @era
   GetMaxMajorProtocolVersion -> fromCBOR
   GetDRepDelegations{} -> LC.fromEraCBOR @era
+  GetStakePoolState{} -> LC.fromEraCBOR @era
+  GetLeiosCommittee -> LC.fromEraCBOR @era
 
 -- | The codec for the result of 'GetGenesisConfig'.
 --
@@ -996,6 +1017,10 @@ genesisConfigEnDecoding ::
 genesisConfigEnDecoding ShelleyNodeToClientVersion15 =
   ( encodeShelleyGenesisNoExtraConfig . getCompactGenesis
   , compactGenesis <$> decodeShelleyGenesisNoExtraConfig
+  )
+genesisConfigEnDecoding ShelleyNodeToClientVersion16 =
+  ( toCBOR . getCompactGenesis
+  , compactGenesis <$> fromCBOR
   )
 
 {-------------------------------------------------------------------------------

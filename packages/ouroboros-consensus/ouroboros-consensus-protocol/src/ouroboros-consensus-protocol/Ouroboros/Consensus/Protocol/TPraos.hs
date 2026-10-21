@@ -2,6 +2,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -83,6 +84,10 @@ import Ouroboros.Consensus.Leios.Protocol
   , defaultGetLeiosLedgerView
   , defaultValidateLeiosAnnouncement
   )
+import Ouroboros.Consensus.Peras.Protocol
+  ( PerasProtocol (..)
+  , defaultGetPerasLedgerView
+  )
 import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Protocol.Ledger.HotKey (HotKey)
 import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
@@ -91,7 +96,6 @@ import Ouroboros.Consensus.Protocol.Praos.Common
 import Ouroboros.Consensus.Ticked
 import Ouroboros.Consensus.Util.CBOR
 import Ouroboros.Consensus.Util.Condense
-import Ouroboros.Consensus.Util.Versioned
 
 {-------------------------------------------------------------------------------
   Fields required by TPraos in the header
@@ -300,10 +304,6 @@ data TPraosState = TPraosState
 
 instance NoThunks TPraosState
 
--- | Version 0 supported rollback, removed in #2575.
-serialisationFormatVersion1 :: VersionNumber
-serialisationFormatVersion1 = 1
-
 instance ToCBOR TPraosState where
   toCBOR = encode
 
@@ -312,20 +312,15 @@ instance FromCBOR TPraosState where
 
 instance Serialise TPraosState where
   encode (TPraosState slot chainDepState) =
-    encodeVersion serialisationFormatVersion1 $
-      mconcat
-        [ CBOR.encodeListLen 2
-        , encodeWithOrigin toCBOR slot
-        , toCBOR chainDepState
-        ]
+    mconcat
+      [ CBOR.encodeListLen 2
+      , encodeWithOrigin toCBOR slot
+      , toCBOR chainDepState
+      ]
 
-  decode =
-    decodeVersion
-      [(serialisationFormatVersion1, Decode decodeTPraosState1)]
-   where
-    decodeTPraosState1 = do
-      enforceSize "TPraosState" 2
-      TPraosState <$> decodeWithOrigin fromCBOR <*> fromCBOR
+  decode = do
+    enforceSize "TPraosState" 2
+    TPraosState <$> decodeWithOrigin fromCBOR <*> fromCBOR
 
 data instance Ticked TPraosState = TickedChainDepState
   { tickedTPraosStateChainDepState :: SL.ChainDepState
@@ -340,6 +335,9 @@ instance SL.PraosCrypto c => LeiosProtocol (TPraos c) where
   getLeiosAnnouncement = defaultGetLeiosAnnouncement
   validateLeiosAnnouncement = defaultValidateLeiosAnnouncement
   getLeiosLedgerView = defaultGetLeiosLedgerView
+
+instance SL.PraosCrypto c => PerasProtocol (TPraos c) where
+  getPerasLedgerView = defaultGetPerasLedgerView
 
 instance SL.PraosCrypto c => ConsensusProtocol (TPraos c) where
   type ChainDepState (TPraos c) = TPraosState
@@ -488,6 +486,15 @@ meetsLeaderThreshold
     r =
       maybe 0 SL.individualPoolStake $
         Map.lookup keyHash poolDistr
+
+{-------------------------------------------------------------------------------
+  Translation
+-------------------------------------------------------------------------------}
+
+-- | Crossing between eras that both run this protocol changes nothing.
+instance TranslateProto (TPraos c) (TPraos c) era where
+  translateLedgerView _prx _ctx = id
+  translateChainDepState _ = id
 
 {-------------------------------------------------------------------------------
   CannotForge

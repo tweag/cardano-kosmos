@@ -7,33 +7,23 @@
 
 module Test.Cardano.Ledger.Dijkstra.Imp.PoolSpec (spec, dijkstraOnlySpec) where
 
-import Cardano.Ledger.Alonzo
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin (Coin (..))
-import Cardano.Ledger.Conway
 import Cardano.Ledger.Credential (Credential (..))
 import Cardano.Ledger.Dijkstra
 import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.PParams (ppMaxPledgeLeverageL)
 import Cardano.Ledger.Dijkstra.Rules
-import Cardano.Ledger.Genesis
-import Cardano.Ledger.Shelley
-import Cardano.Ledger.Shelley.Genesis
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
-import Cardano.Ledger.Shelley.Transition
 import Cardano.Ledger.State
-import Control.Monad.IO.Class
 import Data.Coerce (coerce)
 import Data.Foldable (fold)
-import qualified Data.ListMap as ListMap
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
 import Data.Word
 import Lens.Micro ((%~), (&), (.~))
-import qualified System.FS.Sim.MockFS as MockFS
-import System.FS.Sim.STM
 import Test.Cardano.Ledger.Core.Rational ((%!))
 import Test.Cardano.Ledger.Dijkstra.ImpTest
 import Test.Cardano.Ledger.Imp.Common
@@ -335,53 +325,128 @@ spec = describe "POOL" $ do
 
   describe "BLS PoolReg" $ do
     let
-      mkPoolRegTxFromParams pps =
-        mkBasicTx mkBasicTxBody
-          & bodyTxL . certsTxBodyL .~ SSeq.singleton (RegPoolTxCert pps)
-
       getPools = getsNES $ nesEsL . epochStateStakePoolsL
 
     it "registers a pool with a valid BLS key and proof of possession" $ do
-      pps <- freshStakePool
       ownerBlsKey <- freshBlsKey
-      let ppsWithBlsKey = pps {sppBlsKey = SJust ownerBlsKey}
-      submitTxAnn_ "Registering a new stake pool" $
-        mkBasicTx mkBasicTxBody
-          & bodyTxL . certsTxBodyL .~ SSeq.singleton (RegPoolTxCert ppsWithBlsKey)
-      pools <- getPools
-      stakePoolState <- expectJust $ Map.lookup (sppId pps) pools
-      bksKey <$> spsBlsKey stakePoolState `shouldBe` SJust ownerBlsKey
+      pps <- registerPoolWithBlsKey (SJust ownerBlsKey)
+      epochNo <- getsNES nesELL
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState ownerBlsKey epochNo))
 
     it "fails to re-register an existing pool with an invalid BLS proof of possession" $ do
-      pps <- freshStakePool
       ownerBlsKey <- freshBlsKey
-      let ppsWithBlsKey = pps {sppBlsKey = SJust ownerBlsKey}
-      submitTxAnn_ "Registering a new stake pool" $
-        mkPoolRegTxFromParams ppsWithBlsKey
+      pps <- registerPoolWithBlsKey (SJust ownerBlsKey)
       pStateBefore <- getPools
       invalidOwnerBlsKey <- BlsKey <$> arbitrary <*> arbitrary
-      -- TODO: remove `withDisabledPostSubmitTxHook` once the Agda spec includes BLS
-      -- proof of possession validation for pool registration.
-      -- See https://github.com/IntersectMBO/formal-ledger-specifications/pull/1300
-      withDisabledPostSubmitTxHook $
-        submitFailingTx
-          (mkPoolRegTxFromParams pps {sppBlsKey = SJust invalidOwnerBlsKey})
-          [injectFailure $ BlsKeyInvalidProofOfPossession (sppId pps) invalidOwnerBlsKey]
+      submitFailingTx
+        (registerPoolTx pps {sppBlsKey = SJust invalidOwnerBlsKey})
+        [injectFailure $ BlsKeyInvalidProofOfPossession (sppId pps) invalidOwnerBlsKey]
       passEpoch
       getPools `shouldReturn` pStateBefore
 
     it "fails to register a new pool with an invalid BLS proof of possession" $ do
       pps <- freshStakePool
       invalidOwnerBlsKey <- BlsKey <$> arbitrary <*> arbitrary
-      -- TODO: remove `withDisabledPostSubmitTxHook` once the Agda spec includes BLS
-      -- proof of possession validation for pool registration.
-      -- See https://github.com/IntersectMBO/formal-ledger-specifications/pull/1300
-      withDisabledPostSubmitTxHook $
-        submitFailingTx
-          (mkPoolRegTxFromParams pps {sppBlsKey = SJust invalidOwnerBlsKey})
-          [injectFailure $ BlsKeyInvalidProofOfPossession (sppId pps) invalidOwnerBlsKey]
+      submitFailingTx
+        (registerPoolTx pps {sppBlsKey = SJust invalidOwnerBlsKey})
+        [injectFailure $ BlsKeyInvalidProofOfPossession (sppId pps) invalidOwnerBlsKey]
       pools <- getPools
       expectNothing $ Map.lookup (sppId pps) pools
+
+    it "re-registering with the same and different BLS key" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      registeredIn <- getsNES nesELL
+      passEpoch
+      submitTx_ $ registerPoolTx pps
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+      newBlsKey <- freshBlsKey
+      renewalSubmittedIn <- getsNES nesELL
+      submitTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+      passEpoch
+      -- dated one epoch after the re-registration was submitted,
+      -- because re-registration is applied by POOLREAP on entering the next epoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState newBlsKey (succ renewalSubmittedIn)))
+
+    it "re-registering with the same BLS key within the same epoch" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      submitTx_ $ registerPoolTx pps
+      registeredIn <- getsNES nesELL
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+
+    it "re-registering with a new BLS key within the same epoch" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      newBlsKey <- freshBlsKey
+      submitTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
+      registeredIn <- getsNES nesELL
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState newBlsKey (succ registeredIn)))
+
+    it "changing other pool parameters does not renew the BLS key" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      registeredIn <- getsNES nesELL
+      passEpoch
+      minPoolCost <- getsPParams ppMinPoolCostL
+      submitTx_ $ registerPoolTx pps {sppCost = minPoolCost <> Coin 1}
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+
+    it "dropping the BLS key clears it" $ do
+      pps <- registerPoolWithBlsKey . SJust =<< freshBlsKey
+      passEpoch
+      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      passEpoch
+      expectBlsKeyState (sppId pps) SNothing
+
+    it "dropping and re-registering the BLS key within one epoch does not renew it" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      registeredIn <- getsNES nesELL
+      passEpoch
+      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      submitTx_ $ registerPoolTx pps
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+
+    it "re-registering a dropped BLS key starts a fresh lifetime" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      passEpoch
+      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      passEpoch
+      expectBlsKeyState (sppId pps) SNothing
+      reRegisteredIn <- getsNES nesELL
+      submitTx_ $ registerPoolTx pps
+      expectBlsKeyState (sppId pps) SNothing
+      passEpoch
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey (succ reRegisteredIn)))
+
+    it "un-retiring a pool by re-registration does not renew its BLS key" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      registeredIn <- getsNES nesELL
+      retirePoolTx (sppId pps) (EpochInterval 2) >>= submitTx_
+      submitTx_ $ registerPoolTx pps
+      passNEpochs 3
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
+
+    it "a reaped pool that registers again starts a fresh lifetime" $ do
+      blsKey <- freshBlsKey
+      pps <- registerPoolWithBlsKey (SJust blsKey)
+      retirePoolTx (sppId pps) (EpochInterval 1) >>= submitTx_
+      passNEpochs 2
+      expectPool (sppId pps) Nothing
+      registeredAgainIn <- getsNES nesELL
+      submitTx_ $ registerPoolTx pps
+      expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredAgainIn))
   where
     registerNewPool = do
       (kh, vrf) <- (,) <$> freshKeyHash <*> freshKeyHashVRF
@@ -404,6 +469,12 @@ spec = describe "POOL" $ do
             & psVRFKeyHashesL %~ addVRFKeyHashOccurrence vrf . Map.delete ownVrf
       expectPool kh (Just vrf)
       pure kh
+    registerPoolWithBlsKey mbBlsKey = do
+      pps <- freshStakePool
+      let ppsWithBlsKey = pps {sppBlsKey = mbBlsKey}
+      submitTxAnn_ "Registering a new stake pool" $
+        registerPoolTx ppsWithBlsKey
+      pure ppsWithBlsKey
     retirePoolTx kh retirementInterval = do
       curEpochNo <- getsNES nesELL
       pure $
@@ -420,6 +491,9 @@ spec = describe "POOL" $ do
       psVRFKeyHashes
         <$> getPState
           `shouldReturn` Map.fromList [(vrf, unsafeNonZero n) | (vrf, n) <- vrfs]
+    expectBlsKeyState poolId expected = do
+      sps <- expectJust . Map.lookup poolId . psStakePools =<< getPState
+      spsBlsKey sps `shouldBe` expected
     poolParams ::
       KeyHash StakePool ->
       VRFVerKeyHash StakePoolVRF ->
@@ -428,8 +502,8 @@ spec = describe "POOL" $ do
       pps <- registerAccountAddress >>= freshPoolParams kh
       pure $ pps & sppVrfL .~ vrf
 
--- | Tests that need the `TransitionConfig` of Dijkstra, which the era-polymorphic tests
--- above cannot construct.
+-- | These need to run the POOL rule on its own, which needs the concrete rule
+-- types of Dijkstra, so can't be bundled in the era-polymorphic ones above
 dijkstraOnlySpec :: SpecWith (ImpInit (LedgerSpec DijkstraEra))
 dijkstraOnlySpec = describe "POOL" $ do
   describe "Register and re-register pools" $ do
@@ -438,7 +512,9 @@ dijkstraOnlySpec = describe "POOL" $ do
       -- set up before the injection, since no transaction can follow it (see `runPool`)
       newStakePoolParams <- freshStakePool
       let vrf = sppVrf stakePoolParams
-      injectGenesisStakePools [stakePoolParams]
+      -- register the pool the way a network that starts in Dijkstra does: by injecting it
+      -- from the genesis rather than through POOL
+      injectGenesisStaking [stakePoolParams] [] []
       -- the pool can re-register with the VRF it is already using ...
       runPool (RegPool stakePoolParams) >>= expectRightDeep_
       -- ... because its VRF is tracked just like that of a pool registered through POOL ...
@@ -453,28 +529,3 @@ dijkstraOnlySpec = describe "POOL" $ do
       poolEnv <- Shelley.PoolEnv <$> getsNES nesELL <*> getsPParams id
       pState <- getPState
       fmap fst <$> tryRunImpRule @"POOL" poolEnv pState poolCert
-    -- Register the stake pools the way a network that starts in Dijkstra does: by
-    -- injecting them from the genesis rather than through POOL.
-    injectGenesisStakePools stakePools = do
-      shelleyGenesis <- initGenesis @ShelleyEra
-      alonzoGenesis <- initGenesis @AlonzoEra
-      conwayGenesis <- initGenesis @ConwayEra
-      dijkstraGenesis <- initGenesis @DijkstraEra
-      let staking =
-            ShelleyGenesisStaking
-              { sgsPools = ListMap.fromList [(sppId spp, coerce spp) | spp <- stakePools]
-              , sgsStake = mempty
-              }
-          transitionConfig =
-            mkShelleyTransitionConfig shelleyGenesis {sgStaking = staking}
-              & mkTransitionConfig NoGenesis
-              & mkTransitionConfig NoGenesis
-              & mkTransitionConfig alonzoGenesis
-              & mkTransitionConfig NoGenesis
-              & mkTransitionConfig conwayGenesis
-              & mkTransitionConfig dijkstraGenesis
-      nes <- getsNES id
-      injectedNes <- liftIO $ do
-        fs <- simHasFS' MockFS.empty
-        injectIntoTestState fs transitionConfig nes
-      modifyNES $ const injectedNes

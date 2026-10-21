@@ -33,6 +33,7 @@ import Cardano.Network.PeerSelection.Bootstrap (UseBootstrapPeers)
 import Cardano.Network.PeerSelection.LocalRootPeers
   ( OutboundConnectionsState (..)
   )
+import Cardano.Slotting.Slot (WithOrigin (..))
 import qualified Control.Concurrent.Class.MonadSTM as LazySTM
 import qualified Control.Concurrent.Class.MonadSTM.Strict as StrictSTM
 import Control.DeepSeq (force)
@@ -54,6 +55,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Proxy
 import Data.Set (Set, member)
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Void (Void)
 import Data.Word (Word64)
@@ -69,6 +71,12 @@ import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Extended
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsPeerSelection
+import Ouroboros.Consensus.Leios.AnnounceState (AnnounceState, newAnnounceState)
+import Ouroboros.Consensus.Leios.NotifyLog
+  ( NotifyLog
+  , newNotifyLog
+  , notifyLogPruner
+  )
 import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface as BlockFetchClientInterface
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
@@ -105,6 +113,7 @@ import Ouroboros.Consensus.Peras.Context
   , runQueryWithContextHandle
   )
 import Ouroboros.Consensus.Peras.Voting.Rules (PerasVotingRulesDecision (..))
+import Ouroboros.Consensus.Peras.Weight (weightBoostOfFragment)
 import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Storage.ChainDB.API
   ( ChainDB
@@ -168,10 +177,6 @@ import Ouroboros.Network.TxSubmission.Mempool.Reader
 import qualified Ouroboros.Network.TxSubmission.Mempool.Reader as MempoolReader
 import System.Random (StdGen)
 
-import qualified Data.Set as Set
-import Ouroboros.Consensus.Peras.Weight (weightBoostOfFragment)
-import Cardano.Slotting.Slot (WithOrigin (..))
- 
 {-------------------------------------------------------------------------------
   Relay node
 -------------------------------------------------------------------------------}
@@ -222,6 +227,10 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
       StrictTVar m (Map (ConnectionId addrNTN) (StrictTVar m (LeiosNotifyPeerState blk)))
   -- ^ The state of each LeiosNotify client, by upstream peer, which
   -- 'leiosNotifyPruner' prunes.
+  , getLeiosAnnounceState :: AnnounceState m blk
+  -- ^ The announcements the node has accepted, from whichever peer.
+  , getLeiosNotifyLog :: NotifyLog m blk
+  -- ^ What the node relays to its downstream peers over LeiosNotify.
   }
 
 -- | Arguments required when initializing a node
@@ -260,38 +269,38 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
 debugLog :: IOLike m => Tracer m TestnetTrace -> String -> m ()
 debugLog tracer logMsg = do
   traceWith tracer $ DebugLog $ Text.pack logMsg
- 
+
 advertController ::
-    (IOLike m, StandardHash blk, HasHeader (Header blk)) =>
-    Tracer m TestnetTrace -> ChainDB m blk -> m b
+  (IOLike m, StandardHash blk, HasHeader (Header blk)) =>
+  Tracer m TestnetTrace -> ChainDB m blk -> m b
 advertController tracer chainDB = forever $ do
-   certs <- atomically $ ChainDB.getPerasCertIds chainDB
-   votes <- atomically $ ChainDB.getPerasVoteIds chainDB
-   currChain <- atomically $ ChainDB.getCurrentChain chainDB
-   perasWeights0 <- atomically $ ChainDB.getPerasWeightSnapshot chainDB
-   point <- atomically $ ChainDB.getTipPoint chainDB
-   blockNum0 <- atomically $ ChainDB.getTipBlockNo chainDB
-   let chainLen = AF.length $ currChain
-       perasWeights = forgetFingerprint perasWeights0
-       boost = unPerasWeight (weightBoostOfFragment perasWeights currChain)
-       (slotNo, blockHashStr) =
-           case point of
-               GenesisPoint -> (0, "")
-               BlockPoint s h -> (unSlotNo s, show h)
-       blockNum =
-           case blockNum0 of
-               Origin -> 0
-               At bn -> unBlockNo bn
-   traceWith tracer $
-     AdvertLog
-       (Set.size certs)
-       (Set.size votes)
-       chainLen
-       boost
-       slotNo
-       blockHashStr
-       blockNum
-   SI.threadDelay 3
+  certs <- atomically $ ChainDB.getPerasCertIds chainDB
+  votes <- atomically $ ChainDB.getPerasVoteIds chainDB
+  currChain <- atomically $ ChainDB.getCurrentChain chainDB
+  perasWeights0 <- atomically $ ChainDB.getPerasWeightSnapshot chainDB
+  point <- atomically $ ChainDB.getTipPoint chainDB
+  blockNum0 <- atomically $ ChainDB.getTipBlockNo chainDB
+  let chainLen = AF.length $ currChain
+      perasWeights = forgetFingerprint perasWeights0
+      boost = unPerasWeight (weightBoostOfFragment perasWeights currChain)
+      (slotNo, blockHashStr) =
+        case point of
+          GenesisPoint -> (0, "")
+          BlockPoint s h -> (unSlotNo s, show h)
+      blockNum =
+        case blockNum0 of
+          Origin -> 0
+          At bn -> unBlockNo bn
+  traceWith tracer $
+    AdvertLog
+      (Set.size certs)
+      (Set.size votes)
+      chainLen
+      boost
+      slotNo
+      blockHashStr
+      blockNum
+  SI.threadDelay 3
 
 initNodeKernel ::
   forall m addrNTN addrNTC blk.
@@ -314,15 +323,14 @@ initNodeKernel
     , initChainDB
     , blockFetchConfiguration
     , btime
-    , systemTime
     , gsmArgs
     , peerSharingRng
     , publicPeerSelectionStateVar
     , genesisArgs
     , getDiffusionPipeliningSupport
     , miniProtocolParameters
+    , systemTime
     } = do
-
     debugLog (testnetTracer tracers) "Initialized the Node Kernal"
 
     -- using a lazy 'TVar', 'BlockForging' does not have a 'NoThunks' instance.
@@ -339,6 +347,13 @@ initNodeKernel
           , varChainSyncHandles
           , varGsmState
           } = st
+
+    -- Back the ChainDB's slot clock with the wall-clock slot, but only while
+    -- the node is caught up; while syncing, Peras queries skip ticking.
+    ChainDB.setChainClock chainDB $
+      readTVar varGsmState >>= \case
+        GSM.CaughtUp -> getCurrentSlot btime
+        _ -> pure CurrentSlotUnknown
 
     varOutboundConnectionsState <- newTVarIO UntrustedState
 
@@ -436,7 +451,8 @@ initNodeKernel
         blockForgingController st (LazySTM.takeTMVar blockForgingVar)
 
     void $
-      forkLinkedThread registry "NodeKernel.objDiffusionAdvert" $ advertController (testnetTracer tracers) chainDB
+      forkLinkedThread registry "NodeKernel.objDiffusionAdvert" $
+        advertController (testnetTracer tracers) chainDB
 
     -- Run the block fetch logic in the background. This will call
     -- 'addFetchedBlock' whenever a new block is downloaded.
@@ -450,10 +466,15 @@ initNodeKernel
           keepAliveRegistry
           blockFetchConfiguration
 
+    leiosNotifyLog <- newNotifyLog
+    leiosAnnounceState <- newAnnounceState leiosNotifyLog
     leiosNotifyClientStates <- newTVarIO Map.empty
     void $
       forkLinkedThread registry "NodeKernel.leiosNotifyPruner" $
-        leiosNotifyPruner chainDB leiosNotifyClientStates
+        leiosNotifyPruner chainDB leiosAnnounceState leiosNotifyClientStates
+    void $
+      forkLinkedThread registry "NodeKernel.notifyLogPruner" $
+        notifyLogPruner systemTime leiosNotifyLog
 
     void $
       forkLinkedThread registry "NodeKernel.txCountersThreadV2" $
@@ -494,6 +515,8 @@ initNodeKernel
         , getTxCountersVar = txCountersVar
         , getTxDecisionPolicy = txDecisionPolicy miniProtocolParameters
         , getLeiosNotifyClientStates = leiosNotifyClientStates
+        , getLeiosAnnounceState = leiosAnnounceState
+        , getLeiosNotifyLog = leiosNotifyLog
         }
    where
     -- Start a thread conditionally when the PerasFlag is provided and the

@@ -34,6 +34,10 @@ fi
 
 echo "Using: $scenarioFile"
 
+testnet_config=$(echo '(import "nickel/mk-testnet-config.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format json)
+
+trace_options=$(echo $testnet_config | jq -r '.trace_options')
+
 read -r \
   nodes_arg \
   testnet_magic \
@@ -47,7 +51,7 @@ read -r \
   proxy_mode \
   ip \
   node_ports_base \
-  < <(echo '(import "nickel/mk-testnet-config.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format json | jq -r '[
+  < <(echo $testnet_config | jq -r '[
     .nodes_arg,
     .testnet_magic,
 
@@ -92,14 +96,13 @@ jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGene
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then
-  jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
-  jq '.ExperimentalHardForksEnabled = true' $configurationFile | sponge $configurationFile
+  jq ".TestDijkstraHardForkAtEpoch = 0 |
+      .ExperimentalHardForksEnabled = true" $configurationFile | sponge $configurationFile
 fi
 
-# TODO: move to the nickel config
-trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"}}'
-
-jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
+jq --argjson trace_options "$trace_options" \
+  '.TraceOptions = $trace_options |
+  .TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)
 

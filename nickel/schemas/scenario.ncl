@@ -96,7 +96,7 @@ let export = {
     observability | {
       trace_filters | (Array String),
     } | optional ,
-    env | { _ | String } | optional,
+    env | Array String | optional,
   },
 }
 in export 

@@ -1,8 +1,8 @@
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
-fun input =>
+fun input scenario =>
 {
-  command = "%{input.cardano_binaries.cardano_testnet} cardano --node-env %{input.directory} --enable-tracer --prometheus-listen-address %{input.prometheus.address}"
-    ++ (if std.record.has_field "port" input.prometheus then " --prometheus-listen-port %{input.prometheus.port}" else ""),
+  command = "%{input.cardano_binaries.cardano_testnet} cardano --node-env %{input.directory} --enable-tracer --prometheus-listen-address %{input.prometheus.address}" ++ (if std.record.has_field "port" input.prometheus then " --prometheus-listen-port %{input.prometheus.port}" else ""),
+  environment = scenario.env,
   log_location = "%{input.directory}/logs/start-local-testnet.log",
   readiness_probe = {
     exec = {

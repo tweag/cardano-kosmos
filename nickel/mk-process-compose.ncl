@@ -75,15 +75,22 @@ let logs_path = "%{input.directory}/logs" in
     },
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = {
-      command = "victoria-metrics -promscrape.config=/dev/null -storageDataPath=%{input.directory}/victoria-metrics-data",
-      environment = [
-        m%"VM_promscrape_config='
-        scrape_configs:
-          - job_name: "cardano-tracer"
-            http_sd_configs:
-              - url: 'http://%{input.prometheus.address}:%{input.prometheus.port}/targets'
-        '"%
-      ],
+      # VictoriaMetrics scrapes the cardano-tracer prometheus endpoint. The
+      # scrape config must live in a real file passed via `-promscrape.config`;
+      # VictoriaMetrics does NOT read an inline config from an environment
+      # variable, and `-promscrape.config=/dev/null` disables scraping entirely
+      # (which is why the dashboards showed "no data"). So we materialise the
+      # config on disk first, then start the server pointing at it.
+      command =
+        let scrape_config = "%{input.directory}/vm-scrape.yml" in
+        let scrape_yaml =
+          "scrape_configs:\n"
+          ++ "  - job_name: \"cardano-tracer\"\n"
+          ++ "    http_sd_configs:\n"
+          ++ "      - url: \"http://%{input.prometheus.address}:%{std.string.from_number input.prometheus.port}/targets\"\n"
+        in
+        "printf '%s' '%{scrape_yaml}' > \"%{scrape_config}\""
+        ++ " && victoria-metrics -promscrape.config=\"%{scrape_config}\" -storageDataPath=%{input.directory}/victoria-metrics-data",
       depends_on = {
         cardano-testnet = { condition = 'process_healthy },
       },
@@ -96,6 +103,52 @@ let logs_path = "%{input.directory}/logs" in
         timeout_seconds = 1,
         success_threshold = 1,
         failure_threshold = 5,
+      },
+    },
+
+    grafana = {
+      # Resolve grafana's homepath (bundled defaults + frontend assets) from the
+      # `grafana` binary on PATH so this stays self-contained under `nix develop`.
+      # Paths are passed as absolute `cfg:` overrides because grafana resolves
+      # relative paths against its homepath (the nix store), not the cwd.
+      #
+      # The core datasource plugins (prometheus, loki) live read-only in the nix
+      # store ($GRAFANA_CORE_PLUGINS, set by the devShell). Grafana wants a
+      # *writable* plugins dir (it creates subdirs there, e.g. for preinstalled
+      # apps), so we symlink the store plugins into a writable dir under the
+      # devnet directory and point grafana at that. Preinstall is disabled so
+      # grafana doesn't try to download its default bundled apps.
+      command =
+        let plugins_dir = "$PWD/%{input.directory}/grafana-plugins" in
+        "mkdir -p \"%{plugins_dir}\""
+        ++ " && for p in \"$GRAFANA_CORE_PLUGINS\"/*; do ln -sfn \"$(readlink -f \"$p\")\" \"%{plugins_dir}/$(basename \"$p\")\"; done"
+        ++ " && grafana server"
+        ++ " --homepath \"$(dirname $(dirname $(readlink -f $(command -v grafana))))/share/grafana\""
+        ++ " cfg:default.paths.data=\"$PWD/%{input.directory}/grafana-data\""
+        ++ " cfg:default.paths.logs=\"$PWD/%{logs_path}/grafana\""
+        ++ " cfg:default.paths.plugins=\"%{plugins_dir}\""
+        ++ " cfg:default.paths.provisioning=\"$PWD/grafana/provisioning\""
+        ++ " cfg:default.plugins.preinstall_disabled=true"
+        ++ " cfg:default.server.http_addr=%{input.ip}"
+        ++ " cfg:default.server.http_port=%{std.string.from_number input.grafana.port}",
+      environment = [
+        "GF_SECURITY_ADMIN_USER=cardano",
+        "GF_SECURITY_ADMIN_PASSWORD=cardano",
+        "GF_AUTH_ANONYMOUS_ENABLED=true",
+        "GF_FEATURE_TOGGLES_splashScreen=false",
+      ],
+      depends_on = {
+        victoria-metrics = { condition = 'process_healthy },
+      },
+      readiness_probe = {
+        exec = {
+          command = "curl -sf http://%{input.ip}:%{std.string.from_number input.grafana.port}/api/health",
+        },
+        initial_delay_seconds = 2,
+        period_seconds = 2,
+        timeout_seconds = 1,
+        success_threshold = 1,
+        failure_threshold = 10,
       },
     },
   } else {}),

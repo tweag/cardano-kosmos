@@ -2,30 +2,6 @@
 
 set -e
 
-cleanup() {
-  echo "Shutting down process-compose and child processes..."
-  process-compose down -p 3030 || true
-
-  timeout_limit=15
-  elapsed_wait=0
-
-  while pgrep -f "process-compose" > /dev/null && [ $elapsed_wait -lt $timeout_limit ]; do
-    sleep 1
-    elapsed_wait=$((elapsed_wait + 1))
-  done
-
-  sleep 5
-
-  pkill -9 -f cardano-node-chairman || true
-  pkill -9 -f cardano-testnet || true
-  pkill -9 -f cardano-node || true
-  pkill -9 -f cardano-tracer || true
-  pkill -9 -f victoria-logs || true
-  pkill -9 -f victoria-metrics || true
-  pkill -9 -f vlagent || true
-}
-trap cleanup EXIT INT TERM
-
 usage() {
     echo "Usage: $0 [SCENARIO]" >&2
     echo "  SCENARIO defaults to 'vanilla' if omitted." >&2
@@ -69,7 +45,7 @@ runTestnet() {
     echo "Running: $scenarioFile"
     export PC_DISABLE_TUI
     echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml > "$DEVENV_PATH"/process-compose.yaml
-    process-compose up \
+    exec process-compose up \
         -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \
         -L "$DEVENV_PATH"/logs/process-compose.log 2>/dev/null

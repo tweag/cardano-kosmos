@@ -37,10 +37,13 @@ runTestnet() {
       fi
     fi
 
-    # Setup devnet-env
-    if [ ! -d "$DEVENV_PATH" ]; then
-      bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
+    echo "Setting up: $DEVENV_PATH"
+    if [ -d "$DEVENV_PATH" ]; then
+      echo "./$DEVENV_PATH exists, removing"
+      rm -rf "$DEVENV_PATH"
     fi
+    
+    bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
 
     echo "Running: $scenarioFile"
     export PC_DISABLE_TUI

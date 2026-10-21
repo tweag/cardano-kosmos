@@ -2,12 +2,13 @@
 
 set -e
 
-scenarioArg="${1:-vanilla}"
-scenarioFile="$scenarioArg"
-if [ ! -f "$scenarioArg" ]; then
-  scenarioFile="nickel/scenarios/$scenarioArg.ncl"
+# Attempt to use the argument as a filepath, or as a slug if there is no such file.
+scenarioFile="${1:-vanilla}"
+if [ ! -f "$scenarioFile" ]; then
+  scenarioSlug="$scenarioFile"
+  scenarioFile="nickel/scenarios/$scenarioSlug.ncl"
   if [ ! -f "$scenarioFile" ]; then
-      echo "Unknown scenario '$scenarioArg': $scenarioFile does not exist." >&2
+      echo "Unknown scenario '$scenarioSlug': $scenarioFile does not exist." >&2
       usage
       exit 1
   fi

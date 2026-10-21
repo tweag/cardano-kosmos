@@ -1,4 +1,4 @@
-let { takeEnd, .. } = import "./prelude.ncl" in
+let { substringEnd, .. } = import "./prelude.ncl" in
 let { filter, map, fold_left, length, flatten, .. } = std.array in
 let { Scenario, Group, groupsWithIndices, .. } = import "./schemas/scenario.ncl" in
 let { InputParams, TestnetConfig, .. } = import "./schemas/testnet.ncl" in
@@ -7,10 +7,10 @@ let PoolsIdxsMap = { _ | Number } in
 let
   mkPoolsFunds = fun fundsPerPool pools_indices extraConfig => 
     std.record.fields extraConfig.initialFunds.data
-    |> filter (fun key => std.string.length key == 114)
+    |> filter (fun key => std.string.length key == 114) # base address: 1 + 28 + 28 bytes, hex-encoded
     |> map (fun hex => {
       baseAddressHex = hex,
-      stakeCredHash = takeEnd 56 hex,
+      stakeCredHash = substringEnd 56 hex, # the last 56 symbols is stake credential hash
       poolId = extraConfig.stakeCredentials.data."%{stakeCredHash}",
       poolIndex = pools_indices."%{poolId}",
       funds = std.record.get "%{poolIndex}" fundsPerPool,
@@ -28,7 +28,7 @@ let
       |> map (fun i =>
         {
           field = "%{i}",
-          value = availableFunds * g.group.stake / numOfSposInGroup,
+          value = std.number.floor (availableFunds * g.group.stake / numOfSposInGroup),
         }
       )
     )

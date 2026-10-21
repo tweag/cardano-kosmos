@@ -85,15 +85,14 @@ jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGene
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then
-  jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
-  jq '.ExperimentalHardForksEnabled = true' $configurationFile | sponge $configurationFile
+  jq ".TestDijkstraHardForkAtEpoch = 0 |
+      .ExperimentalHardForksEnabled = true" $configurationFile | sponge $configurationFile
 fi
 
-# TODO: move to the nickel config
-trace_options='{"" : {"severity": "Notice", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Debug", "backends": ["EKGBackend", "Forwarder"],"detail":"DNormal"},"ChainDB.PerasVoteDbEvent": {"severity": "Debug", "backends": ["EKGBackend", "Forwarder"]},"Startup": {"severity": "Info", "backends": ["EKGBackend", "Forwarder"]},"ChainDB.PerasCertDbEvent":{"severity": "Debug", "backends": ["EKGBackend", "Forwarder"]}}'
+trace_options=$(echo '(import "nickel/testnet.ncl")' | nickel export --format json | jq -r '.trace_options')
 
-jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
-jq '.TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
+jq --argjson trace_options "$trace_options" ".TraceOptions = $trace_options |
+  .TraceOptionForwarder = { queueSize: 512 }" $configurationFile | sponge $configurationFile
 
 # TODO: add toxiproxy ports map supports
 

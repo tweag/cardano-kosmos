@@ -1,6 +1,6 @@
 let { Scenario, Group, .. } = import "./schemas/scenario.ncl"
 in
-let { InputParams, TestnetConfig, .. } = import "./schemas/testnet.ncl"
+let { TestnetConfig, .. } = import "./schemas/testnet.ncl"
 in
 let mkNodesArg | Array Group -> String =
   fun groups =>

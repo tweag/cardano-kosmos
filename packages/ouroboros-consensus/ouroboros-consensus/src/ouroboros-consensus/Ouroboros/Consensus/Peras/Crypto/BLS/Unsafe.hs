@@ -41,7 +41,7 @@ unsafePerasBLSPrivateKeyFromEnv =
   unsafePerformIO $
     lookupEnv envVar >>= \case
       Nothing ->
-        pure $ Left $ "Environment variable " <> envVar <> "not set."
+        pure $ Left $ "Environment variable " <> envVar <> " not set."
       Just rawKey ->
         pure $ decodeKey rawKey
  where

@@ -322,7 +322,7 @@ class
     unsafePerformIO $
       lookupEnv envVar >>= \case
         Nothing -> do
-          pure $ Left $ "Environment variable " <> envVar <> "not set."
+          pure $ Left $ "Environment variable " <> envVar <> " not set."
         Just rawKey -> do
           pure $ decodeKey rawKey
    where

@@ -44,7 +44,7 @@ runTestnet() {
 
     echo "Running: $scenarioFile"
     export PC_DISABLE_TUI
-    ./scripts/mk-process-compose.sh "$scenarioArg" "$DEVENV_PATH"/process-compose.yaml
+    ./scripts/mk-process-compose.sh "$scenarioArg" "$DEVENV_PATH"
     exec process-compose up \
         -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \

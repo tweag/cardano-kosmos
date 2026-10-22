@@ -20,9 +20,7 @@ in {
     num_dreps = count_dreps topology.groups
   },
   faults = [
-    'isolate {
-      nodes = [1],
-    },
+    'isolate [1],
     'latency {
       nodes = [2, 3, 4, 5, 6],
       direction = 'both,

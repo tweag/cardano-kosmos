@@ -33,6 +33,7 @@ let export = {
     directory | String,
     cardano_binaries | CardanoBinaries | default = {},
     ip | String | default = "127.0.0.1",
+    node_ports_base | Number | default = 5000,
     victoria = {
       logs_port | Number | default = 9428,
       metrics_port | Number | default = 8428,
@@ -43,6 +44,9 @@ let export = {
     prometheus = {
       address | String | default = "127.0.0.1",
       port | Number | default = 9090,
+    },
+    toxiproxy = {
+       port | Number | default = 8474,
     },
   },
   TestnetConfig = {

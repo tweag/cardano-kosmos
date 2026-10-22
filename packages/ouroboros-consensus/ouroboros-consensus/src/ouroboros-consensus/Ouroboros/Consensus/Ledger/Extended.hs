@@ -45,6 +45,7 @@ import Codec.CBOR.Encoding (Encoding, encodeListLen)
 import Control.DeepSeq (NFData)
 import Control.Monad.Except
 import Control.Monad.Trans.Except (except)
+import Data.Bifunctor (Bifunctor (..))
 import Data.Functor ((<&>))
 import Data.Maybe.Strict (StrictMaybe (..))
 import Data.Proxy
@@ -60,6 +61,7 @@ import Ouroboros.Consensus.Block.Abstract
   , CodecConfig
   , GetHeader (getHeader)
   , HeaderHash
+  , SlotNo (..)
   , StandardHash
   , StorageConfig
   , castPoint
@@ -81,7 +83,7 @@ import Ouroboros.Consensus.Ledger.Peras (PerasState (..))
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils (forgetLedgerTables)
 import Ouroboros.Consensus.Peras.Context
-  ( PerasEpochContextNotFoundForRound
+  ( PerasEpochContextNotFoundForRound (..)
   , PerasEpochContextResolver (..)
   , StateSupportsPerasEpochContext (..)
   , initPerasEpochContextResolver
@@ -192,12 +194,33 @@ tickAndResolveRoundNo ::
 tickAndResolveRoundNo cfg getLedgerState getSlot perasRoundNo = do
   extLedgerState <- getLedgerState
   currentSlot <- getSlot
-  let pstate = case currentSlot of
-        CurrentSlotUnknown -> perasState extLedgerState
-        CurrentSlot slotNo ->
-          tickedPerasState (applyChainTick OmitLedgerEvents (ExtLedgerCfg cfg) slotNo extLedgerState)
-  -- We can call `unsafeResolveRoundNo` here because we have properly ticked the ExtLedgerState before accessing the resolver
-  pure $ unsafeResolveRoundNo (perasEpochContextResolver pstate) perasRoundNo
+  let (extraInfoMsg, pstate) =
+        case currentSlot of
+          CurrentSlotUnknown ->
+            ( "unticked becase the current slot is unknown"
+            , perasState extLedgerState
+            )
+          CurrentSlot slotNo ->
+            ( "ticked to slot " <> show (unSlotNo slotNo)
+            , tickedPerasState
+                ( applyChainTick
+                    OmitLedgerEvents
+                    (ExtLedgerCfg cfg)
+                    slotNo
+                    extLedgerState
+                )
+            )
+  -- We can call `unsafeResolveRoundNo` here because we have properly ticked the
+  -- ExtLedgerState before accessing the resolver
+  pure
+    $ bimap
+      ( \(PerasEpochContextNotFoundForRound roundNo reason) ->
+          PerasEpochContextNotFoundForRound
+            roundNo
+            (reason <> " (" <> extraInfoMsg <> ")")
+      )
+      id
+    $ unsafeResolveRoundNo (perasEpochContextResolver pstate) perasRoundNo
 
 {-------------------------------------------------------------------------------
   The extended ledger configuration

@@ -10,29 +10,36 @@
 module Test.Ouroboros.Storage.LeiosDB (tests) where
 
 import Cardano.Slotting.Slot (SlotNo (..))
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Class.MonadSTM.Strict
-  ( atomically
+  ( StrictTChan
+  , atomically
   , readTChan
   , tryReadTChan
   )
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar, tryPutMVar)
 import Control.DeepSeq (force)
-import Control.Exception (bracket)
+import Control.Exception (bracket, try)
 import Control.Monad (forM, forM_, replicateM, void)
 import Control.Monad.Class.MonadTime.SI (diffTime, getMonotonicTime)
-import Control.Tracer (nullTracer)
+import Control.Tracer (Tracer (..), emit, nullTracer)
 import qualified Data.ByteString as BS
 import Data.Function ((&))
+import Data.List (nub, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import qualified Data.Text as T
 import Data.Time.Clock (DiffTime)
 import qualified Data.Vector.Strict as V
 import qualified Database.SQLite3 as SQL
+import Numeric (showHex)
 import Ouroboros.Consensus.Leios.Types
   ( BytesSize
   , EbHash (..)
   , LeiosEb (..)
   , LeiosPoint (..)
   , TxHash (..)
+  , TxOffset
   , encodeLeiosEbSize
   , leiosEbTxs
   )
@@ -43,50 +50,72 @@ import Ouroboros.Consensus.Storage.LeiosDB
   , LeiosDbWriter (..)
   , LeiosEbNotification (..)
   , Promise (..)
-  , deleteDanglingTxs
+  , TraceLeiosDb (..)
   , newLeiosDBInMemory
   , truncateLeiosDbAfterSlot
   , withLeiosDBSQLite
   , withReader
   , withWriter
   )
+import Ouroboros.Consensus.Storage.LeiosDB.Exception (LeiosDbException)
 import System.Directory (doesFileExist, removeDirectoryRecursive)
 import System.IO.Temp (createTempDirectory, getCanonicalTemporaryDirectory)
+import qualified System.Timeout as Timeout
 import Test.QuickCheck
   ( Gen
   , Property
   , chooseInt
   , conjoin
   , counterexample
+  , elements
   , forAll
   , forAllBlind
   , forAllShrinkShow
+  , frequency
   , ioProperty
+  , listOf
   , shrink
+  , shrinkList
   , sublistOf
   , tabulate
   , vector
   , (===)
   )
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (assertBool, assertFailure, testCase, (@?=))
+import Test.Tasty.HUnit (Assertion, assertBool, assertFailure, testCase, (@?=))
 import Test.Tasty.QuickCheck (testProperty)
 
 tests :: TestTree
 tests =
   testGroup "LeiosDB" $
     forEachImplementation mkTestGroups
-      <> [ testGroup
+      <> [ testProperty "the two implementations agree on what a reader sees" prop_implementationsAgree
+         , -- InMemory only: on SQLite a failed write also stops the writer, which
+           -- is linked to the thread that opened the database.
+           testCase "InMemory: writing a body for an unwritten point fails, as on SQLite" $
+             withFreshDb InMemory test_ebBodyWithoutPointFails
+         , -- InMemory only: the SQLite implementation sweeps in the background.
+           testGroup
+             "InMemory: garbage collection"
+             [ testCase "evicts an EB all of whose points are older, with its txs" $
+                 withFreshDb InMemory test_gcEvictsOldEb
+             , testCase "keeps an EB with a point at the slot" $
+                 withFreshDb InMemory test_gcKeepsEbWithPointAtSlot
+             , testCase "keeps a pinned EB" $
+                 withFreshDb InMemory test_gcKeepsPinnedEb
+             , testCase "promoting an EB whose closure is incomplete fails" $
+                 withFreshDb InMemory test_promoteIncompleteFails
+             ]
+         , testGroup
              "truncateLeiosDbAfterSlot"
              [ testCase "drops the EBs announced after the slot, with their bodies" $
                  withFreshSQLiteFile test_truncateDropsEbsAfterSlot
-             , testCase "runs on the immutable partition, which has no ebsMissingTxs" $
+             , testCase "runs on the immutable partition" $
                  withTempLeiosDbPaths test_truncateImmutablePartition
              ]
          , testGroup
-             "deleteDanglingTxs"
-             [ testCase "keeps the txs an EB references" $
-                 withFreshSQLiteFile test_deleteDanglingTxs
+             "close"
+             [ testCase "returns while an EB stays pinned" test_closeWithPinnedEb
              ]
          , testGroup
              "file initialisation (SQLite)"
@@ -121,8 +150,8 @@ rwInsertEbPoint rw point sz = void $ await =<< writeEbPoint (rwWriter rw) point 
 rwInsertEbBody :: RW -> LeiosPoint -> LeiosEb -> IO CompletedEbs
 rwInsertEbBody rw point eb = await =<< writeEbBody (rwWriter rw) point eb
 
-rwInsertTxs :: RW -> [(TxHash, BS.ByteString)] -> IO CompletedEbs
-rwInsertTxs rw txs = await =<< writeTxs (rwWriter rw) txs
+rwInsertTxs :: RW -> LeiosPoint -> [(TxOffset, BS.ByteString)] -> IO CompletedEbs
+rwInsertTxs rw point txs = await =<< writeTxs (rwWriter rw) point txs
 
 rwScanEbPoints :: RW -> IO [(SlotNo, EbHash)]
 rwScanEbPoints = testScanEbPoints . rwReader
@@ -191,6 +220,8 @@ mkTestGroups impl =
       "transactions"
       [ testProperty "insert then retrieve" $ prop_txsInsertThenRetrieve impl
       , testProperty "retrieve missing returns empty" $ prop_txsRetrieveMissing impl
+      , testCase "out of bounds, duplicate and wrong-sized writes are dropped" $
+          withFreshDb impl test_malformedTxWritesDropped
       ]
   , testGroup
       "notifications"
@@ -248,13 +279,16 @@ genEb numTxs = do
 genPointAndEb :: Int -> Gen (LeiosPoint, LeiosEb)
 genPointAndEb numTxs = (,) <$> genPoint <*> genEb numTxs
 
--- | Generate random max sized tx (16k).
-genTxBytes :: Gen BS.ByteString
-genTxBytes = BS.pack <$> vector 16_384
+-- | Bytes for the tx at the given offset of the EB: of its declared size, as
+-- a write must be to be accepted, and distinct per offset.
+txBytesFor :: LeiosEb -> TxOffset -> BS.ByteString
+txBytesFor eb off = BS.replicate (fromIntegral size) (fromIntegral off)
+ where
+  (_, size) = leiosEbTxs eb V.! off
 
--- | Max sized tx (16k) with all zeros.
-maxTxBytesZero :: BS.ByteString
-maxTxBytesZero = BS.replicate 16_384 0
+-- | Every tx of the EB, with 'txBytesFor'.
+allTxsFor :: LeiosEb -> [(TxOffset, BS.ByteString)]
+allTxsFor eb = [(off, txBytesFor eb off) | off <- [0 .. V.length (leiosEbTxs eb) - 1]]
 
 -- * Test fixtures for unit tests
 
@@ -381,8 +415,6 @@ prop_ebsLookupMissing impl =
 -- * Property tests for transactions
 
 -- | Property: inserting tx bytes and retrieving them returns the correct data.
--- With the normalized schema, txs are inserted into a global `txs` table by TxHash,
--- and retrieval JOINs with that table.
 prop_txsInsertThenRetrieve :: DbImpl -> Property
 prop_txsInsertThenRetrieve impl =
   forAllShrinkShow (chooseInt (1, 50)) (filter (>= 1) . shrink) show $ \numTxs ->
@@ -392,24 +424,18 @@ prop_txsInsertThenRetrieve impl =
           -- Insert the EB first (point then body)
           rwInsertEbPoint con point (encodeLeiosEbSize eb)
           void $ rwInsertEbBody con point eb
-          -- Get the txHashes from the EB for the offsets we want to insert
-          let ebTxList = V.toList (leiosEbTxs eb)
-              !txsToInsert =
-                force $
-                  [ (txHash, txBytes)
-                  | off <- offsetsToInsert
-                  , let (txHash, _size) = ebTxList !! off
-                  , let txBytes = BS.pack [fromIntegral off, 1, 2, 3] -- deterministic test bytes
-                  ]
-          -- Insert txs into global txs table
-          insertTime <- snd <$> timed (rwInsertTxs con txsToInsert)
+          -- Forced, so that the tabulated insert time excludes building the
+          -- bytes.
+          let !txsToInsert =
+                force [(off, txBytesFor eb off) | off <- offsetsToInsert]
+          insertTime <- snd <$> timed (rwInsertTxs con point txsToInsert)
           -- Retrieve all offsets
           let allOffsets = [0 .. numTxs - 1]
           (results, retrieveTime) <- timed $ rwBatchRetrieveTxs con (pointEbHash point) allOffsets
           -- Check that inserted txs have bytes, others don't
           let checkResult (off, _txHash, mBytes) =
                 if off `elem` offsetsToInsert
-                  then mBytes == Just (BS.pack [fromIntegral off, 1, 2, 3])
+                  then mBytes == Just (txBytesFor eb off)
                   else mBytes == Nothing
           pure $
             conjoin
@@ -546,18 +572,13 @@ test_noOfferBlockTxsBeforeComplete db = do
   chan <- subscribeEbNotifications db
   let point = mkTestPoint (SlotNo 1) 1
       eb = mkTestEb 3 -- 3 transactions
-      ebTxList = V.toList (leiosEbTxs eb)
   withRW db $ \con -> do
     rwInsertEbPoint con point (encodeLeiosEbSize eb)
     void $ rwInsertEbBody con point eb
     -- Consume the LeiosOfferBlock notification
     _ <- atomically $ readTChan chan
-    -- Insert only 2 of 3 txs (by txHash)
-    let txsToInsert =
-          [ (txHash, BS.pack [fromIntegral i, 1, 2, 3])
-          | (i, (txHash, _size)) <- zip [0 :: Int, 1] ebTxList
-          ]
-    _ <- rwInsertTxs con txsToInsert
+    -- Insert only 2 of 3 txs
+    _ <- rwInsertTxs con point (take 2 (allTxsFor eb))
     -- No LeiosOfferBlockTxs notification should be available
     maybeNotif <- atomically $ tryReadTChan chan
     case maybeNotif of
@@ -571,31 +592,28 @@ test_offerBlockTxs db = do
   chan <- subscribeEbNotifications db
   let point = mkTestPoint (SlotNo 1) 1
       eb = mkTestEb 3 -- 3 transactions
-      ebTxList = V.toList (leiosEbTxs eb)
   withRW db $ \con -> do
     -- Insert the EB (point then body)
     rwInsertEbPoint con point (encodeLeiosEbSize eb)
     void $ rwInsertEbBody con point eb
     -- Consume the LeiosOfferBlock notification
     _ <- atomically $ readTChan chan
-    -- Insert all txs (by txHash)
-    let txsToInsert =
-          [ (txHash, BS.pack [fromIntegral i, 1, 2, 3])
-          | (i, (txHash, _size)) <- zip [0 :: Int ..] ebTxList
-          ]
-    _ <- rwInsertTxs con txsToInsert
+    -- Insert all txs
+    _ <- rwInsertTxs con point (allTxsFor eb)
     -- FIXME: blocks forever if impl not working
     notification <- atomically $ readTChan chan
     assertOfferBlockTxs point notification
 
 -- | Test that completed EBs are not re-notified when subsequent unrelated
--- transactions are inserted.
+-- transactions are inserted: in this test specifically, it's for another EB
+-- whose closure they complete.
 test_noReNotifyCompletedEbs :: LeiosDbHandle IO -> IO ()
 test_noReNotifyCompletedEbs db = do
   chan <- subscribeEbNotifications db
   let point = mkTestPoint (SlotNo 1) 1
       eb = mkTestEb 2
-      ebTxList = V.toList (leiosEbTxs eb)
+      otherPoint = mkTestPoint (SlotNo 2) 2
+      otherEb = mkTestEb 3
   withRW db $ \con -> do
     -- Insert and complete the EB
     rwInsertEbPoint con point (encodeLeiosEbSize eb)
@@ -605,20 +623,20 @@ test_noReNotifyCompletedEbs db = do
     case acquiredEb of
       Just (AcquiredEb{}) -> pure ()
       _ -> assertFailure "expected AcquiredEb notification"
-    let txsToInsert = [(txHash, maxTxBytesZero) | (txHash, _) <- ebTxList]
-    _ <- rwInsertTxs con txsToInsert
+    _ <- rwInsertTxs con point (allTxsFor eb)
     -- Consume the AcquiredEbTxs notification
     acquiredTxs <- atomically $ tryReadTChan chan
     case acquiredTxs of
       Just (AcquiredEbTxs p) -> p @?= point
       _ -> assertFailure "expected AcquiredEbTxs notification"
-    -- Insert an unrelated tx
-    _ <- rwInsertTxs con [(mkTestTxHash 99, maxTxBytesZero)]
-    -- No re-notification should occur for the already-completed EB
-    maybeNotif <- atomically $ tryReadTChan chan
-    case maybeNotif of
-      Nothing -> pure ()
-      Just _ -> assertFailure "completed EB should not be re-notified"
+    -- Complete an unrelated EB
+    rwInsertEbPoint con otherPoint (encodeLeiosEbSize otherEb)
+    void $ rwInsertEbBody con otherPoint otherEb
+    completed <- rwInsertTxs con otherPoint (allTxsFor otherEb)
+    completed @?= [otherPoint]
+    -- Only the unrelated EB is notified, not the already-completed one again
+    notifs <- drainChan chan
+    [p | AcquiredEbTxs p <- notifs] @?= [otherPoint]
 
 -- | Re-inserting a tx that is _referenced_ by an already-completed EB
 -- must not re-fire 'AcquiredEbTxs'. This is the practical case where
@@ -634,7 +652,6 @@ test_noReNotifyOnRelatedTxReinsert db = do
   chan <- subscribeEbNotifications db
   let point = mkTestPoint (SlotNo 1) 1
       eb = mkTestEb 2
-      ebTxList = V.toList (leiosEbTxs eb)
   withRW db $ \con -> do
     rwInsertEbPoint con point (encodeLeiosEbSize eb)
     void $ rwInsertEbBody con point eb
@@ -643,8 +660,7 @@ test_noReNotifyOnRelatedTxReinsert db = do
       Just (AcquiredEb{}) -> pure ()
       _ -> assertFailure "expected AcquiredEb notification"
     -- Insert all EB-referenced txs → EB completes, one AcquiredEbTxs.
-    let txsToInsert = [(txHash, maxTxBytesZero) | (txHash, _) <- ebTxList]
-    _ <- rwInsertTxs con txsToInsert
+    _ <- rwInsertTxs con point (allTxsFor eb)
     acquiredTxs <- atomically $ tryReadTChan chan
     case acquiredTxs of
       Just (AcquiredEbTxs p) -> p @?= point
@@ -652,16 +668,14 @@ test_noReNotifyOnRelatedTxReinsert db = do
     -- Re-insert one of the EB's own txs (a no-op at the tx storage
     -- level — it's already present). The completed EB must NOT be
     -- re-notified.
-    case ebTxList of
-      ((txHash, _) : _) -> do
-        _ <- rwInsertTxs con [(txHash, maxTxBytesZero)]
-        maybeNotif <- atomically $ tryReadTChan chan
-        case maybeNotif of
-          Nothing -> pure ()
-          Just _ ->
-            assertFailure
-              "completed EB should not be re-notified on re-insert of its own tx"
-      [] -> assertFailure "test EB has no txs"
+    completed <- rwInsertTxs con point (take 1 (allTxsFor eb))
+    completed @?= []
+    maybeNotif <- atomically $ tryReadTChan chan
+    case maybeNotif of
+      Nothing -> pure ()
+      Just _ ->
+        assertFailure
+          "completed EB should not be re-notified on re-insert of its own tx"
 
 -- | The same EB content can be forged at multiple slots; the DB must
 -- track each 'LeiosPoint' independently and emit one 'AcquiredEbTxs'
@@ -675,13 +689,7 @@ test_multipleSlotsSameHash db = do
       point1 = mkTestPoint (SlotNo 1) hashSeed
       point2 = mkTestPoint (SlotNo 2) hashSeed
       eb = mkTestEb 2 -- same content at both points (deterministic from numTxs)
-      ebTxList = V.toList (leiosEbTxs eb)
-      drainNotifications = go []
-       where
-        go acc =
-          atomically (tryReadTChan chan) >>= \case
-            Nothing -> pure (reverse acc)
-            Just n -> go (n : acc)
+      drainNotifications = drainChan chan
   withRW db $ \con -> do
     -- Announce the same EB at two slots and insert the body twice.
     rwInsertEbPoint con point1 (encodeLeiosEbSize eb)
@@ -693,12 +701,13 @@ test_multipleSlotsSameHash db = do
     let acquiredEbPoints =
           [p | AcquiredEb p _ <- acquiredEbs]
     acquiredEbPoints `setEquals` [point1, point2]
-    -- Insert every tx the EB references — closure completes for both rows.
-    _ <-
-      rwInsertTxs
-        con
-        [(txHash, maxTxBytesZero) | (txHash, _) <- ebTxList]
-    -- Both rows must notify completion, once each.
+    -- Insert every tx the EB references, naming only one of its points. The
+    -- tx bytes belong to the EB, not to a point, so the closure completes for
+    -- both points.
+    completed <- rwInsertTxs con point1 (allTxsFor eb)
+    -- The write returns both points ...
+    completed `setEquals` [point1, point2]
+    -- ... and notifies each completion, once.
     completionNotifs <- drainNotifications
     let completionPoints =
           [p | AcquiredEbTxs p <- completionNotifs]
@@ -706,6 +715,116 @@ test_multipleSlotsSameHash db = do
     length completionNotifs @?= 2
  where
   setEquals xs ys = Map.fromList [(p, ()) | p <- xs] @?= Map.fromList [(p, ()) | p <- ys]
+
+-- | A body can only be written for a point already written, by 'writeEbPoint'
+-- on the announcement path.
+test_ebBodyWithoutPointFails :: LeiosDbHandle IO -> IO ()
+test_ebBodyWithoutPointFails db = withRW db $ \con -> do
+  result <- tryDb $ rwInsertEbBody con (mkTestPoint (SlotNo 1) 1) (mkTestEb 2)
+  case result of
+    Left _ -> pure ()
+    Right _ -> assertFailure "writeEbBody succeeded for a point that was never written"
+ where
+  tryDb :: IO a -> IO (Either LeiosDbException a)
+  tryDb = try
+
+-- | A tx write only fills a tx the body declares, once, at its declared size.
+-- Anything else changes nothing and completes nothing.
+--
+-- Neither the LeiosDB nor this test requires the bytes to hash to the body's
+-- tx hash: the LeiosDB assumes that its caller checked that.
+test_malformedTxWritesDropped :: LeiosDbHandle IO -> IO ()
+test_malformedTxWritesDropped db = do
+  let point = mkTestPoint (SlotNo 1) 1
+      eb = mkTestEb 2
+      offsets = [0, 1]
+  withRW db $ \con -> do
+    rwInsertEbPoint con point (encodeLeiosEbSize eb)
+    void $ rwInsertEbBody con point eb
+    -- An offset the body does not declare, and wrong-sized bytes.
+    dropped <-
+      rwInsertTxs
+        con
+        point
+        [ (2, txBytesFor eb 0)
+        , (0, BS.snoc (txBytesFor eb 0) 0)
+        , (1, BS.take 1 (txBytesFor eb 1))
+        ]
+    dropped @?= []
+    retrieved <- rwBatchRetrieveTxs con (pointEbHash point) offsets
+    [bytes | (_, _, bytes) <- retrieved] @?= [Nothing, Nothing]
+    -- A duplicate delivery keeps the first bytes and does not count twice.
+    first <- rwInsertTxs con point [(0, txBytesFor eb 0)]
+    first @?= []
+    duplicate <- rwInsertTxs con point [(0, BS.map (+ 1) (txBytesFor eb 0))]
+    duplicate @?= []
+    retrieved' <- rwBatchRetrieveTxs con (pointEbHash point) [0]
+    [bytes | (_, _, bytes) <- retrieved'] @?= [Just (txBytesFor eb 0)]
+    completed <- rwInsertTxs con point [(1, txBytesFor eb 1)]
+    completed @?= [point]
+
+-- | Every notification queued on the channel, in order.
+drainChan :: StrictTChan IO LeiosEbNotification -> IO [LeiosEbNotification]
+drainChan chan = go []
+ where
+  go acc =
+    atomically (tryReadTChan chan) >>= \case
+      Nothing -> pure (reverse acc)
+      Just n -> go (n : acc)
+
+-- * Garbage collection
+
+-- | Write the EB at these points, with its body and all its transactions.
+writeWholeEb :: RW -> [LeiosPoint] -> LeiosEb -> IO ()
+writeWholeEb con points eb = do
+  forM_ points $ \point -> rwInsertEbPoint con point (encodeLeiosEbSize eb)
+  forM_ points $ \point -> void $ rwInsertEbBody con point eb
+  forM_ (take 1 points) $ \point -> void $ rwInsertTxs con point (allTxsFor eb)
+
+-- | Whether the reader sees the EB's whole closure.
+holdsClosure :: RW -> EbHash -> IO Bool
+holdsClosure con ebHash = isJust <$> rwLookupEbClosure con ebHash
+
+test_gcEvictsOldEb :: LeiosDbHandle IO -> IO ()
+test_gcEvictsOldEb db = withRW db $ \con -> do
+  -- The old EB references transactions 0, 1 and 2, and the other only 0 and 1.
+  writeWholeEb con [mkTestPoint 5 1] (mkTestEb 3)
+  writeWholeEb con [mkTestPoint 10 2] (mkTestEb 2)
+  leiosDbGarbageCollect db 6
+  rwLookupEbBody con (mkTestEbHash 1) >>= (@?= [])
+  holdsClosure con (mkTestEbHash 1) >>= (@?= False)
+  rwScanEbPoints con >>= (@?= [(10, mkTestEbHash 2)])
+  holdsClosure con (mkTestEbHash 2) >>= (@?= True)
+  -- The old EB's transactions went with it, so a new EB referencing them
+  -- lacks them.
+  rwInsertEbPoint con (mkTestPoint 20 3) (encodeLeiosEbSize (mkTestEb 3))
+  void $ rwInsertEbBody con (mkTestPoint 20 3) (mkTestEb 3)
+  holdsClosure con (mkTestEbHash 3) >>= (@?= False)
+
+test_gcKeepsEbWithPointAtSlot :: LeiosDbHandle IO -> IO ()
+test_gcKeepsEbWithPointAtSlot db = withRW db $ \con -> do
+  writeWholeEb con [mkTestPoint 5 1, mkTestPoint 6 1] (mkTestEb 2)
+  leiosDbGarbageCollect db 6
+  holdsClosure con (mkTestEbHash 1) >>= (@?= True)
+
+test_gcKeepsPinnedEb :: LeiosDbHandle IO -> IO ()
+test_gcKeepsPinnedEb db = withRW db $ \con -> do
+  writeWholeEb con [mkTestPoint 5 1] (mkTestEb 2)
+  leiosDbPromoteToImmutable db [mkTestPoint 5 1]
+  leiosDbGarbageCollect db 6
+  holdsClosure con (mkTestEbHash 1) >>= (@?= True)
+
+test_promoteIncompleteFails :: LeiosDbHandle IO -> IO ()
+test_promoteIncompleteFails db = withRW db $ \con -> do
+  rwInsertEbPoint con (mkTestPoint 5 1) (encodeLeiosEbSize (mkTestEb 2))
+  void $ rwInsertEbBody con (mkTestPoint 5 1) (mkTestEb 2)
+  result <- tryDb $ leiosDbPromoteToImmutable db [mkTestPoint 5 1]
+  case result of
+    Left _ -> pure ()
+    Right () -> assertFailure "promoting an EB whose closure is incomplete succeeded"
+ where
+  tryDb :: IO a -> IO (Either LeiosDbException a)
+  tryDb = try
 
 -- * Test utilities
 
@@ -732,31 +851,19 @@ prop_completedEbComplete :: DbImpl -> Property
 prop_completedEbComplete impl =
   forAllShrinkShow (chooseInt (1, 20)) shrink show $ \numTxs ->
     forAllBlind (genPointAndEb numTxs) $ \(point, eb) ->
-      forAllBlind genTxBytes $ \txBytes ->
-        ioProperty $ withFreshDb impl $ \db -> withRW db $ \con -> do
-          rwInsertEbPoint con point (encodeLeiosEbSize eb)
-          void $ rwInsertEbBody con point eb
-          let ebTxList = V.toList (leiosEbTxs eb)
-              txsToInsert = [(txHash, txBytes) | (txHash, _size) <- ebTxList]
-          _ <- rwInsertTxs con txsToInsert
-          (result, queryTime) <- timed $ rwLookupEbClosure con (pointEbHash point)
-          let expectedHashes = map fst txsToInsert
-              check = case result of
-                Nothing ->
-                  False & counterexample "Expected Just, got Nothing"
-                Just txData ->
-                  conjoin
-                    [ length txData === numTxs
-                        & counterexample "Wrong number of txs"
-                    , all (`elem` map fst txData) expectedHashes
-                        & counterexample "Missing expected tx hashes"
-                    , all (== txBytes) (map snd txData)
-                        & counterexample "Wrong tx bytes"
-                    ]
-          pure $
-            check
-              & tabulate "lookupEbClosure (complete)" [timeBucket queryTime]
-              & tabulate "numTxs" [magnitudeBucket numTxs]
+      ioProperty $ withFreshDb impl $ \db -> withRW db $ \con -> do
+        rwInsertEbPoint con point (encodeLeiosEbSize eb)
+        void $ rwInsertEbBody con point eb
+        _ <- rwInsertTxs con point (allTxsFor eb)
+        (result, queryTime) <- timed $ rwLookupEbClosure con (pointEbHash point)
+        let expected =
+              [ (txHash, txBytesFor eb off)
+              | (off, (txHash, _size)) <- zip [0 ..] (V.toList (leiosEbTxs eb))
+              ]
+        pure $
+          result === Just expected
+            & tabulate "lookupEbClosure (complete)" [timeBucket queryTime]
+            & tabulate "numTxs" [magnitudeBucket numTxs]
 
 -- | Property: EB with body but no txs returns Nothing.
 prop_completedEbMissingTxs :: DbImpl -> Property
@@ -778,27 +885,24 @@ prop_completedEbPartialTxs :: DbImpl -> Property
 prop_completedEbPartialTxs impl =
   forAllShrinkShow (chooseInt (2, 20)) shrink show $ \numTxs ->
     forAllBlind (genPointAndEb numTxs) $ \(point, eb) ->
-      forAllBlind genTxBytes $ \txBytes ->
-        ioProperty $ withFreshDb impl $ \db -> withRW db $ \con -> do
-          rwInsertEbPoint con point (encodeLeiosEbSize eb)
-          void $ rwInsertEbBody con point eb
-          -- Insert only the first half of txs, leaving at least one missing
-          let ebTxList = V.toList (leiosEbTxs eb)
-              partialTxs = take (numTxs `div` 2) ebTxList
-              txsToInsert = [(txHash, txBytes) | (txHash, _size) <- partialTxs]
-          _ <- rwInsertTxs con txsToInsert
-          (result, queryTime) <- timed $ rwLookupEbClosure con (pointEbHash point)
-          pure $
-            result === Nothing
-              & counterexample
-                ( "Expected Nothing with "
-                    ++ show (length txsToInsert)
-                    ++ "/"
-                    ++ show numTxs
-                    ++ " txs present"
-                )
-              & tabulate "lookupEbClosure (partial txs)" [timeBucket queryTime]
-              & tabulate "numTxs" [magnitudeBucket numTxs]
+      ioProperty $ withFreshDb impl $ \db -> withRW db $ \con -> do
+        rwInsertEbPoint con point (encodeLeiosEbSize eb)
+        void $ rwInsertEbBody con point eb
+        -- Insert only the first half of txs, leaving at least one missing
+        let txsToInsert = take (numTxs `div` 2) (allTxsFor eb)
+        _ <- rwInsertTxs con point txsToInsert
+        (result, queryTime) <- timed $ rwLookupEbClosure con (pointEbHash point)
+        pure $
+          result === Nothing
+            & counterexample
+              ( "Expected Nothing with "
+                  ++ show (length txsToInsert)
+                  ++ "/"
+                  ++ show numTxs
+                  ++ " txs present"
+              )
+            & tabulate "lookupEbClosure (partial txs)" [timeBucket queryTime]
+            & tabulate "numTxs" [magnitudeBucket numTxs]
 
 -- | Property: EB with only a point announced (no body) returns Nothing.
 prop_completedEbNoBody :: DbImpl -> Property
@@ -826,8 +930,11 @@ test_truncateDropsEbsAfterSlot volDbPath _immDbPath db = do
     rwInsertEbPoint con (MkLeiosPoint 15 keptHash) (encodeLeiosEbSize eb)
     rwInsertEbPoint con (MkLeiosPoint 15 droppedHash) (encodeLeiosEbSize eb)
     void $ rwInsertEbBody con (MkLeiosPoint 15 droppedHash) eb
+    void $ rwInsertTxs con (MkLeiosPoint 5 keptHash) (allTxsFor eb)
+    void $ rwInsertTxs con (MkLeiosPoint 15 droppedHash) (allTxsFor eb)
 
   truncateLeiosDbAfterSlot volDbPath 10
+  ebTxBytesRows volDbPath droppedHash >>= (@?= 0)
 
   withRW db $ \con -> do
     points <- rwScanEbPoints con
@@ -836,14 +943,15 @@ test_truncateDropsEbsAfterSlot volDbPath _immDbPath db = do
     keptBody @?= V.toList (leiosEbTxs eb)
     droppedBody <- rwLookupEbBody con droppedHash
     droppedBody @?= []
+    keptClosure <- rwLookupEbClosure con keptHash
+    fmap (map snd) keptClosure @?= Just (map snd (allTxsFor eb))
 
--- | The immutable schema lacks the volatile-only tables; the tooling that
--- DBTruncater runs on both files must still work on it.
+-- | The immutable schema lacks the volatile-only columns and indexes; the
+-- tooling that DBTruncater runs on both files must still work on it.
 test_truncateImmutablePartition :: FilePath -> FilePath -> IO ()
 test_truncateImmutablePartition volDbPath immDbPath = do
   withLeiosDBSQLite nullTracer volDbPath immDbPath $ \_db -> pure ()
   truncateLeiosDbAfterSlot immDbPath 10
-  deleteDanglingTxs immDbPath
 
 -- * File initialisation
 
@@ -871,14 +979,10 @@ test_schemaAtHandleCreation volDbPath immDbPath =
     vol <- schemaObjects volDbPath
     imm <- schemaObjects immDbPath
     forM_ [(vol, "vol"), (imm, "imm")] $ \(objs, file) ->
-      forM_ ["ebs", "idx_ebs_ebHashBytes", "ebTxs", "txs"] $ \name ->
+      forM_ ["ebs", "idx_ebs_ebHashBytes", "ebTxs", "ebTxBytes"] $ \name ->
         assertBool (file <> " has " <> name) (name `elem` objs)
     forM_
-      [ "ebsMissingTxs"
-      , "idx_ebsMissingTxs_ebHashBytes"
-      , "idx_ebTxs_txHashBytes"
-      , "gcTxCandidates"
-      , "idx_ebs_sweepable"
+      [ "idx_ebs_sweepable"
       , "idx_ebs_markedForGc"
       , "idx_ebs_pinned"
       ]
@@ -908,31 +1012,255 @@ test_reopenKeepsData volDbPath immDbPath = do
       points <- rwScanEbPoints con
       points @?= [(5, ebHash)]
 
--- * deleteDanglingTxs
+-- | Open a database file on a connection of its own.
+withSqlFile :: FilePath -> (SQL.Database -> IO a) -> IO a
+withSqlFile path k =
+  bracket (SQL.open (T.pack path)) SQL.close $ \sql -> do
+    SQL.exec sql (T.pack "pragma busy_timeout = 1000;")
+    k sql
 
-test_deleteDanglingTxs :: FilePath -> FilePath -> LeiosDbHandle IO -> IO ()
-test_deleteDanglingTxs volDbPath _immDbPath db = do
-  let eb = mkTestEb 2
-      ebHash = mkTestEbHash 1
-      danglingTx = mkTestTxHash 9
-      txBytes = BS.replicate 10 0
-  withRW db $ \con -> do
-    rwInsertEbPoint con (MkLeiosPoint 5 ebHash) (encodeLeiosEbSize eb)
-    void $ rwInsertEbBody con (MkLeiosPoint 5 ebHash) eb
-    void $
-      rwInsertTxs con $
-        (danglingTx, txBytes) : [(txHash, txBytes) | (txHash, _) <- V.toList (leiosEbTxs eb)]
+-- | An EB hash as an SQL blob literal.
+sqlBlob :: EbHash -> String
+sqlBlob (MkEbHash bytes) = "x'" <> concatMap hex (BS.unpack bytes) <> "'"
+ where
+  hex w = (if w < 16 then ('0' :) else id) (showHex w "")
 
-  deleteDanglingTxs volDbPath
+-- | How many 'ebTxBytes' rows the file holds for the EB.
+ebTxBytesRows :: FilePath -> EbHash -> IO Int
+ebTxBytesRows path ebHash =
+  withSqlFile path $ \sql ->
+    SQL.withStatement
+      sql
+      (T.pack ("SELECT COUNT(*) FROM ebTxBytes WHERE ebHashBytes = " <> sqlBlob ebHash))
+      $ \stmt ->
+        SQL.step stmt >> fromIntegral <$> SQL.columnInt64 stmt 0
 
-  withRW db $ \con -> do
-    closure <- rwLookupEbClosure con ebHash
-    fmap (map fst) closure @?= Just (map fst (V.toList (leiosEbTxs eb)))
-    -- A closure resolves only when the db holds every tx the body names. So
-    -- this probe resolves only if the delete missed the dangling tx.
-    let probeEb = MkLeiosEb (V.fromList [(danglingTx, 10)])
-        probePoint = MkLeiosPoint 6 (mkTestEbHash 2)
-    rwInsertEbPoint con probePoint (encodeLeiosEbSize probeEb)
-    void $ rwInsertEbBody con probePoint probeEb
-    probeClosure <- rwLookupEbClosure con (pointEbHash probePoint)
-    probeClosure @?= Nothing
+-- | A pinned EB whose tx closure never arrives cannot be copied, so the
+-- copier keeps retrying it for as long as the database is open. 'close' must
+-- still return.
+test_closeWithPinnedEb :: Assertion
+test_closeWithPinnedEb =
+  withTempLeiosDbPaths $ \volDbPath immDbPath -> do
+    copyFailed <- newEmptyMVar
+    let
+      -- The copier traces one of these per pass that cannot retire the pin.
+      -- Waiting for the first one leaves the copier on the retry path, which
+      -- is the case a stop check on the idle wait alone does not reach.
+      tracer = Tracer . emit $ \case
+        TraceLeiosDbCopyError{} -> void $ tryPutMVar copyFailed ()
+        _ -> pure ()
+      point = mkTestPoint 5 1
+    closed <-
+      Timeout.timeout closeTimeoutMicros $
+        withLeiosDBSQLite tracer volDbPath immDbPath $ \db -> do
+          -- The body never lands, so the closure stays incomplete and every
+          -- attempt to copy this EB fails.
+          withRW db $ \con -> rwInsertEbPoint con point (encodeLeiosEbSize (mkTestEb 2))
+          leiosDbPromoteToImmutable db [point]
+          takeMVar copyFailed
+    case closed of
+      Nothing -> assertFailure "close did not return while an EB stayed pinned"
+      Just () -> pure ()
+ where
+  closeTimeoutMicros = 30_000_000
+
+-- * The two implementations agree
+
+-- | An operation on the database: a write, or what the ChainDB has it do as
+-- blocks become immutable.
+data Op
+  = OpPoint LeiosPoint
+  | OpBody LeiosPoint
+  | OpTxs LeiosPoint [TxOffset]
+  | OpPromote EbHash
+  | OpGc SlotNo
+  deriving Show
+
+-- | What each endorser block's body is, by its hash, with the index in the
+-- pool of each transaction it references: the same hash always names the same
+-- body, as it would on the wire.
+type Bodies = Map.Map EbHash (LeiosEb, [Int])
+
+-- | Property: running the same operations against both implementations, a
+-- reader sees the same in each, and each write completes the same endorser
+-- blocks.
+--
+-- The node runs on SQLite and its tests run on the in-memory implementation, so
+-- those tests say something about the node only as far as the two agree.
+--
+-- The SQLite implementation copies pinned endorser blocks and sweeps what the
+-- garbage collection marked in the background, so how far it has got at any
+-- moment depends on its load. The in-memory implementation does both at once.
+-- So the SQLite implementation's background work catches up after each
+-- operation, before the next.
+prop_implementationsAgree :: Property
+prop_implementationsAgree =
+  forAll genBodies $ \bodies ->
+    forAllShrinkShow (genOps bodies) (shrinkList (const [])) show $ \ops ->
+      ioProperty $ do
+        ((nPinned, nEvicted), inMemory) <-
+          withFreshDb InMemory $ \db -> observe db (pure ()) bodies ops
+        (_, sqlite) <-
+          withFreshSQLiteFile $ \volDbPath _immDbPath db ->
+            withSettle volDbPath $ \settle -> observe db settle bodies ops
+        pure $
+          tabulate "endorser blocks pinned" [bucket nPinned] $
+            tabulate "endorser blocks evicted" [bucket nEvicted] $
+              inMemory === sqlite
+ where
+  bucket n = if n >= 3 then "3+" else show n
+
+-- | Three endorser blocks over a pool of eight transactions. Sometimes a
+-- reference misstates its transaction's size.
+genBodies :: Gen Bodies
+genBodies =
+  fmap Map.fromList $
+    forM [1 .. 3] $ \seed -> do
+      indices <- chooseInt (1, 4) >>= \n -> replicateM n (chooseInt (1, 8))
+      refs <- forM indices $ \i -> do
+        let size = fromIntegral (BS.length (poolTxBytes i))
+        misstate <- frequency [(9, pure False), (1, pure True)]
+        pure (mkTestTxHash (fromIntegral i), if misstate then size + 1 else size)
+      pure (mkTestEbHash seed, (MkLeiosEb (V.fromList refs), indices))
+
+-- | Writes, with tx offsets up to one past the largest body, so that some are
+-- not in the body they are written for.
+genOps :: Bodies -> Gen [Op]
+genOps bodies = listOf genOp
+ where
+  genSlot = SlotNo . fromIntegral <$> chooseInt (1, 4)
+  genPointOf = MkLeiosPoint <$> genSlot <*> elements (Map.keys bodies)
+  genOp =
+    frequency
+      [ (2, OpPoint <$> genPointOf)
+      , (2, OpBody <$> genPointOf)
+      , (3, OpTxs <$> genPointOf <*> sublistOf [0 .. 4])
+      , (3, OpPromote <$> elements (Map.keys bodies))
+      , (1, OpGc . (+ 1) <$> genSlot)
+      ]
+
+-- | A transaction's bytes, by its index in the pool.
+poolTxBytes :: Int -> BS.ByteString
+poolTxBytes i = BS.replicate (10 + i) (fromIntegral i)
+
+-- | Run the operations, then read back everything a reader can see of each
+-- endorser block. Also how many endorser blocks the operations pinned and
+-- evicted.
+--
+-- The operations run only as far as they meet the node's own preconditions: a
+-- body is written once per point, for a point the database holds; and an
+-- endorser block is promoted only with a complete closure, as the node pins
+-- only what an immutable block certifies, and its ChainSel adopts a block
+-- certifying an endorser block only once it holds that endorser block's
+-- closure. So this tracks which points and
+-- bodies the garbage collection evicts: those of every endorser block all of
+-- whose points are older than its slot, pinned or not, since a pinned one has
+-- a complete closure, so has been copied.
+--
+-- WARNING: the node as of this incomplete port can still pin an endorser block
+-- whose closure is incomplete. Its ChainSel adopts a block certifying an
+-- endorser block without checking it holds that block's closure. TODO Remove
+-- this warning once ChainSel checks.
+--
+-- An endorser block is also promoted at most once: the node pins only what the
+-- immutable chain certifies, and a chain cannot certify the same endorser
+-- block twice, since it cannot be valid twice.
+--
+-- @settle@ runs after each operation.
+observe ::
+  LeiosDbHandle IO ->
+  IO () ->
+  Bodies ->
+  [Op] ->
+  IO
+    ( (Int, Int)
+    , ( [CompletedEbs]
+      , [ ( [(TxHash, BytesSize)]
+          , Maybe [(TxHash, BS.ByteString)]
+          , [(Int, TxHash, Maybe BS.ByteString)]
+          )
+        ]
+      )
+    )
+observe db settle bodies ops = withRW db $ \rw -> do
+  (counts, completed) <- go rw [] [] [] 0 ops
+  seen <- forM (Map.toList bodies) $ \(ebHash, (eb, _)) ->
+    (,,)
+      <$> rwLookupEbBody rw ebHash
+      <*> rwLookupEbClosure rw ebHash
+      <*> rwBatchRetrieveTxs rw ebHash [0 .. V.length (leiosEbTxs eb)]
+  pure (counts, (completed, seen))
+ where
+  go _rw _points _bodied pinned nEvicted [] = pure ((length pinned, nEvicted), [])
+  go rw points bodied pinned nEvicted (op : rest) = case op of
+    OpPoint point -> do
+      rwInsertEbPoint rw point (encodeLeiosEbSize (fst (bodies Map.! pointEbHash point)))
+      settle
+      go rw (point : points) bodied pinned nEvicted rest
+    OpBody point
+      | point `elem` points && point `notElem` bodied -> do
+          done <- rwInsertEbBody rw point (fst (bodies Map.! pointEbHash point))
+          settle
+          fmap (sortOn show done :) <$> go rw points (point : bodied) pinned nEvicted rest
+      | otherwise -> go rw points bodied pinned nEvicted rest
+    OpTxs point offsets -> do
+      let indices = snd (bodies Map.! pointEbHash point)
+      done <-
+        rwInsertTxs
+          rw
+          point
+          [ (offset, poolTxBytes (if offset < length indices then indices !! offset else 1))
+          | offset <- offsets
+          ]
+      settle
+      fmap (sortOn show done :) <$> go rw points bodied pinned nEvicted rest
+    OpPromote ebHash -> case [p | p <- points, pointEbHash p == ebHash, ebHash `notElem` pinned] of
+      point : _ -> do
+        complete <- isJust <$> rwLookupEbClosure rw ebHash
+        if complete
+          then do
+            leiosDbPromoteToImmutable db [point]
+            settle
+            go rw points bodied (nub (ebHash : pinned)) nEvicted rest
+          else go rw points bodied pinned nEvicted rest
+      [] -> go rw points bodied pinned nEvicted rest
+    OpGc slot -> do
+      leiosDbGarbageCollect db slot
+      settle
+      let newest ebHash = maximum [pointSlotNo p | p <- points, pointEbHash p == ebHash]
+          evicted =
+            nub [ebHash | p <- points, let ebHash = pointEbHash p, newest ebHash < slot]
+          kept p = pointEbHash p `notElem` evicted
+      go rw (filter kept points) (filter kept bodied) pinned (nEvicted + length evicted) rest
+
+-- | Hand the action a wait for the SQLite implementation's background work to
+-- catch up: for its sweep to have evicted every row the garbage collection
+-- marked, and the transactions that left orphaned, and for its copier to have
+-- copied every pinned endorser block.
+withSettle :: FilePath -> (IO () -> IO a) -> IO a
+withSettle volDbPath action =
+  bracket (SQL.open (T.pack volDbPath)) SQL.close $ \conn -> do
+    SQL.exec conn (T.pack "pragma busy_timeout = 1000;")
+    bracket (SQL.prepare conn sqlBackgroundWork) SQL.finalize $ \stmt -> do
+      let backlog = do
+            _ <- SQL.step stmt
+            n <- SQL.columnInt64 stmt 0
+            SQL.reset stmt
+            pure n
+          poll =
+            backlog >>= \case
+              0 -> pure ()
+              _ -> threadDelay 1_000 >> poll
+          settle =
+            Timeout.timeout settleTimeoutMicros poll >>= \case
+              Just () -> pure ()
+              Nothing -> assertFailure "the SQLite implementation's background work did not catch up"
+      action settle
+ where
+  settleTimeoutMicros = 10_000_000
+
+-- | How many rows the SQLite implementation's background work has yet to deal
+-- with: those pinned (status 1) or marked for the sweep (status 3).
+sqlBackgroundWork :: T.Text
+sqlBackgroundWork =
+  T.pack "SELECT COUNT(*) FROM ebs WHERE status IN (1, 3)"

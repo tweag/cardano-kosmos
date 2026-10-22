@@ -88,11 +88,12 @@ import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
-import Ouroboros.Consensus.Leios.Types (LeiosPoint, LeiosVote)
+import Ouroboros.Consensus.Leios.Types (LeiosEb, LeiosPoint, LeiosTx, LeiosVote)
 import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CSClient
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
+import Ouroboros.Consensus.MiniProtocol.LeiosFetch.Type (LeiosFetch)
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type (LeiosNotify)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert (PerasCertDiffusion)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote (PerasVoteDiffusion)
@@ -115,6 +116,7 @@ import Ouroboros.Consensus.Storage.ChainDB.Impl.Types
 import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
 import Ouroboros.Consensus.Storage.LedgerDB
 import Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
+import Ouroboros.Consensus.Storage.LeiosDB (LeiosDbHandle, newLeiosDBInMemory)
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
 import Ouroboros.Consensus.Util.Assert
 import Ouroboros.Consensus.Util.Condense
@@ -746,6 +748,7 @@ runThreadNetwork
       -- \^ ledger updates tracer
       Tracer m (ChainDB.TracePipeliningEvent blk) ->
       NodeDBs (StrictTMVar m MockFS) ->
+      LeiosDbHandle m ->
       CoreNodeId ->
       ChainDbArgs Identity m blk
     mkArgs
@@ -758,6 +761,7 @@ runThreadNetwork
       updatesTracer
       pipeliningTracer
       nodeDBs
+      leiosDB
       _coreNodeId =
         let args =
               fromMinimalChainDbArgs
@@ -767,6 +771,7 @@ runThreadNetwork
                   , mcdbInitLedger = initLedger
                   , mcdbRegistry = registry
                   , mcdbNodeDBs = nodeDBs
+                  , mcdbLeiosDb = leiosDB
                   }
             tr = instrumentationTracer <> nullDebugTracer
          in args
@@ -865,6 +870,7 @@ runThreadNetwork
           selTracer = wrapTracer $ nodeEventsSelects nodeInfoEvents
           headerAddTracer = wrapTracer $ nodeEventsHeaderAdds nodeInfoEvents
           pipeliningTracer = nodeEventsPipelining nodeInfoEvents
+      leiosDB <- newLeiosDBInMemory
       let chainDbArgs =
             mkArgs
               registry
@@ -876,6 +882,7 @@ runThreadNetwork
               updatesTracer
               pipeliningTracer
               nodeInfoDBs
+              leiosDB
               coreNodeId
       chainDB <-
         snd
@@ -1048,6 +1055,7 @@ runThreadNetwork
               , btime
               , systemTime
               , chainDB
+              , leiosDB
               , initChainDB = nodeInitChainDB
               , chainSyncFutureCheck =
                   InFutureCheck.realHeaderInFutureCheck
@@ -1192,6 +1200,7 @@ runThreadNetwork
         (AnyMessage KeepAlive)
         (AnyMessage (PeerSharing NodeId))
         (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
+        (AnyMessage (LeiosFetch LeiosPoint LeiosEb LeiosTx))
     customNodeToNodeCodecs cfg ntnVersion =
       NTN.Codecs
         { cChainSyncCodec =
@@ -1224,6 +1233,9 @@ runThreadNetwork
         , cLeiosNotifyCodec =
             mapFailureCodec CodecIdFailure $
               NTN.cLeiosNotifyCodec NTN.identityCodecs
+        , cLeiosFetchCodec =
+            mapFailureCodec CodecIdFailure $
+              NTN.cLeiosFetchCodec NTN.identityCodecs
         }
      where
       binaryProtocolCodecs =
@@ -1823,6 +1835,7 @@ type LimitedApp' m addr blk =
     (AnyMessage KeepAlive)
     (AnyMessage (PeerSharing addr))
     (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
+    (AnyMessage (LeiosFetch LeiosPoint LeiosEb LeiosTx))
     NodeToNodeInitiatorResult
     ()
 

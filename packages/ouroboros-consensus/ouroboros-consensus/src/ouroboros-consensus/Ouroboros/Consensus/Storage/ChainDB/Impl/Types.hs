@@ -131,6 +131,7 @@ import Ouroboros.Consensus.Storage.LedgerDB
   , LedgerDbSerialiseConstraints
   )
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
+import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
 import Ouroboros.Consensus.Storage.PerasCertDB (PerasCertDB)
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
 import Ouroboros.Consensus.Storage.PerasVoteDB (PerasVoteDB)
@@ -404,6 +405,8 @@ data ChainDbEnv m blk = CDB
   , cdbPerasEpochContextResolverHandle :: !(PerasEpochContextResolverHandle m blk)
   -- ^ Shared handle resolving a Peras round to its epoch context; also handed
   -- to the VoteDB and exposed via the ChainDB API.
+  , cdbLeiosDb :: !(LeiosDbHandle m)
+  -- ^ The node's LeiosDB. Whoever opened it closes it, not the ChainDB.
   }
   deriving Generic
 

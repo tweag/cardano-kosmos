@@ -130,7 +130,7 @@ bodyLoop stmt acc =
 
 -- | Retrieve tx bytes for a batch of @(ebHash, txOffset)@ points. Passes
 -- the offsets list as a JSON int array bound to a single parameter;
--- SQLite's 'json_each' virtual table joins it against 'ebTxs' + 'txs'.
+-- SQLite's 'json_each' virtual table joins it against 'ebTxs' + 'ebTxBytes'.
 --
 -- No temp tables, no attached databases, no per-item INSERT round-trips.
 -- Works on strictly read-only connections.
@@ -147,6 +147,11 @@ sqlBatchRetrieveTxs conn ebHash offsets = do
       retrieveLoop stmt []
   -- Zero rows means the EB's body is absent from the volatile partition
   -- entirely (a present body joins every requested offset): copied+evicted.
+  --
+  -- TODO This misses an EB that was copied to the immutable partition, evicted
+  -- from the volatile partition, and then fetched again: until the volatile
+  -- partition has all of its txs again, the missing ones read as absent,
+  -- although the immutable partition holds them.
   if null vol && not (null offsets)
     then immBatchRetrieveTxs conn ebHash offsets
     else pure vol
@@ -175,7 +180,7 @@ retrieveLoop stmt acc =
     DB.Row -> do
       offset <- fromIntegral <$> DB.columnInt64 stmt 0
       txHash <- MkTxHash <$> DB.columnBlob stmt 1
-      -- Column 2 is from LEFT JOIN, NULL if tx not in txs table
+      -- Column 2 is NULL if the tx's bytes have not arrived yet
       txBytes <- DB.columnBlob stmt 2
       let mbTxBytes = if txBytes == mempty then Nothing else Just txBytes
       retrieveLoop stmt ((offset, txHash, mbTxBytes) : acc)

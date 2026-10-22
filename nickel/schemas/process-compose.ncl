@@ -1614,5 +1614,4 @@ let rec refs
             ..
           }
     }
-    in
-  refs.definitions.Project
+    in refs.definitions

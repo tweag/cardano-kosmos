@@ -12,4 +12,27 @@ in
   prometheus = {
     port = 9090,
   },
+  trace_options = {
+    "" = {
+      severity = 'Notice,
+      backends = [ '"Stdout HumanFormatColoured" ],
+    },
+    Peras = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+      detail = 'DNormal,
+    },
+    "ChainDB.PerasVoteDbEvent" = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+    Startup = {
+      severity = 'Info,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+    "ChainDB.PerasCertDbEvent" = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+  },
 } | InputParams

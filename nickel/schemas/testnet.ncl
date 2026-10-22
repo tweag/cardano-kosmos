@@ -29,6 +29,17 @@ let export = {
       acc & { "%{b.field}" | String | default = b.value }
     ) {} found_cardano_binaries,
 
+  Severity = [| 'Debug, 'Info, 'Notice, 'Warning, 'Error |],
+  Backend = [| '"Stdout HumanFormatColoured", 'EKGBackend, 'Forwarder |],
+  Detail = [| 'DMinimal, 'DNormal, 'DExtended |],
+
+  TraceOption = {
+    severity | Severity,
+    backends | Array Backend,
+    detail | Detail | optional,
+    maxFrequency | Number | optional,
+  },
+
   InputParams = {
     directory | String,
     cardano_binaries | CardanoBinaries | default = {},
@@ -44,6 +55,7 @@ let export = {
       address | String | default = "127.0.0.1",
       port | Number | default = 9090,
     },
+    trace_options | { _ | TraceOption },
   },
   TestnetConfig = {
     nodes_arg | String,

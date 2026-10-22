@@ -37,6 +37,7 @@ import           Cardano.Node.Tracing.Tracers.NodeVersion (getNodeVersion)
 import           Cardano.Node.Tracing.Tracers.Rpc ()
 import           Cardano.Node.Tracing.Tracers.Shutdown ()
 import           Cardano.Node.Tracing.Tracers.Startup ()
+import           Control.Tracer (nullTracer)
 import           Ouroboros.Consensus.Ledger.Inspect (LedgerEvent)
 import           Ouroboros.Consensus.MiniProtocol.ChainSync.Client (TraceChainSyncClientEvent)
 import qualified Ouroboros.Consensus.Network.NodeToClient as NodeToClient
@@ -452,6 +453,8 @@ mkConsensusTracers configReflection trBase trForward mbTrEKG _trDataPoint trConf
           traceWith txPerasVoteOut
       , Consensus.perasCertInclusionTracer = mkTracer $ traceWith txPerasCertInclusion
       , Consensus.perasVoteForgingTracer = mkTracer $ traceWith txPerasVoteForging
+      , Consensus.leiosFetchServerTracer = nullTracer
+      , Consensus.leiosDbTracer = nullTracer
       , Consensus.testnetTracer = mkTracer $ traceWith testnetTrac
       }
 
@@ -576,6 +579,8 @@ mkNodeToNodeTracers configReflection trBase trForward mbTrEKG _trDataPoint trCon
           traceWith txPerasCertDiffusion
       , NtN.tPerasVoteDiffusionTracer = mkTracer $
           traceWith txPerasVoteDiffusion
+      , NtN.tLeiosNotifyTracer = nullTracer
+      , NtN.tLeiosFetchTracer = nullTracer
       }
 
 mkDiffusionTracers ::

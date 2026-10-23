@@ -25,7 +25,7 @@ let export = {
       ) [],
 
   CardanoBinaries =
-    std.array.fold_left (fun acc b => 
+    std.array.fold_left (fun acc b =>
       acc & { "%{b.field}" | String | default = b.value }
     ) {} found_cardano_binaries,
 
@@ -47,6 +47,11 @@ let export = {
     },
     toxiproxy = {
        port | Number | default = 8474,
+    },
+    postgres = {
+      port | Number | default = 5433,
+      user | String | default = "sidecar",
+      database | String | default = "sidecar",
     },
   },
   TestnetConfig = {

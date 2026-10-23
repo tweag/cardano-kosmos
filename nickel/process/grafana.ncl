@@ -30,9 +30,14 @@ fun input =>
     "GF_SECURITY_ADMIN_PASSWORD=cardano",
     "GF_AUTH_ANONYMOUS_ENABLED=true",
     "GF_FEATURE_TOGGLES_splashScreen=false",
+    # Consumed by grafana/provisioning/datasources/datasources.yaml (sidecar_uid).
+    "SIDECAR_PG_URL=%{input.ip}:%{std.string.from_number input.postgres.port}",
+    "SIDECAR_PG_USER=%{input.postgres.user}",
+    "SIDECAR_PG_DATABASE=%{input.postgres.database}",
   ],
   depends_on = {
     victoria-metrics = { condition = 'process_healthy },
+    postgres = { condition = 'process_healthy },
   },
   readiness_probe = {
     exec = {
@@ -42,6 +47,6 @@ fun input =>
     period_seconds = 2,
     timeout_seconds = 1,
     success_threshold = 1,
-    failure_threshold = 10,
+    failure_threshold = 60,
   }
 }

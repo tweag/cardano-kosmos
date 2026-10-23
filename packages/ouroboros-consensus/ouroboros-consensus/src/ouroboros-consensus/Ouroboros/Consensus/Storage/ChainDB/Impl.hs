@@ -58,7 +58,7 @@ import Ouroboros.Consensus.BlockchainTime.API (CurrentSlot (..))
 import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory (..))
 import Ouroboros.Consensus.HeaderValidation (mkHeaderWithTime)
-import Ouroboros.Consensus.Ledger.Extended (ledgerState, tickAndResolveRoundNo)
+import Ouroboros.Consensus.Ledger.Extended (ledgerState, getTickedPerasEpochContextResolver)
 import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
@@ -214,13 +214,13 @@ openDBInternal args launchBgTasks = runWithTempRegistry $ do
 
     -- NOTE: once we have epoch context forecasting in place and have moved the
     -- resolver anchor to the immutable chain tip, this initialization of the
-    -- resolver handle will no longer need to depend 'tickAndResolveRoundNo'
+    -- resolver handle will no longer need to depend 'getTickedPerasEpochContextResolver'
     -- and could directly call 'unsafeResolveRoundNo' directly instead.
     -- Consequently, we will be able to remove the chain clock as well.
     varChainClock <- newTVarIO (ChainClock (pure CurrentSlotUnknown))
     let resolverHandle =
           PerasEpochContextResolverHandle $
-            tickAndResolveRoundNo
+            getTickedPerasEpochContextResolver
               (Args.cdbsTopLevelConfig cdbSpecificArgs)
               (LedgerDB.getVolatileTip lgrDB)
               (readTVar varChainClock >>= \(ChainClock readCurrentSlot) -> readCurrentSlot)

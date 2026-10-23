@@ -30,6 +30,7 @@ module Ouroboros.Consensus.Peras.Context
   , unsafeResolveRoundNo
   , perasEpochContextResolverBounds
   , PerasEpochContextResolverHandle (..)
+  , resolveRoundNo
   , mockPerasEpochContextResolverHandle
   , withResolvedRoundNo
   , verifyPerasVoteWithHandle
@@ -384,7 +385,7 @@ advancePerasEpochContextResolver resolver newEpochContext =
 -- only covers a two-epoch window around the slot it was last ticked to, so it
 -- must already have been ticked to (around) the round's slot; otherwise
 -- resolution may spuriously fail or return a stale context. Prefer
--- 'Ouroboros.Consensus.Ledger.Extended.tickAndResolveRoundNo',
+-- 'Ouroboros.Consensus.Ledger.Extended.getTickedPerasEpochContextResolver',
 -- which ticks before resolving.
 unsafeResolveRoundNo ::
   PerasEpochContextResolver blk ->
@@ -456,26 +457,38 @@ perasEpochContextResolverBounds = \case
     , max (endPerasRoundNo curr) (endPerasRoundNo prev)
     )
 
--- | A handle that resolves a 'PerasRoundNo' into its corresponding
--- 'PerasEpochContext' (or a 'PerasEpochContextNotFoundForRound' error) in 'STM'.
+-- | A handle to the current epoch-context window in 'STM'. ChainDB supplies
+-- a ticked window so resolution and object-diffusion requestability use the
+-- same context.
 newtype PerasEpochContextResolverHandle m blk
   = PerasEpochContextResolverHandle
-  { resolveRoundNo ::
-      PerasRoundNo ->
-      STM m (Either PerasEpochContextNotFoundForRound (PerasEpochContext blk))
+  { getPerasEpochContextResolver :: STM m (PerasEpochContextResolver blk)
   }
   deriving
     NoThunks
     via OnlyCheckWhnfNamed "PerasEpochContextResolverHandle" (PerasEpochContextResolverHandle m blk)
 
--- | A mocked 'PerasEpochContextResolverHandle' that always succeeds by
--- resolving every round number to a fixed given (fixed) 'PerasEpochContext'.
+-- | Resolve a round using the context window supplied by the handle.
+resolveRoundNo ::
+  MonadSTM m =>
+  PerasEpochContextResolverHandle m blk ->
+  PerasRoundNo ->
+  STM m (Either PerasEpochContextNotFoundForRound (PerasEpochContext blk))
+resolveRoundNo handle roundNo = do
+  resolver <- getPerasEpochContextResolver handle
+  pure $ unsafeResolveRoundNo resolver roundNo
+
+-- | A mocked handle with a fixed context window spanning '[minBound,maxBound)'.
 mockPerasEpochContextResolverHandle ::
   MonadSTM m =>
   PerasEpochContext blk ->
   PerasEpochContextResolverHandle m blk
 mockPerasEpochContextResolverHandle context =
-  PerasEpochContextResolverHandle $ \_ -> pure (Right context)
+  PerasEpochContextResolverHandle $
+    pure $
+      PerasEpochContextResolver
+        (PerasEnabled (BoundedPerasEpochContext minBound maxBound context))
+        NoPerasEnabled
 
 -- | Helper to resolve the epoch context for a given round a pass it to a
 -- continuation for further processing.
@@ -491,8 +504,8 @@ withResolvedRoundNo ::
   PerasRoundNo ->
   (PerasEpochContext blk -> Either err a) ->
   STM m a
-withResolvedRoundNo PerasEpochContextResolverHandle{resolveRoundNo} roundNo k =
-  resolveRoundNo roundNo >>= \case
+withResolvedRoundNo handle roundNo k =
+  resolveRoundNo handle roundNo >>= \case
     Left err -> throwSTM err
     Right context ->
       case k context of

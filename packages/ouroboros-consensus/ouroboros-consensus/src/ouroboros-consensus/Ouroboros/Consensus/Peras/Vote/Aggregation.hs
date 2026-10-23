@@ -108,7 +108,8 @@ import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.BlockchainTime (WithArrivalTime)
 import Ouroboros.Consensus.Peras.Context
   ( PerasEpochContextNotFoundForRound
-  , PerasEpochContextResolverHandle (..)
+  , PerasEpochContextResolverHandle
+  , resolveRoundNo
   )
 
 {-------------------------------------------------------------------------------
@@ -247,8 +248,8 @@ freshRoundVoteState ::
   PerasRoundNo ->
   PerasEpochContextResolverHandle m blk ->
   STM m (Either (UpdateRoundVoteStateError blk) (PerasRoundVoteState blk))
-freshRoundVoteState roundNo PerasEpochContextResolverHandle{resolveRoundNo} = do
-  result <- resolveRoundNo roundNo
+freshRoundVoteState roundNo handle = do
+  result <- resolveRoundNo handle roundNo
   pure $
     bimap RoundVoteStateEpochContextNotFound mkFreshRoundVoteState result
  where

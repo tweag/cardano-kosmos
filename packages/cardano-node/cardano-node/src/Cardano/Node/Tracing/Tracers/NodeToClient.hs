@@ -486,6 +486,14 @@ instance LogFormatting (Simple.AnyMessage (ObjectDiffusion objectId object)) whe
      mconcat [ "kind" .= String "MsgReplyObjectIds"
               , "agency" .= String (pack $ show stok)
               ]
+   forMachine _dtal (Simple.AnyMessageAndAgency stok OD.MsgAwaitReply {}) =
+     mconcat [ "kind" .= String "MsgAwaitReply"
+              , "agency" .= String (pack $ show stok)
+              ]
+   forMachine _dtal (Simple.AnyMessageAndAgency stok OD.MsgServerIdle {}) =
+     mconcat [ "kind" .= String "MsgServerIdle"
+              , "agency" .= String (pack $ show stok)
+              ]
    forMachine _dtal (Simple.AnyMessageAndAgency stok OD.MsgRequestObjects {}) =
      mconcat [ "kind" .= String "MsgRequestObjects"
               , "agency" .= String (pack $ show stok)
@@ -506,6 +514,10 @@ instance MetaTrace (Simple.AnyMessage (ObjectDiffusion objectId object)) where
       Namespace [] ["RequestObjectIds"]
     namespaceFor (Simple.AnyMessageAndAgency _agency OD.MsgReplyObjectIds {}) =
       Namespace [] ["ReplyObjectIds"]
+    namespaceFor (Simple.AnyMessageAndAgency _agency OD.MsgAwaitReply {}) =
+      Namespace [] ["AwaitReply"]
+    namespaceFor (Simple.AnyMessageAndAgency _agency OD.MsgServerIdle {}) =
+      Namespace [] ["ServerIdle"]
     namespaceFor (Simple.AnyMessageAndAgency _agency OD.MsgRequestObjects {}) =
       Namespace [] ["RequestObjects"]
     namespaceFor (Simple.AnyMessageAndAgency _agency OD.MsgReplyObjects {}) =
@@ -519,6 +531,8 @@ instance MetaTrace (Simple.AnyMessage (ObjectDiffusion objectId object)) where
     severityFor (Namespace [] ["RequestObjects"]) _ = Just Info
     severityFor (Namespace [] ["ReplyObjects"]) _ = Just Info
     severityFor (Namespace [] ["Done"]) _ = Just Info
+    severityFor (Namespace [] ["AwaitReply"]) _ = Just Info
+    severityFor (Namespace [] ["ServerIdle"]) _ = Just Info
     severityFor _ _ = Nothing
 
     documentFor (Namespace [] ["Init"]) = Just ""
@@ -527,12 +541,18 @@ instance MetaTrace (Simple.AnyMessage (ObjectDiffusion objectId object)) where
     documentFor (Namespace [] ["RequestObjects"]) = Just ""
     documentFor (Namespace [] ["ReplyObjects"]) = Just ""
     documentFor (Namespace [] ["Done"]) = Just ""
+    documentFor (Namespace [] ["AwaitReply"]) = Just
+      "The server has no object IDs immediately available and will wait for new objects."
+    documentFor (Namespace [] ["ServerIdle"]) = Just
+      "The server's bounded wait expired without new object IDs, returning agency to the client."
     documentFor _ = Nothing
 
     allNamespaces =
       [ Namespace [] ["Init"]
       , Namespace [] ["RequestObjectIds"]
       , Namespace [] ["ReplyObjectIds"]
+      , Namespace [] ["AwaitReply"]
+      , Namespace [] ["ServerIdle"]
       , Namespace [] ["RequestObjects"]
       , Namespace [] ["ReplyObjects"]
       , Namespace [] ["Done"]

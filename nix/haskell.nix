@@ -70,6 +70,10 @@ let
 
         withHoogle = false;
 
+        tools = {
+          cabal-buck2 = "0.3.0.0";
+        };
+
         # https://github.com/channable/alfred-margaret/pull/76
         tools.hoogle = {
           cabalProjectLocal = ''

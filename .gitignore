@@ -28,3 +28,9 @@ result-*
 
 #testnet
 devnet-env
+
+# buck2
+BUCK
+buck2
+buck-out
+third-party

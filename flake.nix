@@ -180,12 +180,21 @@
       # This is used by `nix develop .` to open a devShell
       devShells = let
         shell = import ./shell.nix {inherit pkgs customConfig;};
+        grafanaPostgresPlugin = freshPkgs.grafanaPlugins.grafanaPlugin {
+          pname = "grafana-postgresql-datasource";
+          version = "13.0.4";
+          zipHash = {
+            x86_64-linux = "sha256-009EvRMhNQLeQ5SVX8wXDXD7giUxwYG/8BefIWw1oOA=";
+            aarch64-linux = "sha256-ezrzSZjLt+94VJkfcQPWxABMQsmovUBfkIM7EeZSsIM=";
+            aarch64-darwin = "sha256-knJhnvW+UX1GKPPm97jOE+l2Rnz+pSpttpuC1LZPdow=";
+          };
+        };
         grafanaPlugins =
           freshPkgs.linkFarm "grafana-plugins"
           (map (p: {
             name = p.pname;
             path = p;
-          }) (with freshPkgs.grafanaPlugins; [prometheus loki]));
+          }) (with freshPkgs.grafanaPlugins; [prometheus loki grafanaPostgresPlugin]));
       in
         {
           default = shell.dev.overrideAttrs (attrs: {
@@ -208,6 +217,7 @@
               freshPkgs.vlagent
               freshPkgs.grafana
               freshPkgs.nickel
+              freshPkgs.postgresql
             ];
           });
           cluster = shell;

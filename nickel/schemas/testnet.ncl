@@ -44,6 +44,11 @@ let export = {
       address | String | default = "127.0.0.1",
       port | Number | default = 9090,
     },
+    postgres = {
+      port | Number | default = 5433,
+      user | String | default = "sidecar",
+      database | String | default = "sidecar",
+    },
   },
   TestnetConfig = {
     nodes_arg | String,

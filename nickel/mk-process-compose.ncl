@@ -11,6 +11,7 @@ let
   mk_vlagent = import "./process/vlagent.ncl",
   mk_victoria_metrics = import "./process/victoria-metrics.ncl",
   mk_grafana = import "./process/grafana.ncl",
+  oracle_process = import "./process/oracle.ncl",
 in fun input scenario =>
 {
   version = "0.5",
@@ -21,6 +22,7 @@ in fun input scenario =>
     chairman = mk_chairman input scenario,
     victoria-logs = mk_victoria_logs input,
     vlagent = mk_vlagent input,
+    oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input,
     grafana = mk_grafana input,

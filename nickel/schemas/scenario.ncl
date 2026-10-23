@@ -75,7 +75,7 @@ let export = {
   },
 
   Fault = [|
-    'isolate { nodes | Array Number },
+    'isolate (Array Number),
     'latency {
       nodes | Array Number,
       direction | [| 'upstream, 'downstream, 'both |] | default = 'both, 
@@ -90,13 +90,14 @@ let export = {
     topology = {
       magic | Number,
       groups | Array Group | StakeConstraint,
+      num_of_nodes | Number | default = count_nodes groups,
     },
     genesis | Genesis,
-    faults | Array Fault | optional,
+    faults | Array Fault | default = [],
     observability | {
       trace_filters | (Array String),
     } | optional ,
-    env | Array String | optional,
+    env | Array String | default = [],
   },
 }
 in export 

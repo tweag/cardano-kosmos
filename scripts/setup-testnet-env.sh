@@ -94,6 +94,26 @@ trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColour
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
 
-# TODO: add toxiproxy ports map supports
+# substitute ports for toxiproxy
+read -r \
+  ip \
+  node_ports_base \
+< <(nickel export nickel/testnet.ncl | jq -r '[
+    .ip,
+    .node_ports_base
+  ] | @tsv')
+
+num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)
+
+# save the list of ports for later
+node1Port=$(cat "$DEVENV_PATH/node-data/node1/port")
+portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' "$DEVENV_PATH/node-data/node1/topology.json")
+
+echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
+
+for node_idx in $(seq 1 $num_of_nodes); do
+  newTopology=$(echo '(import "nickel/mk-node-topology.ncl") "'"$ip"'" '"$node_ports_base"' '"$node_idx"' '"$num_of_nodes"'' | nickel export --format json)
+  echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
+done
 
 echo "Ready."

@@ -11,6 +11,8 @@ let
   mk_vlagent = import "./process/vlagent.ncl",
   mk_victoria_metrics = import "./process/victoria-metrics.ncl",
   mk_grafana = import "./process/grafana.ncl",
+  mk_postgres = import "./process/postgres.ncl",
+  mk_sidecar = import "./process/sidecar.ncl",
 in fun input scenario =>
 {
   version = "0.5",
@@ -24,5 +26,7 @@ in fun input scenario =>
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input,
     grafana = mk_grafana input,
+    postgres = mk_postgres input,
+    sidecar = mk_sidecar input scenario,
   } else {}),
 } | Project

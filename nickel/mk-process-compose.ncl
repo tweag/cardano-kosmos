@@ -11,6 +11,7 @@ let
   mk_grafana = import "./process/grafana.ncl",
   mk_toxiproxy_server = import "./process/toxiproxy-server.ncl",
   mk_toxiproxy_setup = import "./process/toxiproxy-setup.ncl",
+  oracle_process = import "./process/oracle.ncl",
 in fun input scenario portsOfNodes =>
 {
   version = "0.5",
@@ -23,6 +24,7 @@ in fun input scenario portsOfNodes =>
     vlagent = mk_vlagent input,
     toxiproxy-server = mk_toxiproxy_server input,
     toxiproxy-setup = mk_toxiproxy_setup input scenario portsOfNodes,
+    oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input,
     grafana = mk_grafana input,

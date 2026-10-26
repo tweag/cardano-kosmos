@@ -14,12 +14,10 @@ if [ ! -f "$scenarioFile" ]; then
   fi
 fi
 
-pathOutput="$2"
+DEVENV_PATH="$2"
+pathOutput="$DEVENV_PATH/process-compose.yaml"
 
-output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format yaml)
+portsOfNodes=$(cat "$DEVENV_PATH/nodes-ports.json")
+output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'") '"$portsOfNodes"'' | nickel export --format yaml)
 
-if [ -n "$pathOutput" ]; then
-  echo "$output" > "$pathOutput"
-else
-  echo "$output"
-fi
+echo "$output" > "$pathOutput"

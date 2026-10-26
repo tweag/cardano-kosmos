@@ -20,6 +20,12 @@ To reconfigure the testnet or scenario params, change `nickel/scenarios/<scenari
 ./scripts/run-peras-testnet.sh
 ```
 
+To isolate `node1` manually run in another `nix develop`:
+
+```
+toxiproxy-cli toggle node1
+```
+
 ## Work organization
 
 There are two options how the work can be done:

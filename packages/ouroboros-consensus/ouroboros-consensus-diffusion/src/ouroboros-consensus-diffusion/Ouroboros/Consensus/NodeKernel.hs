@@ -123,6 +123,7 @@ import Ouroboros.Consensus.Storage.ChainDB.API
 import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
 import Ouroboros.Consensus.Storage.ChainDB.Init (InitChainDB)
 import qualified Ouroboros.Consensus.Storage.ChainDB.Init as InitChainDB
+import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
 import Ouroboros.Consensus.Util.AnchoredFragment
   ( preferAnchoredCandidate
   )
@@ -185,6 +186,8 @@ import System.Random (StdGen)
 data NodeKernel m addrNTN addrNTC blk = NodeKernel
   { getChainDB :: ChainDB m blk
   -- ^ The 'ChainDB' of the node
+  , getLeiosDB :: LeiosDbHandle m
+  -- ^ The node's LeiosDB
   , getMempool :: Mempool m blk
   -- ^ The node's mempool
   , getTopLevelConfig :: TopLevelConfig blk
@@ -242,6 +245,8 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , btime :: BlockchainTime m
   , systemTime :: SystemTime m
   , chainDB :: ChainDB m blk
+  , leiosDB :: LeiosDbHandle m
+  -- ^ Whoever opened it closes it, once the node kernel's threads have stopped.
   , initChainDB :: StorageConfig blk -> InitChainDB m blk -> m ()
   , chainSyncFutureCheck :: SomeHeaderInFutureCheck m blk
   , maxClockSkew :: ClockSkew
@@ -316,6 +321,7 @@ initNodeKernel
     , featureFlags
     , tracers
     , chainDB
+    , leiosDB
     , initChainDB
     , blockFetchConfiguration
     , btime
@@ -342,12 +348,23 @@ initNodeKernel
           , varGsmState
           } = st
 
-    -- Back the ChainDB's slot clock with the wall-clock slot, but only while
-    -- the node is caught up; while syncing, Peras queries skip ticking.
+    -- Back the ChainDB's slot clock with the wall-clock slot, to allow ticking
+    -- the PerasEpochContextResolver to the current wall-clock slot.
     ChainDB.setChainClock chainDB $
-      readTVar varGsmState >>= \case
-        GSM.CaughtUp -> getCurrentSlot btime
-        _ -> pure CurrentSlotUnknown
+      -- Supposedly the ChainClock is no longer gonna be needed after we
+      -- implement forecasting for the PerasEpochContextResolver, and anchor it
+      -- to the immutable tip instead of the volatile tip.
+      --
+      -- However, in the event that we still need to back the ChainDB's slot
+      -- clock to tick the resolver on mainnet Peras, we should make sure that
+      -- we don't tick when a node is still syncing.
+      --
+      -- So we could replace the line below by:
+      --
+      -- readTVar varGsmState >>= \case
+      --   GSM.CaughtUp -> getCurrentSlot btime
+      --     _ -> pure CurrentSlotUnknown
+      getCurrentSlot btime
 
     varOutboundConnectionsState <- newTVarIO UntrustedState
 
@@ -489,6 +506,7 @@ initNodeKernel
     return
       NodeKernel
         { getChainDB = chainDB
+        , getLeiosDB = leiosDB
         , getMempool = mempool
         , getTopLevelConfig = cfg
         , getFetchClientRegistry = fetchClientRegistry
@@ -581,12 +599,7 @@ perasVoteForgingController
     (mbPerasVote, traceEvents) <-
       lift $ atomically $ runWriterT $ runMaybeT $ do
         -- Is this the first slot in the round? If not, we don't forge a vote.
-        --
-        -- HACK: we leave some time to allow for /some/ block to be applied in
-        -- this round before invoking the epoch context resolver. Otherwise, it
-        -- can fail to resolve the current round info as it might still be stuck
-        -- on the previous epoch.
-        when (slotInRound /= 75) $ do
+        when (slotInRound /= 0) $ do
           tell [TracePerasVotingNoVoteAfterFirstSlotInRound roundNo slotInRound]
           hoistMaybe Nothing
         -- Do the voting rules state that we should vote? And if so, for which block?

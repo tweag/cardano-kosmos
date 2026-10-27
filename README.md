@@ -26,6 +26,21 @@ To isolate `node1` manually run in another `nix develop`:
 toxiproxy-cli toggle node1
 ```
 
+## Logs and Dashboards
+
+Running `./scripts/run-peras-testnet.sh` will spin up a log collector and
+metrics dashboard for the testnet. These are available at:
+
+- [Logs](http://0.0.0.0:9428/select/vmui/), available once the `victoria-logs`
+  process comes up
+- [Dashboards](http://localhost:3000/d/da93ce09-7b06-49e0-812e-2872192a9bcf/default),
+  available once the `grafana` process comes up. You shouldn't need to log in,
+  but if you do, the credentials are `cardano/cardano`.
+
+Some panels haven't yet been ported to grafana; it is expected that some panels
+will fail with a `Datasource dbsync_uid was not found` error.
+
+
 ## Work organization
 
 There are two options how the work can be done:

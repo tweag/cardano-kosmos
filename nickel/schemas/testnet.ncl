@@ -48,10 +48,9 @@ let export = {
     toxiproxy = {
        port | Number | default = 8474,
     },
-    postgres = {
-      port | Number | default = 5433,
-      user | String | default = "sidecar",
-      database | String | default = "sidecar",
+    sidecar = {
+      # SQLite database file, relative to the devnet directory.
+      database | String | default = "sidecar.sqlite",
     },
   },
   TestnetConfig = {

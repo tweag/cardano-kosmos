@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Kosmos port of ignite's sidecar container. Populates the `sidecar` postgres
+# Kosmos port of ignite's sidecar container. Populates the `sidecar` SQLite
 # database queried by the grafana dashboards through the `sidecar_uid`
 # datasource:
 #
@@ -14,29 +14,29 @@
 set -o nounset
 set -o pipefail
 
-: "${PGHOST:?}" "${PGPORT:?}" "${PGUSER:?}" "${PGDATABASE:?}"
+: "${SIDECAR_DB:?}"
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
 
-export PGHOST PGPORT PGUSER
-
-psql_admin() { psql --quiet --no-psqlrc --dbname postgres "$@"; }
-psql_sc() { psql --quiet --no-psqlrc --set ON_ERROR_STOP=1 --dbname "${PGDATABASE}" "$@"; }
+# Grafana reads the database concurrently; wait on locks instead of failing.
+sql_sc() { sqlite3 -bail -batch -cmd ".timeout 5000" "${SIDECAR_DB}" "$@" >/dev/null; }
 
 IFS=',' read -ra ROLES <<<"${NODE_ROLES}"
 
 node_port() { cat "${DEVNET_DIR}/node-data/node$1/port" 2>/dev/null; }
 
 setup_database() {
-    if [ "$(psql_admin -tA -c "SELECT 1 FROM pg_database WHERE datname='${PGDATABASE}'")" != "1" ]; then
-        psql_admin -c "CREATE DATABASE ${PGDATABASE};"
-    fi
+    mkdir -p "$(dirname "${SIDECAR_DB}")"
 
-    psql_sc <<'SQL'
-SET client_min_messages = warning;
-DROP TABLE IF EXISTS node_tips, ci_nodes, ci_edges, cn_edges, ada_pots;
+    sql_sc <<'SQL'
+PRAGMA journal_mode = WAL;
+DROP TABLE IF EXISTS node_tips;
+DROP TABLE IF EXISTS ci_nodes;
+DROP TABLE IF EXISTS ci_edges;
+DROP TABLE IF EXISTS cn_edges;
+DROP TABLE IF EXISTS ada_pots;
 
 CREATE TABLE node_tips (
     pool_id VARCHAR PRIMARY KEY,
@@ -100,14 +100,14 @@ populate_topology() {
         sql+="INSERT INTO ci_edges VALUES ('${net}_${id}', '${net}', '${id}');"$'\n'
     done
 
-    for svc in grafana:monitor victoria-metrics:gf-prometheus victoria-logs:monitor postgres:database sidecar:monitor; do
+    for svc in grafana:monitor victoria-metrics:gf-prometheus victoria-logs:monitor sidecar:monitor; do
         id="${svc%%:*}"
         sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('${id}', '${id}', 'service', '#FF6B4A', '${svc##*:}');"$'\n'
         sql+="INSERT INTO ci_edges VALUES ('${id}_localhost', '${id}', '${net}');"$'\n'
         sql+="INSERT INTO ci_edges VALUES ('${net}_${id}', '${net}', '${id}');"$'\n'
     done
 
-    psql_sc <<<"${sql}"
+    sql_sc <<<"${sql}"
 }
 
 # Localroot topology, derived from each node's topology.json (ports -> nodeN).
@@ -130,7 +130,7 @@ populate_localroots() {
         done < <(jq -r '.localRoots[]?.accessPoints[]?.port' "${topo}")
     done
 
-    [ -n "${sql}" ] && psql_sc <<<"${sql}"
+    [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
 update_tips() {
@@ -146,7 +146,7 @@ update_tips() {
         fi
     done
 
-    psql_sc <<SQL
+    sql_sc <<SQL
 INSERT INTO node_tips (pool_id, hash, block, slot)
 VALUES $(IFS=','; echo "${values[*]}")
 ON CONFLICT (pool_id) DO UPDATE SET
@@ -191,7 +191,7 @@ update_graph_stats() {
         sql+="UPDATE ci_nodes SET mainstat = ${main[${node}]}, secondarystat = ${secondary[${node}]:-0} WHERE id = '${node}';"$'\n'
     done
 
-    [ -n "${sql}" ] && psql_sc <<<"${sql}"
+    [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
 main() {

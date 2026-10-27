@@ -6,9 +6,9 @@
 #   - VictoriaMetrics exposes a Prometheus-compatible query API (port 8428).
 #   - VictoriaLogs exposes a Loki-compatible query API (port 9428).
 #
-#   - The `sidecar` process (scripts/sidecar.sh) populates a local postgres
-#     (`sidecar_uid`); connection details come from env vars set in
-#     nickel/process/grafana.ncl.
+#   - The `sidecar` process (scripts/sidecar.sh) populates a local SQLite
+#     database (`sidecar_uid`); its path comes from SIDECAR_DB_PATH, exported
+#     by nickel/process/grafana.ncl.
 #
 # NOTE: `dbsync_uid` has no equivalent in the kosmos devnet; panels relying on
 # it simply won't render data.
@@ -33,16 +33,6 @@ datasources:
 
   - name: sidecar
     uid: sidecar_uid
-    type: grafana-postgresql-datasource
-    url: ${SIDECAR_PG_URL}
-    user: ${SIDECAR_PG_USER}
-    secureJsonData:
-      password: 'sidecar'
+    type: frser-sqlite-datasource
     jsonData:
-      database: ${SIDECAR_PG_DATABASE}
-      sslmode: 'disable'
-      maxOpenConns: 100
-      maxIdleConns: 100
-      maxIdleConnsAuto: true
-      connMaxLifetime: 14400
-      timescaledb: false
+      path: ${SIDECAR_DB_PATH}

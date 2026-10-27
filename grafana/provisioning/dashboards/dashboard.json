@@ -36,7 +36,7 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
+        "type": "frser-sqlite-datasource",
         "uid": "sidecar_uid"
       },
       "fieldConfig": {
@@ -115,31 +115,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "WITH latest_tips AS (\n    SELECT DISTINCT ON (pool_id) *\n    FROM node_tips \n    ORDER BY pool_id, updated_at DESC\n)\nSELECT CASE\n    WHEN COUNT(*) FILTER (WHERE pool_id = 'starting') > 0 THEN 'Generating Synthetic Chain'\n    WHEN COUNT(*) FILTER (WHERE hash IS NULL) > 0 THEN 'Degraded'\n    WHEN COUNT(DISTINCT hash) = 1 AND SUM(CASE WHEN hash IS NULL THEN 1 ELSE 0 END) = 0 \n        THEN 'Healthy'\n    ELSE 'Diverged' \nEND AS status\nFROM latest_tips;",
           "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "WITH latest_tips AS (\n    SELECT *\n    FROM node_tips\n)\nSELECT CASE\n    WHEN COUNT(*) FILTER (WHERE pool_id = 'starting') > 0 THEN 'Generating Synthetic Chain'\n    WHEN COUNT(*) FILTER (WHERE hash IS NULL) > 0 THEN 'Degraded'\n    WHEN COUNT(DISTINCT hash) = 1 AND SUM(CASE WHEN hash IS NULL THEN 1 ELSE 0 END) = 0 \n        THEN 'Healthy'\n    ELSE 'Diverged' \nEND AS status\nFROM latest_tips;",
+          "rawQueryText": "WITH latest_tips AS (\n    SELECT *\n    FROM node_tips\n)\nSELECT CASE\n    WHEN COUNT(*) FILTER (WHERE pool_id = 'starting') > 0 THEN 'Generating Synthetic Chain'\n    WHEN COUNT(*) FILTER (WHERE hash IS NULL) > 0 THEN 'Degraded'\n    WHEN COUNT(DISTINCT hash) = 1 AND SUM(CASE WHEN hash IS NULL THEN 1 ELSE 0 END) = 0 \n        THEN 'Healthy'\n    ELSE 'Diverged' \nEND AS status\nFROM latest_tips;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
         }
       ],
       "title": "Consensus",
@@ -1688,7 +1674,7 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
+        "type": "frser-sqlite-datasource",
         "uid": "sidecar_uid"
       },
       "fieldConfig": {
@@ -1785,31 +1771,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT \n    pool_id,\n    block, \n    SUBSTRING(hash FROM 1 FOR 8) AS hash\nFROM node_tips;",
           "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "SELECT \n    pool_id,\n    block, \n    substr(hash, 1, 8) AS hash\nFROM node_tips;",
+          "rawQueryText": "SELECT \n    pool_id,\n    block, \n    substr(hash, 1, 8) AS hash\nFROM node_tips;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
         }
       ],
       "title": "",
@@ -2124,7 +2096,7 @@
       "panels": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
           "fieldConfig": {
@@ -2148,61 +2120,32 @@
           "targets": [
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "rawQuery": true,
-              "rawSql": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
               "refId": "A",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              },
-              "table": "ci_nodes"
+              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
+              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             },
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "hide": false,
-              "rawQuery": true,
-              "rawSql": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
               "refId": "B",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              }
+              "hide": false,
+              "queryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
+              "rawQueryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             }
           ],
           "title": "Physical Topology",
@@ -2210,7 +2153,7 @@
         },
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
           "fieldConfig": {
@@ -2234,61 +2177,32 @@
           "targets": [
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "rawQuery": true,
-              "rawSql": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
               "refId": "A",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              },
-              "table": "ci_nodes"
+              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
+              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             },
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "hide": false,
-              "rawQuery": true,
-              "rawSql": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
               "refId": "B",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              }
+              "hide": false,
+              "queryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
+              "rawQueryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             }
           ],
           "title": "Localroot Topology",
@@ -6084,7 +5998,8 @@
       "panels": [
         {
           "datasource": {
-            "uid": "sidecar_uid"
+            "uid": "sidecar_uid",
+            "type": "frser-sqlite-datasource"
           },
           "fieldConfig": {
             "defaults": {
@@ -6174,7 +6089,7 @@
         },
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
           "fieldConfig": {
@@ -6278,31 +6193,17 @@
           "targets": [
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "rawQuery": true,
-              "rawSql": "select epoch_no,fees,treasury,reserves from ada_pots where source='dbsync' order by epoch_no desc limit 5;",
               "refId": "A",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              }
+              "queryText": "select epoch_no,fees,treasury,reserves from ada_pots where source='dbsync' order by epoch_no desc limit 5;",
+              "rawQueryText": "select epoch_no,fees,treasury,reserves from ada_pots where source='dbsync' order by epoch_no desc limit 5;",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             }
           ],
           "title": "Cardano DB Sync",
@@ -6310,7 +6211,7 @@
         },
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
+            "type": "frser-sqlite-datasource",
             "uid": "sidecar_uid"
           },
           "fieldConfig": {
@@ -6414,31 +6315,17 @@
           "targets": [
             {
               "datasource": {
-                "type": "grafana-postgresql-datasource",
+                "type": "frser-sqlite-datasource",
                 "uid": "sidecar_uid"
               },
-              "editorMode": "code",
-              "format": "table",
-              "rawQuery": true,
-              "rawSql": "select epoch_no,fees,treasury,reserves from ada_pots where source='yaci' order by epoch_no desc limit 5;",
               "refId": "A",
-              "sql": {
-                "columns": [
-                  {
-                    "parameters": [],
-                    "type": "function"
-                  }
-                ],
-                "groupBy": [
-                  {
-                    "property": {
-                      "type": "string"
-                    },
-                    "type": "groupBy"
-                  }
-                ],
-                "limit": 50
-              }
+              "queryText": "select epoch_no,fees,treasury,reserves from ada_pots where source='yaci' order by epoch_no desc limit 5;",
+              "rawQueryText": "select epoch_no,fees,treasury,reserves from ada_pots where source='yaci' order by epoch_no desc limit 5;",
+              "queryType": "table",
+              "timeColumns": [
+                "time",
+                "ts"
+              ]
             }
           ],
           "title": "Yaci Store",

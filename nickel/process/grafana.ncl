@@ -14,7 +14,10 @@ fun input =>
   # grafana doesn't try to download its default bundled apps.
   command =
     let plugins_dir = "$PWD/%{input.directory}/grafana-plugins" in
-    "mkdir -p \"%{plugins_dir}\""
+    # Consumed by grafana/provisioning/datasources/datasources.yaml (sidecar_uid).
+    # Exported here (rather than in `environment`) so it can be absolute.
+    "export SIDECAR_DB_PATH=\"$PWD/%{input.directory}/%{input.sidecar.database}\""
+    ++ " && mkdir -p \"%{plugins_dir}\""
     ++ " && for p in \"$GRAFANA_CORE_PLUGINS\"/*; do ln -sfn \"$(readlink -f \"$p\")\" \"%{plugins_dir}/$(basename \"$p\")\"; done"
     ++ " && grafana server"
     ++ " --homepath \"$(dirname $(dirname $(readlink -f $(command -v grafana))))/share/grafana\""
@@ -30,14 +33,9 @@ fun input =>
     "GF_SECURITY_ADMIN_PASSWORD=cardano",
     "GF_AUTH_ANONYMOUS_ENABLED=true",
     "GF_FEATURE_TOGGLES_splashScreen=false",
-    # Consumed by grafana/provisioning/datasources/datasources.yaml (sidecar_uid).
-    "SIDECAR_PG_URL=%{input.ip}:%{std.string.from_number input.postgres.port}",
-    "SIDECAR_PG_USER=%{input.postgres.user}",
-    "SIDECAR_PG_DATABASE=%{input.postgres.database}",
   ],
   depends_on = {
     victoria-metrics = { condition = 'process_healthy },
-    postgres = { condition = 'process_healthy },
   },
   readiness_probe = {
     exec = {

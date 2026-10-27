@@ -45,8 +45,8 @@ let export = {
       address | String | default = "127.0.0.1",
       port | Number | default = 9090,
     },
-    toxiproxy = {
-       port | Number | default = 8474,
+    envoy = {
+       port | Number | default = 9091,
     },
     sidecar = {
       # SQLite database file, relative to the devnet directory.

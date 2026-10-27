@@ -1,17 +1,16 @@
-let { Scenario, Group, .. } = import "./schemas/scenario.ncl"
+let { Scenario, Node, .. } = import "./schemas/scenario.ncl"
 in
 let { InputParams, TestnetConfig, .. } = import "./schemas/testnet.ncl"
 in
-let mkNodesArg | Array Group -> String =
-  fun groups =>
-    groups
-      |> std.array.map (fun r => std.array.replicate r.count (std.string.from_enum r.role))
-      |> std.array.flatten
+let mkNodesArg | Array Node -> String =
+  fun nodes =>
+    nodes
+      |> std.array.map (fun n => std.string.from_enum n.role)
       |> std.array.sort (std.function.flip std.string.compare)
       |> std.string.join ","
 in
 let mkTestnetConfig | Scenario -> TestnetConfig = fun s => {
-  nodes_arg = mkNodesArg s.topology.groups,
+  nodes_arg = mkNodesArg s.topology.nodes,
   genesis = s.genesis,
   testnet_magic = s.topology.magic,
 }

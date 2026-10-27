@@ -23,7 +23,13 @@ To reconfigure the testnet or scenario params, change `nickel/scenarios/<scenari
 To isolate `node1` manually run in another `nix develop`:
 
 ```
-toxiproxy-cli toggle node1
+./scripts/isolate-node.sh 1
+```
+
+to reset:
+
+```
+./scripts/isolate-node.sh reset
 ```
 
 ## Logs and Dashboards

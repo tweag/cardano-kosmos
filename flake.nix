@@ -198,7 +198,6 @@
               pkgs.which
               pkgs.xxd
               pkgs.jq
-              pkgs.toxiproxy
               pkgs.gnused
               pkgs.moreutils
               pkgs.ripgrep
@@ -209,6 +208,7 @@
               freshPkgs.grafana
               freshPkgs.nickel
               freshPkgs.sqlite
+              freshPkgs.envoy-bin
             ];
           });
           cluster = shell;

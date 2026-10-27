@@ -94,7 +94,7 @@ trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColour
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
 
-# substitute ports for toxiproxy
+# substitute ports for proxy
 read -r \
   ip \
   node_ports_base \
@@ -110,6 +110,12 @@ node1Port=$(cat "$DEVENV_PATH/node-data/node1/port")
 portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' "$DEVENV_PATH/node-data/node1/topology.json")
 
 echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
+
+envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 '"$node_ports_base"' (import "'"$scenarioFile"'") '"$portsOfNodes"')' | nickel export --format json)
+
+echo $envoyConfig | jq '.main' > "$DEVENV_PATH/envoy.json"
+echo $envoyConfig | jq '.clusters' > "$DEVENV_PATH/cds.json"
+echo $envoyConfig | jq '.listeners' > "$DEVENV_PATH/lds.json"
 
 for node_idx in $(seq 1 $num_of_nodes); do
   newTopology=$(echo '(import "nickel/mk-node-topology.ncl") "'"$ip"'" '"$node_ports_base"' '"$node_idx"' '"$num_of_nodes"'' | nickel export --format json)

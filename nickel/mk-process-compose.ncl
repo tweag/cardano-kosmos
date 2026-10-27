@@ -9,10 +9,9 @@ let
   mk_vlagent = import "./process/vlagent.ncl",
   mk_victoria_metrics = import "./process/victoria-metrics.ncl",
   mk_grafana = import "./process/grafana.ncl",
-  mk_toxiproxy_server = import "./process/toxiproxy-server.ncl",
-  mk_toxiproxy_setup = import "./process/toxiproxy-setup.ncl",
   mk_sidecar = import "./process/sidecar.ncl",
   mk_canary = import "./process/canary.ncl",
+  mk_envoy = import "./process/envoy.ncl",
   oracle_process = import "./process/oracle.ncl",
 in fun input scenario portsOfNodes =>
 {
@@ -24,8 +23,7 @@ in fun input scenario portsOfNodes =>
     chairman = mk_chairman input scenario,
     victoria-logs = mk_victoria_logs input,
     vlagent = mk_vlagent input,
-    toxiproxy-server = mk_toxiproxy_server input,
-    toxiproxy-setup = mk_toxiproxy_setup input scenario portsOfNodes,
+    envoy = mk_envoy input,
     oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input,

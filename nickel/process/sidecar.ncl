@@ -4,9 +4,8 @@ let
 in
 fun input scenario =>
 let roles =
-  scenario.topology.groups
-  |> std.array.flat_map (fun g =>
-    std.array.replicate g.count (std.string.from_enum g.role))
+  scenario.topology.nodes
+  |> std.array.map (fun n => std.string.from_enum n.role)
   |> std.string.join ","
 in
 {
@@ -14,7 +13,7 @@ in
   environment = [
     "SIDECAR_DB=%{input.directory}/%{input.sidecar.database}",
     "DEVNET_DIR=%{input.directory}",
-    "NUM_NODES=%{std.string.from_number (count_nodes scenario.topology.groups)}",
+    "NUM_NODES=%{std.string.from_number (count_nodes scenario.topology.nodes)}",
     "NODE_ROLES=%{roles}",
     "TESTNET_MAGIC=%{std.string.from_number scenario.topology.magic}",
     "CARDANO_CLI=%{input.cardano_binaries.cardano_cli}",

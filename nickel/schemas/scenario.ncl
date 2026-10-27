@@ -1,12 +1,12 @@
 let { sum, .. } = import "./../prelude.ncl" in
-let { map, filter, fold_left, generate, partition, length, .. } = std.array in
+let { map, filter, fold_left, generate, partition, length, flatten, .. } = std.array in
 
 # Makes sure that '.stake' is always == 1 in topology
 # if a field is missing, it will be derived
-let StakeConstraint = std.contract.custom (fun label groups =>
-  let spos = filter (fun g => g.role == 'spo) groups in
+let StakeConstraint = std.contract.custom (fun label nodes =>
+  let spos = filter (fun n => n.role == 'spo) nodes in
   let partitioned = spos |> partition (std.record.has_field "stake") in
-  let explicit = partitioned.right |> map (fun g => g.stake) |> sum in
+  let explicit = partitioned.right |> map (fun n => n.stake) |> sum in
   let missing = length partitioned.wrong in
   if explicit > 1 then
     std.contract.blame_with_message 
@@ -14,7 +14,7 @@ let StakeConstraint = std.contract.custom (fun label groups =>
       label
   else if missing > 0 && explicit == 1 then
     std.contract.blame_with_message 
-      "Some SPO groups are missing a 'stake' field, but explicit stakes already sum to 1." 
+      "Some SPO nodes are missing a 'stake' field, but explicit stakes already sum to 1." 
       label
   else if missing == 0 && explicit != 1 then
     std.contract.blame_with_message
@@ -23,47 +23,55 @@ let StakeConstraint = std.contract.custom (fun label groups =>
   else
     let remaining = 1 - explicit in
     let derived = if missing > 0 then remaining / missing else 0 in
-    'Ok (groups
-      |> map (fun g =>
-        if g.role == 'spo && !(std.record.has_field "stake" g)
-        then g & { stake = derived }
-        else g
+    'Ok (nodes
+      |> map (fun n =>
+        if n.role == 'spo && !(std.record.has_field "stake" n)
+        then n & { stake = derived }
+        else n
       )
     )
 ) in
 
 let export = {
-  Group = {
+  Node = {
     name | String,
     role | [| 'spo, 'relay |],
-    count | Number,
     stake | Number | optional,
   },
 
-  count_dreps | Array Group -> Number =
-    fun groups => groups
-      |> map (fun g => if g.role == 'spo then g.count else 0)
+  Link = {
+    from | String,
+    to | String,
+  },
+
+  Topology = {
+    magic | Number,
+    nodes | Array Node | StakeConstraint,
+    links | Array Link,
+    num_of_nodes | Number | default = count_nodes nodes,
+  },
+
+  count_dreps | Array Node -> Number = fun nodes =>
+    nodes
+      |> filter (fun n => n.role =='spo)
+      |> map (fun n => 1)
       |> sum,
 
-  count_nodes | Array Group -> Number =
-    fun groups => groups
-      |> map (fun g => g.count)
+  count_nodes | Array Node -> Number = fun nodes =>
+    nodes
+      |> map (fun n => 1)
       |> sum,
 
-  groupsWithIndices | Array Group -> Array { group | Group, indices | Array Number } =
-    fun groups => groups
-      |> filter (fun g => g.role == 'spo)
-      |> fold_left (fun acc g => 
-          let start = acc.next_index in
-          let count = g.count in
-          let indices' = generate (fun i => start + i) count in
-          {
-            next_index = start + count,
-            list = acc.list @ [{ group = g, indices = indices' }]
-          }
-        ) { next_index = 1, list = [] }
-      |> std.record.get "list",
-  
+  mk_neighbours | String -> Array Node -> Array Link = fun name nodes =>
+    nodes
+      |> filter (fun n => n.name != name)
+      |> map (fun n => { from = name, to = n.name } ),
+
+  mk_complete_links | Array Node -> Array Link = fun nodes =>
+    nodes
+      |> map (fun n => mk_neighbours n.name nodes)
+      |> flatten,
+
   Genesis = {
     epoch_length_slots | Number | default = 360,
     slot_length_seconds | Number | default = 0.2,
@@ -87,11 +95,7 @@ let export = {
   Scenario = {
     name | String,
     description | String,
-    topology = {
-      magic | Number,
-      groups | Array Group | StakeConstraint,
-      num_of_nodes | Number | default = count_nodes groups,
-    },
+    topology | Topology, 
     genesis | Genesis,
     faults | Array Fault | default = [],
     observability | {

@@ -14,7 +14,10 @@ fun input =>
   # grafana doesn't try to download its default bundled apps.
   command =
     let plugins_dir = "$PWD/%{input.directory}/grafana-plugins" in
-    "mkdir -p \"%{plugins_dir}\""
+    # Consumed by grafana/provisioning/datasources/datasources.yaml (sidecar_uid).
+    # Exported here (rather than in `environment`) so it can be absolute.
+    "export SIDECAR_DB_PATH=\"$PWD/%{input.directory}/%{input.sidecar.database}\""
+    ++ " && mkdir -p \"%{plugins_dir}\""
     ++ " && for p in \"$GRAFANA_CORE_PLUGINS\"/*; do ln -sfn \"$(readlink -f \"$p\")\" \"%{plugins_dir}/$(basename \"$p\")\"; done"
     ++ " && grafana server"
     ++ " --homepath \"$(dirname $(dirname $(readlink -f $(command -v grafana))))/share/grafana\""
@@ -42,6 +45,6 @@ fun input =>
     period_seconds = 2,
     timeout_seconds = 1,
     success_threshold = 1,
-    failure_threshold = 10,
+    failure_threshold = 60,
   }
 }

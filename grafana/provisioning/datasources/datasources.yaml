@@ -6,9 +6,12 @@
 #   - VictoriaMetrics exposes a Prometheus-compatible query API (port 8428).
 #   - VictoriaLogs exposes a Loki-compatible query API (port 9428).
 #
-# NOTE: the ignite dashboards also reference postgres datasources
-# (`dbsync_uid`, `sidecar_uid`) that have no equivalent in the kosmos devnet;
-# panels relying on those simply won't render data.
+#   - The `sidecar` process (scripts/sidecar.sh) populates a local SQLite
+#     database (`sidecar_uid`); its path comes from SIDECAR_DB_PATH, exported
+#     by nickel/process/grafana.ncl.
+#
+# NOTE: `dbsync_uid` has no equivalent in the kosmos devnet; panels relying on
+# it simply won't render data.
 apiVersion: 1
 
 datasources:
@@ -27,3 +30,9 @@ datasources:
     access: proxy
     url: http://127.0.0.1:9428/select/logsql
     isDefault: false
+
+  - name: sidecar
+    uid: sidecar_uid
+    type: frser-sqlite-datasource
+    jsonData:
+      path: ${SIDECAR_DB_PATH}

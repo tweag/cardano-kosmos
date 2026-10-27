@@ -11,6 +11,7 @@ let
   mk_grafana = import "./process/grafana.ncl",
   mk_toxiproxy_server = import "./process/toxiproxy-server.ncl",
   mk_toxiproxy_setup = import "./process/toxiproxy-setup.ncl",
+  mk_sidecar = import "./process/sidecar.ncl",
   oracle_process = import "./process/oracle.ncl",
 in fun input scenario portsOfNodes =>
 {
@@ -28,5 +29,6 @@ in fun input scenario portsOfNodes =>
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input,
     grafana = mk_grafana input,
+    sidecar = mk_sidecar input scenario,
   } else {}),
 } | Project

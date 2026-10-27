@@ -185,7 +185,7 @@
           (map (p: {
             name = p.pname;
             path = p;
-          }) (with freshPkgs.grafanaPlugins; [prometheus loki]));
+          }) (with freshPkgs.grafanaPlugins; [prometheus loki frser-sqlite-datasource]));
       in
         {
           default = shell.dev.overrideAttrs (attrs: {
@@ -208,6 +208,7 @@
               freshPkgs.vlagent
               freshPkgs.grafana
               freshPkgs.nickel
+              freshPkgs.sqlite
             ];
           });
           cluster = shell;

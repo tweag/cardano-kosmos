@@ -8,6 +8,11 @@
 #   ci_nodes/ci_edges  - physical topology graph
 #   cn_edges           - localroot topology graph (from nodeN/topology.json)
 #   ada_pots           - pots comparison (no dbsync/yaci in kosmos; left empty)
+#   block              - per-block size, from cardano-tracer's machine-format
+#                        logs (Forge.Loop.AdoptedBlock); replaces dbsync's
+#                        `block` table for the Chain Load panel
+#   protocol_params    - current max block body size (cardano-cli)
+#   canary             - TX canary results, written by scripts/canary.sh
 #
 # Configured through environment variables set by nickel/process/sidecar.ncl.
 
@@ -19,6 +24,10 @@ set -o pipefail
 NODE_ROLES="${NODE_ROLES:-}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
+# cardano-tracer writes ForMachine JSON logs to ${LOGS_DIR}/<host>_<port>/.
+LOGS_DIR="${LOGS_DIR:-${DEVNET_DIR}/logs}"
+# Only tracer logs written after this marker belong to the current run.
+RUN_MARKER="$(dirname "${SIDECAR_DB}")/.sidecar-run-marker"
 
 # Grafana reads the database concurrently; wait on locks instead of failing.
 sql_sc() { sqlite3 -bail -batch -cmd ".timeout 5000" "${SIDECAR_DB}" "$@" >/dev/null; }
@@ -37,6 +46,9 @@ DROP TABLE IF EXISTS ci_nodes;
 DROP TABLE IF EXISTS ci_edges;
 DROP TABLE IF EXISTS cn_edges;
 DROP TABLE IF EXISTS ada_pots;
+DROP TABLE IF EXISTS block;
+DROP TABLE IF EXISTS protocol_params;
+DROP TABLE IF EXISTS canary;
 
 CREATE TABLE node_tips (
     pool_id VARCHAR PRIMARY KEY,
@@ -76,7 +88,35 @@ CREATE TABLE ada_pots (
     reserves NUMERIC,
     PRIMARY KEY (epoch_no, source)
 );
+
+CREATE TABLE block (
+    hash CHAR(64) PRIMARY KEY,
+    slot BIGINT NOT NULL,
+    size BIGINT NOT NULL,
+    time BIGINT NOT NULL -- unix epoch seconds
+);
+CREATE INDEX block_time ON block (time);
+
+CREATE TABLE protocol_params (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    max_block_size BIGINT,
+    max_block_ex_mem BIGINT,
+    max_block_ex_steps BIGINT
+);
+
+-- Populated by scripts/canary.sh (see there for column semantics).
+CREATE TABLE canary (
+    address TEXT NOT NULL,
+    sequence_no INTEGER NOT NULL,
+    txid CHAR(64) NOT NULL,
+    submit_slot BIGINT NOT NULL,
+    seen_lo BIGINT NOT NULL,
+    seen_hi BIGINT NOT NULL,
+    time BIGINT NOT NULL,
+    PRIMARY KEY (address, sequence_no)
+);
 SQL
+    touch "${RUN_MARKER}"
 }
 
 # Static topology: every node plus the observability services, all attached
@@ -194,6 +234,37 @@ update_graph_stats() {
     [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
+# Every forged block is reported exactly once, by its forger, as
+# Forge.Loop.AdoptedBlock (hash, slot, blockSize). Re-scanning is idempotent.
+update_blocks() {
+    local files=()
+    mapfile -t files < <(find "${LOGS_DIR}" -mindepth 2 -maxdepth 2 \
+        -name 'node-*.json' -newer "${RUN_MARKER}" 2>/dev/null)
+    [ "${#files[@]}" -gt 0 ] || return 0
+
+    local sql
+    sql="$(grep -h '"ns":"Forge.Loop.AdoptedBlock"' "${files[@]}" 2>/dev/null \
+        | jq -r 'select(.data.blockHash and .data.slot and .data.blockSize)
+            | "INSERT OR IGNORE INTO block (hash, slot, size, time) VALUES (\u0027\(.data.blockHash)\u0027, \(.data.slot), \(.data.blockSize), \(.at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601));"' 2>/dev/null)"
+    [ -n "${sql}" ] && sql_sc <<<"BEGIN;"$'\n'"${sql}"$'\n'"COMMIT;"
+}
+
+update_protocol_params() {
+    local out size mem steps
+    out="$("${CARDANO_CLI}" query protocol-parameters --testnet-magic "${TESTNET_MAGIC}" \
+        --socket-path "${DEVNET_DIR}/socket/node1/sock" 2>/dev/null)" || return 0
+    read -r size mem steps < <(jq -r '"\(.maxBlockBodySize) \(.maxBlockExecutionUnits.memory) \(.maxBlockExecutionUnits.steps)"' <<<"${out}" 2>/dev/null)
+    [[ "${size}" =~ ^[0-9]+$ ]] || return 0
+    sql_sc <<SQL
+INSERT INTO protocol_params (id, max_block_size, max_block_ex_mem, max_block_ex_steps)
+VALUES (1, ${size}, ${mem:-NULL}, ${steps:-NULL})
+ON CONFLICT (id) DO UPDATE SET
+    max_block_size = EXCLUDED.max_block_size,
+    max_block_ex_mem = EXCLUDED.max_block_ex_mem,
+    max_block_ex_steps = EXCLUDED.max_block_ex_steps;
+SQL
+}
+
 main() {
     setup_database || { echo "sidecar: database setup failed" >&2; exit 1; }
     populate_topology
@@ -204,6 +275,8 @@ main() {
         sleep_time="${INTERVAL}"
         update_tips || sleep_time=1
         update_graph_stats || true
+        update_blocks || true
+        update_protocol_params || true
         sleep "${sleep_time}"
     done
 }

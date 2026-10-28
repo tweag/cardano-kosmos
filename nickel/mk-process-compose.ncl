@@ -12,6 +12,7 @@ let
   mk_toxiproxy_server = import "./process/toxiproxy-server.ncl",
   mk_toxiproxy_setup = import "./process/toxiproxy-setup.ncl",
   mk_sidecar = import "./process/sidecar.ncl",
+  mk_canary = import "./process/canary.ncl",
   oracle_process = import "./process/oracle.ncl",
 in fun input scenario portsOfNodes =>
 {
@@ -30,5 +31,6 @@ in fun input scenario portsOfNodes =>
     victoria-metrics = mk_victoria_metrics input,
     grafana = mk_grafana input,
     sidecar = mk_sidecar input scenario,
+    canary = mk_canary input scenario,
   } else {}),
 } | Project

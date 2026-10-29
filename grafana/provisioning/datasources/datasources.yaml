@@ -10,8 +10,9 @@
 #     database (`sidecar_uid`); its path comes from SIDECAR_DB_PATH, exported
 #     by nickel/process/grafana.ncl.
 #
-# NOTE: `dbsync_uid` has no equivalent in the kosmos devnet; panels relying on
-# it simply won't render data.
+# NOTE: there is no `dbsync_uid` in kosmos. The panels ignite backs with
+# cardano-db-sync (Chain Load, TX canaries) query `sidecar_uid` instead; see
+# scripts/sidecar.sh and scripts/canary.sh.
 apiVersion: 1
 
 datasources:

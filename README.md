@@ -37,9 +37,6 @@ metrics dashboard for the testnet. These are available at:
   available once the `grafana` process comes up. You shouldn't need to log in,
   but if you do, the credentials are `cardano/cardano`.
 
-Some panels haven't yet been ported to grafana; it is expected that some panels
-will fail with a `Datasource dbsync_uid was not found` error.
-
 
 ## Work organization
 

@@ -2825,8 +2825,8 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "dbsync_uid"
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
       },
       "fieldConfig": {
         "defaults": {
@@ -2908,31 +2908,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "dbsync_uid"
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT\n DATE_BIN('5 min',itime, '2000-1-1') AS time,\n AVG(rel_size) AS avg_rel_size,\n AVG(rel_mem) AS avg_rel_mem,\n AVG(rel_steps) AS avg_rel_steps\n FROM (\n SELECT\n MIN(b.time) AS itime,\n 1.0 * MIN(b.size) / MIN(p.max_block_size) AS rel_size,\n SUM(r.unit_mem) / MIN(p.max_block_ex_mem) AS rel_mem,\n SUM(r.unit_steps) / MIN(p.max_block_ex_steps) AS rel_steps\n FROM block b\n LEFT JOIN tx t\n ON b.id = t.block_id\n LEFT JOIN redeemer r\n ON t.id = r.tx_id\n LEFT JOIN epoch_param p\n ON b.epoch_no = p.epoch_no\n WHERE $__timeFilter(time)\n GROUP BY b.hash\n ) a                                        \n GROUP BY time\n ORDER BY time;",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "SELECT\n (b.time / 300) * 300 AS time,\n AVG(1.0 * b.size / p.max_block_size) AS avg_rel_size\nFROM block b\nCROSS JOIN protocol_params p\nWHERE b.time >= $__from / 1000 AND b.time <= $__to / 1000\nGROUP BY 1\nORDER BY 1;",
+          "rawQueryText": "SELECT\n (b.time / 300) * 300 AS time,\n AVG(1.0 * b.size / p.max_block_size) AS avg_rel_size\nFROM block b\nCROSS JOIN protocol_params p\nWHERE b.time >= $__from / 1000 AND b.time <= $__to / 1000\nGROUP BY 1\nORDER BY 1;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ],
+          "refId": "A"
         }
       ],
       "title": "Chain Load",
@@ -2949,8 +2935,8 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "dbsync_uid"
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
       },
       "fieldConfig": {
         "defaults": {
@@ -3002,31 +2988,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "dbsync_uid"
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select * from get_canary_loss();",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "SELECT COALESCE(SUM((max_seq + 1) - count_seq), 0) AS total_missing\nFROM (\n  SELECT MAX(sequence_no) AS max_seq, COUNT(DISTINCT sequence_no) AS count_seq\n  FROM canary\n  GROUP BY address\n);",
+          "rawQueryText": "SELECT COALESCE(SUM((max_seq + 1) - count_seq), 0) AS total_missing\nFROM (\n  SELECT MAX(sequence_no) AS max_seq, COUNT(DISTINCT sequence_no) AS count_seq\n  FROM canary\n  GROUP BY address\n);",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ],
+          "refId": "A"
         }
       ],
       "title": "TX Canaries Lost",
@@ -3034,8 +3006,8 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "dbsync_uid"
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
       },
       "fieldConfig": {
         "defaults": {
@@ -3117,31 +3089,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "dbsync_uid"
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select time,delay from get_canary_delay() where $__timeFilter(\"time\")",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "SELECT\n  c.time AS time,\n  COALESCE((SELECT MIN(b.slot) FROM block b WHERE b.slot > c.seen_lo AND b.slot <= c.seen_hi), c.seen_hi) - c.submit_slot AS delay\nFROM canary c\nWHERE c.time >= $__from / 1000 AND c.time <= $__to / 1000\nORDER BY c.time;",
+          "rawQueryText": "SELECT\n  c.time AS time,\n  COALESCE((SELECT MIN(b.slot) FROM block b WHERE b.slot > c.seen_lo AND b.slot <= c.seen_hi), c.seen_hi) - c.submit_slot AS delay\nFROM canary c\nWHERE c.time >= $__from / 1000 AND c.time <= $__to / 1000\nORDER BY c.time;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ],
+          "refId": "A"
         }
       ],
       "title": "TX Monitoring Delay",
@@ -3149,8 +3107,8 @@
     },
     {
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "dbsync_uid"
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
       },
       "description": "Fraction of canary TXs accepted within 2 blocks.",
       "fieldConfig": {
@@ -3206,31 +3164,17 @@
       "targets": [
         {
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "dbsync_uid"
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
           },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "select * from get_canary_percentage($__timeFrom(), $__timeTo())",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 50
-          }
+          "queryText": "WITH incl AS (\n  SELECT c.submit_slot,\n    COALESCE((SELECT MIN(b.slot) FROM block b WHERE b.slot > c.seen_lo AND b.slot <= c.seen_hi), c.seen_hi) AS slot\n  FROM canary c\n  WHERE c.time >= $__from / 1000 AND c.time <= $__to / 1000\n)\nSELECT 100.0 * AVG(\n  (SELECT COUNT(*) FROM block b WHERE b.slot >= i.submit_slot AND b.slot <= i.slot) <= 2\n) AS rate\nFROM incl i;",
+          "rawQueryText": "WITH incl AS (\n  SELECT c.submit_slot,\n    COALESCE((SELECT MIN(b.slot) FROM block b WHERE b.slot > c.seen_lo AND b.slot <= c.seen_hi), c.seen_hi) AS slot\n  FROM canary c\n  WHERE c.time >= $__from / 1000 AND c.time <= $__to / 1000\n)\nSELECT 100.0 * AVG(\n  (SELECT COUNT(*) FROM block b WHERE b.slot >= i.submit_slot AND b.slot <= i.slot) <= 2\n) AS rate\nFROM incl i;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ],
+          "refId": "A"
         }
       ],
       "title": "TX 2 Blocks Acceptance Rate",

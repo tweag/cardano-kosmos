@@ -52,6 +52,16 @@ let export = {
       # SQLite database file, relative to the devnet directory.
       database | String | default = "sidecar.sqlite",
     },
+    # TX canaries (scripts/canary.sh); defaults match ignite. Times in seconds.
+    canary = {
+      initial_delay | Number | default = 120,
+      period | Number | default = 300,
+      interval | Number | default = 270,
+      jitter | Number | default = 60,
+      lead | Number | default = 10,
+      ttl | Number | default = 260,
+      poll | Number | default = 0.2,
+    },
   },
   TestnetConfig = {
     nodes_arg | String,

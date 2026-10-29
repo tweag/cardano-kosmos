@@ -4,8 +4,8 @@
 ; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
 ;
 [subrepo]
-	remote = git@github.com:tweag/ouroboros-consensus.git
-	branch = 0fe302e79ba7aa163bcd2fb8a6a3e482f7210d06
+	remote = git@github.com:IntersectMBO/ouroboros-consensus.git
+	branch = peras/the-big-pr
 	commit = 0fe302e79ba7aa163bcd2fb8a6a3e482f7210d06
 	parent = 416db6bf4983683ebf46c264bb161b905b9dee37
 	method = merge

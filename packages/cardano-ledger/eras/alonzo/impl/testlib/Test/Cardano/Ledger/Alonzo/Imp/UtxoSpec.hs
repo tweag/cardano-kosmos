@@ -57,7 +57,7 @@ spec = describe "UTXO" $ do
   it "Collateral input already spent" $ do
     addr <- freshKeyAddr_
     spentTxIn <- sendCoinTo addr (Coin 10_000_000)
-    submitTx_ $
+    submitAnyTx_ $
       mkBasicTx mkBasicTxBody & bodyTxL . inputsTxBodyL .~ [spentTxIn]
     let tx =
           mkBasicTx mkBasicTxBody
@@ -69,9 +69,7 @@ spec = describe "UTXO" $ do
   forM_ (eraLanguages @era) $ \lang ->
     withSLanguage lang $ \slang ->
       describe (show lang) $ do
-        -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/723
-        -- TODO: Re-enable after issues are resolved, by removing this override
-        disableInConformanceIt "Too many execution units for tx" $ do
+        it "Too many execution units for tx" $ do
           txIn <- produceScript . hashPlutusScript $ alwaysSucceedsWithDatum slang
           maxExUnits <- getsNES $ nesEsL . curPParamsEpochStateL . ppMaxTxExUnitsL
           let

@@ -32,6 +32,7 @@ module Test.Cardano.Ledger.Core.Arbitrary (
   uniformSubSet,
   uniformSubMap,
   uniformSubMapElems,
+  genOrderedPair,
 
   -- * Era-aware generators
   genEraProtVer,
@@ -77,7 +78,10 @@ import Cardano.Ledger.BaseTypes (
  )
 import qualified Cardano.Ledger.BaseTypes as BaseTypes
 import Cardano.Ledger.Binary (EncCBOR, Sized, mkSized)
-import Cardano.Ledger.Block (BlockHeaderVersionInfo (..))
+import Cardano.Ledger.Block (
+  BlockHeaderVersionInfo (..),
+  EbReferencesAnnouncement (..),
+ )
 import Cardano.Ledger.Coin (Coin (..), CompactForm (..), DeltaCoin (..))
 import Cardano.Ledger.Core
 import Cardano.Ledger.Credential (Credential (..), Ptr (..), SlotNo32 (..), StakeReference (..))
@@ -288,6 +292,12 @@ instance Arbitrary ProtVer where
 instance Arbitrary BlockHeaderVersionInfo where
   arbitrary = BlockHeaderVersionInfo <$> arbitrary <*> arbitrary
 
+instance Arbitrary EbReferencesAnnouncement where
+  arbitrary = EbReferencesAnnouncement <$> arbitrary <*> arbitrary
+
+instance Arbitrary EbAnnouncement where
+  arbitrary = EbAnnouncement <$> arbitrary <*> arbitrary <*> arbitrary
+
 -- | Generate a 'ProtVer' whose major version falls within the era's accepted range.
 genEraProtVer :: forall era. Era era => Gen ProtVer
 genEraProtVer =
@@ -357,6 +367,9 @@ instance Arbitrary (KeyHash r) where
 
 instance Arbitrary (VRFVerKeyHash r) where
   arbitrary = VRFVerKeyHash <$> genHash
+
+instance Arbitrary BlsVerKeyHash where
+  arbitrary = BlsVerKeyHash <$> genHash
 
 instance Arbitrary (VKey kd) where
   arbitrary = VKey <$> arbitrary
@@ -703,7 +716,7 @@ instance (Era era, Arbitrary (Accounts era)) => Arbitrary (DState era) where
   arbitrary = DState <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
 
 instance Arbitrary (PState era) where
-  arbitrary = PState <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
+  arbitrary = PState <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
 
 instance Arbitrary Anchor where
   arbitrary = Anchor <$> arbitrary <*> arbitrary
@@ -994,3 +1007,9 @@ genericShrinkMemo ::
   a era ->
   [a era]
 genericShrinkMemo = fmap (mkMemoizedEra @era) . genericShrink . getMemoRawType
+
+genOrderedPair :: forall a. (Arbitrary a, Ord a) => Gen (a, a)
+genOrderedPair = do
+  a <- arbitrary
+  b <- arbitrary
+  pure (max a b, min a b)

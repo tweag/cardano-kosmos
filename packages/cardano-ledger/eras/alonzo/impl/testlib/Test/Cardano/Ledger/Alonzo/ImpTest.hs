@@ -18,7 +18,8 @@
 
 module Test.Cardano.Ledger.Alonzo.ImpTest (
   module Test.Cardano.Ledger.Mary.ImpTest,
-  AlonzoEraImp (..),
+  AlonzoEraImp,
+  scriptTestContexts,
   impLookupPlutusScript,
   malformedPlutus,
   addCollateralInput,
@@ -39,6 +40,8 @@ module Test.Cardano.Ledger.Alonzo.ImpTest (
   computeScriptIntegrity,
   mkTxWithPlutusAndBootstrapAddress,
   mkTokenMintingTx,
+  genGoodValidityInterval,
+  genBadValidityInterval,
   -- Fixup
   fixupDatums,
   fixupOutputDatums,
@@ -66,6 +69,7 @@ import Cardano.Ledger.Alonzo.Rules (
   scriptFailureToFailureDescription,
  )
 import Cardano.Ledger.Alonzo.Scripts (
+  eraLanguages,
   plutusScriptLanguage,
   toAsItem,
   toAsIx,
@@ -74,7 +78,7 @@ import Cardano.Ledger.Alonzo.Tx (ScriptIntegrity, hashScriptIntegrity, mkScriptI
 import Cardano.Ledger.Alonzo.TxAuxData (AlonzoTxAuxData)
 import Cardano.Ledger.Alonzo.TxWits (unRedeemersL, unTxDatsL)
 import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded (..), plutusScriptsWithContextStAnnTx)
-import Cardano.Ledger.BaseTypes (Globals (..), StrictMaybe (..))
+import Cardano.Ledger.BaseTypes (Globals (..), SlotNo (..), StrictMaybe (..))
 import Cardano.Ledger.Coin (Coin (..))
 import Cardano.Ledger.Credential (Credential (..), StakeReference (..))
 import Cardano.Ledger.Mary.Value (MaryValue (..), PolicyID (..), multiAssetFromList)
@@ -93,6 +97,7 @@ import Cardano.Ledger.Plutus (
   hashData,
   hashPlutusScript,
   plutusLanguage,
+  withSLanguage,
  )
 import Cardano.Ledger.Shelley.API.Mempool (mkStAnnTx)
 import Cardano.Ledger.Shelley.LedgerState (
@@ -111,7 +116,6 @@ import Data.Maybe (catMaybes, isJust, isNothing, mapMaybe)
 import Data.Set ((\\))
 import qualified Data.Set as Set
 import qualified Data.Text as T
-import Data.Typeable (Typeable)
 import Lens.Micro
 import Lens.Micro.Mtl (use)
 import qualified PlutusLedgerApi.Common as P
@@ -143,8 +147,9 @@ class
   , InjectRuleFailure "BBODY" AlonzoBbodyPredFailure era
   ) =>
   AlonzoEraImp era
-  where
-  scriptTestContexts :: Map ScriptHash ScriptTestContext
+
+scriptTestContexts :: forall era. AlonzoEraImp era => Map ScriptHash ScriptTestContext
+scriptTestContexts = foldMap (`withSLanguage` plutusTestScripts) $ eraLanguages @era
 
 makeCollateralInput :: ShelleyEraImp era => ImpTestM era TxIn
 makeCollateralInput = do
@@ -457,13 +462,13 @@ instance ShelleyEraImp AlonzoEra where
   genRegTxCert = shelleyGenRegTxCert
   genUnRegTxCert = shelleyGenUnRegTxCert
   delegStakeTxCert = shelleyDelegStakeTxCert
+  topTxFromAnyLevel = shelleyTopTxFromAnyLevel
 
 instance AllegraEraImp AlonzoEra
 
 instance MaryEraImp AlonzoEra
 
-instance AlonzoEraImp AlonzoEra where
-  scriptTestContexts = plutusTestScripts SPlutusV1
+instance AlonzoEraImp AlonzoEra
 
 impLookupScriptContext ::
   forall era.
@@ -595,7 +600,7 @@ mkTxWithPlutusAndBootstrapAddress ::
   forall era l.
   (AlonzoEraImp era, PlutusLanguage l) =>
   SLanguage l ->
-  ImpTestM era (Tx TopTx era)
+  ImpTestM era (AnyLevelTx era)
 mkTxWithPlutusAndBootstrapAddress slang = do
   ba <- freshBootstrapAddress
   datum <- arbitrary
@@ -611,15 +616,15 @@ mkTxWithPlutusAndBootstrapAddress slang = do
   let txIn = txInAt 0 tx
       txOutBootstrapAddr = mkBasicTxOut @era (AddrBootstrap ba) mempty
   return $
-    mkBasicTx
-      ( mkBasicTxBody @era
-          & inputsTxBodyL .~ [txIn]
-          & outputsTxBodyL .~ [txOutBootstrapAddr]
-      )
-      & witsTxL . datsTxWitsL . unTxDatsL %~ Map.insert datumHash datum
+    AnyLevelTx $
+      mkBasicTx
+        ( mkBasicTxBody @era
+            & inputsTxBodyL .~ [txIn]
+            & outputsTxBodyL .~ [txOutBootstrapAddr]
+        )
+        & witsTxL . datsTxWitsL . unTxDatsL %~ Map.insert datumHash datum
 
-mkTokenMintingTx ::
-  forall era l. (AlonzoEraImp era, Typeable l) => ScriptHash -> ImpTestM era (Tx l era)
+mkTokenMintingTx :: forall era. AlonzoEraImp era => ScriptHash -> ImpTestM era (AnyLevelTx era)
 mkTokenMintingTx sh = do
   name <- arbitrary
   count <- choose (1, 10)
@@ -630,6 +635,45 @@ mkTokenMintingTx sh = do
       | plutusScriptLanguage plutusScript >= PlutusV4 -> freshKeyAddrNoPtr_
     _ -> freshKeyAddr_
   pure $
-    mkBasicTx mkBasicTxBody
-      & bodyTxL . mintTxBodyL .~ ma
-      & bodyTxL . outputsTxBodyL .~ [mkBasicTxOut addr (MaryValue mempty ma)]
+    AnyLevelTx $
+      mkBasicTx mkBasicTxBody
+        & bodyTxL . mintTxBodyL .~ ma
+        & bodyTxL . outputsTxBodyL .~ [mkBasicTxOut addr (MaryValue mempty ma)]
+
+genGoodBound :: MonadGen m => SlotNo -> SlotNo -> m (StrictMaybe SlotNo)
+genGoodBound slotLo@(SlotNo lo) slotHi@(SlotNo hi) =
+  oneof
+    [ pure SNothing
+    , SJust . SlotNo <$> choose (lo, hi)
+    , pure $ SJust slotLo
+    , pure $ SJust slotHi
+    ]
+
+genBadBound :: MonadGen m => SlotNo -> SlotNo -> m (StrictMaybe SlotNo)
+genBadBound (SlotNo lo) (SlotNo hi) =
+  SJust . SlotNo
+    <$> oneof
+      [ choose (minBound, pred lo)
+      , choose (succ hi, maxBound)
+      , pure $ pred lo
+      , pure $ succ hi
+      ]
+
+-- | Generate a validity interval where none of its end points are outside the
+-- provided range
+genGoodValidityInterval :: MonadGen m => SlotNo -> SlotNo -> m ValidityInterval
+genGoodValidityInterval lo hi =
+  ValidityInterval
+    <$> genGoodBound lo hi
+    <*> genGoodBound lo hi
+
+-- | Generate a validity interval where one or both of its end points are outside the
+-- provided range
+genBadValidityInterval :: MonadGen m => SlotNo -> SlotNo -> m ValidityInterval
+genBadValidityInterval lo hi =
+  uncurry ValidityInterval
+    <$> oneof
+      [ (,) <$> genGoodBound lo hi <*> genBadBound lo hi
+      , (,) <$> genBadBound lo hi <*> genGoodBound lo hi
+      , (,) <$> genBadBound lo hi <*> genBadBound lo hi
+      ]

@@ -9,21 +9,24 @@ module Test.Cardano.Ledger.Dijkstra.Imp.PoolSpec (spec, dijkstraOnlySpec) where
 
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Compactible (Compactible (..))
 import Cardano.Ledger.Credential (Credential (..))
 import Cardano.Ledger.Dijkstra
 import Cardano.Ledger.Dijkstra.Core
-import Cardano.Ledger.Dijkstra.PParams (ppMaxPledgeLeverageL)
+import Cardano.Ledger.Dijkstra.PParams (ppMaxPledgeLeverageL, ppMinPoolMarginL)
 import Cardano.Ledger.Dijkstra.Rules
+import Cardano.Ledger.Keys (coerceKeyRole)
+import Cardano.Ledger.Plutus.CostModels (emptyCostModels)
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Cardano.Ledger.State
 import Data.Coerce (coerce)
-import Data.Foldable (fold)
+import Data.Foldable (fold, for_)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
 import Data.Word
-import Lens.Micro ((%~), (&), (.~))
+import Lens.Micro ((%~), (&), (.~), (^.))
 import Test.Cardano.Ledger.Core.Rational ((%!))
 import Test.Cardano.Ledger.Dijkstra.ImpTest
 import Test.Cardano.Ledger.Imp.Common
@@ -41,7 +44,7 @@ delegatorStake = Coin 90_000_000_000_000
 registerPoolWithPledge ::
   DijkstraEraImp era =>
   Coin ->
-  ImpTestM era (KeyHash StakePool, [Credential Staking])
+  ImpTestM era (KeyHash StakePool, (Credential Staking, Credential Staking))
 registerPoolWithPledge pledge = do
   poolId <- freshKeyHash
   ownerKeyHash <- freshKeyHash
@@ -70,11 +73,12 @@ registerPoolWithPledge pledge = do
     ownerAccountAddress
   delegateStake owner poolId
   delegateStake delegator poolId
-  pure (poolId, [owner, delegator])
+  pure (poolId, (owner, delegator))
 
--- | The total rewards that have been paid out to a stake pool and its delegators.
-poolRewards :: (HasCallStack, EraCertState era) => [Credential Staking] -> ImpTestM era Coin
-poolRewards = fmap fold . traverse getBalance
+-- | The total rewards that have been paid out to a stake pool and its delegator.
+poolRewards ::
+  (HasCallStack, EraCertState era) => (Credential Staking, Credential Staking) -> ImpTestM era Coin
+poolRewards (o, d) = fold <$> traverse @[] getBalance [o, d]
 
 -- | Register two pools that are identical, except that the second one declares a pledge
 -- that is a thousandth of the pledge of the first one, then have both of them mint the
@@ -114,13 +118,13 @@ spec = describe "POOL" $ do
     it "re-register a pool with its own future VRF" $ do
       (kh, vrf) <- registerNewPool
       vrfNew <- freshKeyHashVRF
-      tx <- registerPoolTx <$> poolParams kh vrfNew
-      submitTx_ tx
+      pps <- poolParams kh vrfNew
+      submitAnyTx_ $ registerPoolTx pps
       expectPool kh (Just vrf)
       expectFuturePool kh (Just vrfNew)
       -- re-registering with the VRF already recorded in the pool's own
       -- future params should succeed
-      submitTx_ tx
+      submitAnyTx_ $ registerPoolTx pps
       expectPool kh (Just vrf)
       expectFuturePool kh (Just vrfNew)
       expectVRFs [(vrf, 1), (vrfNew, 1)]
@@ -132,12 +136,12 @@ spec = describe "POOL" $ do
     it "keep tracking the active VRF after re-registering with it and then with a fresh one" $ do
       (kh, vrf) <- registerNewPool
       -- re-register with the pool's own active VRF ...
-      registerPoolTx <$> poolParams kh vrf >>= submitTx_
+      poolParams kh vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectFuturePool kh (Just vrf)
       expectVRFs [(vrf, 1)]
       -- ... and then with a fresh one
       vrfNew <- freshKeyHashVRF
-      registerPoolTx <$> poolParams kh vrfNew >>= submitTx_
+      poolParams kh vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       -- the pool keeps producing blocks with the original VRF until the
       -- epoch boundary, so it must still be tracked
       expectPool kh (Just vrf)
@@ -150,7 +154,7 @@ spec = describe "POOL" $ do
       expectPool kh (Just vrfNew)
       expectVRFs [(vrfNew, 1)]
       -- after the epoch boundary the original VRF can be taken over ...
-      registerPoolTx <$> poolParams khNew vrf >>= submitTx_
+      poolParams khNew vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectPool khNew (Just vrf)
       expectVRFs [(vrf, 1), (vrfNew, 1)]
       -- ... but only by a single pool
@@ -162,7 +166,7 @@ spec = describe "POOL" $ do
       (kh1, vrf1) <- registerNewPool
       (kh2, vrf2) <- registerNewPool
       vrfNew <- freshKeyHashVRF
-      registerPoolTx <$> poolParams kh1 vrfNew >>= submitTx_
+      poolParams kh1 vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectPool kh1 (Just vrf1)
       expectFuturePool kh1 (Just vrfNew)
       expectVRFs [(vrf1, 1), (vrf2, 1), (vrfNew, 1)]
@@ -179,14 +183,14 @@ spec = describe "POOL" $ do
     it "re-registering with the active VRF releases the pending future VRF" $ do
       (kh, vrf) <- registerNewPool
       vrfNew <- freshKeyHashVRF
-      registerPoolTx <$> poolParams kh vrfNew >>= submitTx_
+      poolParams kh vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectVRFs [(vrf, 1), (vrfNew, 1)]
       -- going back to the active VRF frees the previously requested one
-      registerPoolTx <$> poolParams kh vrf >>= submitTx_
+      poolParams kh vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectFuturePool kh (Just vrf)
       expectVRFs [(vrf, 1)]
       khNew <- freshKeyHash
-      registerPoolTx <$> poolParams khNew vrfNew >>= submitTx_
+      poolParams khNew vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectPool khNew (Just vrfNew)
       expectVRFs [(vrf, 1), (vrfNew, 1)]
 
@@ -194,11 +198,11 @@ spec = describe "POOL" $ do
       (kh, vrf) <- registerNewPool
       vrfNew <- freshKeyHashVRF
       -- switch to a fresh VRF, back to the active one and to the fresh one again
-      registerPoolTx <$> poolParams kh vrfNew >>= submitTx_
+      poolParams kh vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectVRFs [(vrf, 1), (vrfNew, 1)]
-      registerPoolTx <$> poolParams kh vrf >>= submitTx_
+      poolParams kh vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectVRFs [(vrf, 1)]
-      registerPoolTx <$> poolParams kh vrfNew >>= submitTx_
+      poolParams kh vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectPool kh (Just vrf)
       expectFuturePool kh (Just vrfNew)
       -- the active VRF stays in use until the epoch boundary, so it must stay taken
@@ -209,7 +213,7 @@ spec = describe "POOL" $ do
       passEpoch
       expectPool kh (Just vrfNew)
       expectVRFs [(vrfNew, 1)]
-      registerPoolTx <$> poolParams khNew vrf >>= submitTx_
+      poolParams khNew vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectVRFs [(vrf, 1), (vrfNew, 1)]
 
     describe "a VRF shared by two pools" $ do
@@ -225,7 +229,7 @@ spec = describe "POOL" $ do
           switchToFreshVRF :: KeyHash StakePool -> ImpTestM era (VRFVerKeyHash StakePoolVRF)
           switchToFreshVRF kh = do
             vrfNew <- freshKeyHashVRF
-            registerPoolTx <$> poolParams kh vrfNew >>= submitTx_
+            poolParams kh vrfNew >>= \pps -> submitAnyTx_ $ registerPoolTx pps
             pure vrfNew
           expectTaken :: VRFVerKeyHash StakePoolVRF -> ImpTestM era ()
           expectTaken vrf = do
@@ -239,7 +243,7 @@ spec = describe "POOL" $ do
           expectReleased vrf vrfs = do
             expectVRFs vrfs
             kh <- freshKeyHash
-            registerPoolTx <$> poolParams kh vrf >>= submitTx_
+            poolParams kh vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
             expectPool kh (Just vrf)
             expectVRFs $ (vrf, 1) : vrfs
 
@@ -285,14 +289,16 @@ spec = describe "POOL" $ do
       it "is released once both holders have retired" $ do
         (kh1, kh2, vrf) <- registerTwoPoolsSharingVRF
         -- retiring one of the two pools leaves the VRF in use by the other one ...
-        retirePoolTx kh1 (EpochInterval 1) >>= submitTx_
+        AnyLevelTx retireTx1 <- retirePoolTx kh1 (EpochInterval 1)
+        submitAnyTx_ retireTx1
         passEpoch
         expectPool kh1 Nothing
         expectPool kh2 (Just vrf)
         expectVRFs [(vrf, 1)]
         expectTaken vrf
         -- ... and only once that one has retired as well does the VRF become available
-        retirePoolTx kh2 (EpochInterval 1) >>= submitTx_
+        AnyLevelTx retireTx2 <- retirePoolTx kh2 (EpochInterval 1)
+        submitAnyTx_ retireTx2
         passEpoch
         expectPool kh2 Nothing
         expectReleased vrf []
@@ -433,7 +439,8 @@ spec = describe "POOL" $ do
       blsKey <- freshBlsKey
       pps <- registerPoolWithBlsKey (SJust blsKey)
       registeredIn <- getsNES nesELL
-      retirePoolTx (sppId pps) (EpochInterval 2) >>= submitTx_
+      AnyLevelTx tx <- retirePoolTx (sppId pps) (EpochInterval 2)
+      submitAnyTx_ tx
       submitTx_ $ registerPoolTx pps
       passNEpochs 3
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
@@ -441,16 +448,226 @@ spec = describe "POOL" $ do
     it "a reaped pool that registers again starts a fresh lifetime" $ do
       blsKey <- freshBlsKey
       pps <- registerPoolWithBlsKey (SJust blsKey)
-      retirePoolTx (sppId pps) (EpochInterval 1) >>= submitTx_
+      AnyLevelTx tx <- retirePoolTx (sppId pps) (EpochInterval 1)
+      submitAnyTx_ tx
       passNEpochs 2
       expectPool (sppId pps) Nothing
       registeredAgainIn <- getsNES nesELL
       submitTx_ $ registerPoolTx pps
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredAgainIn))
+
+  describe "BLS key uniqueness" $ do
+    it "a new pool cannot take the active key of another pool" $ do
+      key <- freshBlsKey
+      _ <- registerBlsPool (SJust key)
+      expectBlsKeys [key]
+      expectBlsKeyTakenByNewPool key
+      -- the key stays taken across the epoch boundary
+      passEpoch
+      expectBlsKeys [key]
+      expectBlsKeyTakenByNewPool key
+
+    it "a registered pool cannot take the active key of another pool" $ do
+      key1 <- freshBlsKey
+      key2 <- freshBlsKey
+      _ <- registerBlsPool (SJust key1)
+      withKey <- registerBlsPool (SJust key2)
+      withoutKey <- registerBlsPool SNothing
+      expectBlsKeys [key1, key2]
+      -- neither a pool with a key of its own nor one without any may take it
+      expectBlsKeyTaken withKey key1
+      expectBlsKeyTaken withoutKey key1
+      expectBlsKeys [key1, key2]
+
+    it "a pending future key cannot be claimed by another pool" $ do
+      key1 <- freshBlsKey
+      kh1 <- registerBlsPool (SJust key1)
+      kh2 <- registerBlsPool SNothing
+      newKey <- freshBlsKey
+      reregisterBlsPool kh1 (SJust newKey)
+      expectActiveBlsKey kh1 (SJust key1)
+      expectFutureBlsKey kh1 (SJust newKey)
+      expectBlsKeys [key1, newKey]
+      -- a key is taken as soon as a re-registration requests it, so neither a new pool ...
+      expectBlsKeyTakenByNewPool newKey
+      -- ... nor another registered pool may claim it
+      expectBlsKeyTaken kh2 newKey
+      expectBlsKeys [key1, newKey]
+
+    it "a pool can re-register with its own active key" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      reregisterBlsPool kh (SJust key)
+      expectFutureBlsKey kh (SJust key)
+      expectBlsKeys [key]
+      passEpoch
+      expectActiveBlsKey kh (SJust key)
+      expectBlsKeys [key]
+
+    it "a pool can re-register with its own pending future key" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      newKey <- freshBlsKey
+      reregisterBlsPool kh (SJust newKey)
+      -- registering with the key in the pool's own future params should succeed
+      reregisterBlsPool kh (SJust newKey)
+      expectActiveBlsKey kh (SJust key)
+      expectFutureBlsKey kh (SJust newKey)
+      expectBlsKeys [key, newKey]
+      passEpoch
+      expectActiveBlsKey kh (SJust newKey)
+      expectBlsKeys [newKey]
+
+    it "a pending future key is released as soon as the pool replaces it" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      futureKey <- freshBlsKey
+      reregisterBlsPool kh (SJust futureKey)
+      newFutureKey <- freshBlsKey
+      reregisterBlsPool kh (SJust newFutureKey)
+      expectFutureBlsKey kh (SJust newFutureKey)
+      expectBlsKeys [key, newFutureKey]
+      -- the replaced key is free right away, while the active one stays taken
+      other <- registerBlsPool (SJust futureKey)
+      expectActiveBlsKey other (SJust futureKey)
+      expectBlsKeyTakenByNewPool key
+      passEpoch
+      expectActiveBlsKey kh (SJust newFutureKey)
+      expectBlsKeys [futureKey, newFutureKey]
+
+    it "the active key stays taken when the future parameters move away from it" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      reregisterBlsPool kh (SJust key)
+      newKey <- freshBlsKey
+      reregisterBlsPool kh (SJust newKey)
+      -- the future parameters no longer use the key, but the active ones still do
+      expectBlsKeys [key, newKey]
+      expectBlsKeyTakenByNewPool key
+      passEpoch
+      expectActiveBlsKey kh (SJust newKey)
+      expectBlsKeys [newKey]
+
+    it "a key is released when its holder switches to a fresh one" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      newKey <- freshBlsKey
+      reregisterBlsPool kh (SJust newKey)
+      -- the pool keeps using the key until the epoch boundary, so it stays taken
+      expectBlsKeyTakenByNewPool key
+      passEpoch
+      expectActiveBlsKey kh (SJust newKey)
+      expectBlsKeys [newKey]
+      -- now another pool can take it over ...
+      other <- registerBlsPool (SJust key)
+      expectActiveBlsKey other (SJust key)
+      expectBlsKeys [key, newKey]
+      -- ... but only a single one
+      expectBlsKeyTakenByNewPool key
+
+    it "a key is released when its holder drops it" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      reregisterBlsPool kh SNothing
+      expectActiveBlsKey kh (SJust key)
+      expectBlsKeys [key]
+      expectBlsKeyTakenByNewPool key
+      passEpoch
+      expectActiveBlsKey kh SNothing
+      expectBlsKeys []
+      other <- registerBlsPool (SJust key)
+      expectActiveBlsKey other (SJust key)
+      expectBlsKeys [key]
+
+    it "a key is released when its holder retires" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      AnyLevelTx tx <- retirePoolTx kh (EpochInterval 1)
+      submitAnyTx_ tx
+      expectBlsKeys [key]
+      expectBlsKeyTakenByNewPool key
+      passEpoch
+      expectPool kh Nothing
+      expectBlsKeys []
+      other <- registerBlsPool (SJust key)
+      expectActiveBlsKey other (SJust key)
+      expectBlsKeys [key]
+
+    it "retiring with a pending future key releases both keys" $ do
+      key <- freshBlsKey
+      kh <- registerBlsPool (SJust key)
+      newKey <- freshBlsKey
+      reregisterBlsPool kh (SJust newKey)
+      AnyLevelTx tx <- retirePoolTx kh (EpochInterval 1)
+      submitAnyTx_ tx
+      expectBlsKeys [key, newKey]
+      passEpoch
+      expectPool kh Nothing
+      expectBlsKeys []
+      _ <- registerBlsPool (SJust key)
+      _ <- registerBlsPool (SJust newKey)
+      expectBlsKeys [key, newKey]
+
+    it "only the public key counts, not the proof of possession" $ do
+      key <- freshBlsKey
+      _ <- registerBlsPool (SJust key)
+      bogusProof <- arbitrary
+      let bogusKey = key {blsPossessionProof = bogusProof}
+      kh <- freshKeyHash
+      pps <- blsPoolParams kh (SJust bogusKey)
+      -- the key is rejected twice: its public key is taken and its proof is not valid
+      submitFailingTx
+        (registerPoolTx pps)
+        [ injectFailure $ BlsKeyInvalidProofOfPossession kh bogusKey
+        , injectFailure $ BlsKeyAlreadyRegistered kh bogusKey
+        ]
+      expectBlsKeys [key]
+
+  describe "CIP-23" $ do
+    for_ @[] [minBound, maxBound] $ \margin -> do
+      it ("minimum pool margin (" <> show margin <> ")") $ do
+        (poolId, (poolOwner, poolDelegator)) <- registerPoolWithPledge $ Coin 0
+
+        pools <- psStakePools <$> getPState
+        poolState <- expectJust $ Map.lookup poolId pools
+        poolState ^. spsMarginL `shouldBe` minBound
+
+        modifyPParams $ ppMinPoolMarginL .~ margin
+        pParams <- getsNES $ nesEsL . curPParamsEpochStateL
+        logToExpr $ pParams & ppCostModelsL .~ emptyCostModels
+
+        passEpoch
+        withIssuerAndTxsInBlock_ (coerceKeyRole poolId) $
+          pure ()
+        passEpoch
+        replicateM_ 100 $
+          withIssuerAndTxsInBlock_ (coerceKeyRole poolId) $
+            pure ()
+        passNEpochs 2
+
+        certState <- getsNES $ nesEsL . esLStateL . lsCertStateL
+        logToExpr certState
+
+        let accountsMap = certState ^. certDStateL . accountsG . accountsMapL
+        ownerState <- expectJust $ Map.lookup poolOwner accountsMap
+        delegatorState <- expectJust $ Map.lookup poolDelegator accountsMap
+
+        -- The owner always gets some rewards
+        let ownerBalance = fromCompact $ ownerState ^. balanceAccountStateL
+        ownerBalance `shouldNotBe` Coin 0
+
+        -- Unless the margin is 1, the delegator should get a share of the
+        -- remainder rewards that are left after the cost is subtracted.
+        -- When the margin is 1, the delegator gets nothing because the pool
+        -- takes everything, both the cost and the remainder.
+        let delegatorBalance = fromCompact $ delegatorState ^. balanceAccountStateL
+        if margin /= maxBound
+          then delegatorBalance `shouldNotBe` Coin 0
+          else delegatorBalance `shouldBe` Coin 0
   where
     registerNewPool = do
       (kh, vrf) <- (,) <$> freshKeyHash <*> freshKeyHashVRF
-      submitTx_ . registerPoolTx =<< poolParams kh vrf
+      poolParams kh vrf >>= \pps -> submitAnyTx_ $ registerPoolTx pps
       expectPool kh (Just vrf)
       pure (kh, vrf)
     registerPoolTx pps =
@@ -478,9 +695,10 @@ spec = describe "POOL" $ do
     retirePoolTx kh retirementInterval = do
       curEpochNo <- getsNES nesELL
       pure $
-        mkBasicTx mkBasicTxBody
-          & bodyTxL . certsTxBodyL
-            .~ SSeq.singleton (RetirePoolTxCert kh (addEpochInterval curEpochNo retirementInterval))
+        AnyLevelTx $
+          mkBasicTx mkBasicTxBody
+            & bodyTxL . certsTxBodyL
+              .~ SSeq.singleton (RetirePoolTxCert kh (addEpochInterval curEpochNo retirementInterval))
     expectPool poolKh mbVrf = do
       pools <- psStakePools <$> getPState
       spsVrf <$> Map.lookup poolKh pools `shouldBe` mbVrf
@@ -494,6 +712,43 @@ spec = describe "POOL" $ do
     expectBlsKeyState poolId expected = do
       sps <- expectJust . Map.lookup poolId . psStakePools =<< getPState
       spsBlsKey sps `shouldBe` expected
+    blsPoolParams ::
+      KeyHash StakePool ->
+      StrictMaybe BlsKey ->
+      ImpTestM era (StakePoolParams era)
+    blsPoolParams kh mbBlsKey = do
+      pps <- registerAccountAddress >>= freshPoolParams kh
+      pure pps {sppBlsKey = mbBlsKey}
+    registerBlsPool :: StrictMaybe BlsKey -> ImpTestM era (KeyHash StakePool)
+    registerBlsPool mbBlsKey = do
+      kh <- freshKeyHash
+      reregisterBlsPool kh mbBlsKey
+      expectActiveBlsKey kh mbBlsKey
+      pure kh
+    -- Registers the pool, or re-registers it if it already is one
+    reregisterBlsPool :: KeyHash StakePool -> StrictMaybe BlsKey -> ImpTestM era ()
+    reregisterBlsPool kh mbBlsKey = blsPoolParams kh mbBlsKey >>= submitTx_ . registerPoolTx
+    expectActiveBlsKey :: KeyHash StakePool -> StrictMaybe BlsKey -> ImpTestM era ()
+    expectActiveBlsKey kh mbBlsKey = do
+      pools <- psStakePools <$> getPState
+      sps <- expectJust $ Map.lookup kh pools
+      bksKey <$> spsBlsKey sps `shouldBe` mbBlsKey
+    expectFutureBlsKey :: KeyHash StakePool -> StrictMaybe BlsKey -> ImpTestM era ()
+    expectFutureBlsKey kh mbBlsKey = do
+      fps <- psFutureStakePoolParams <$> getPState
+      spp <- expectJust $ Map.lookup kh fps
+      sppBlsKey spp `shouldBe` mbBlsKey
+    expectBlsKeys :: [BlsKey] -> ImpTestM era ()
+    expectBlsKeys keys = psBlsKeyHashes <$> getPState `shouldReturn` Set.fromList (hashBlsKey <$> keys)
+    -- Registering the pool with the BLS key fails, because another pool is using it
+    expectBlsKeyTaken :: KeyHash StakePool -> BlsKey -> ImpTestM era ()
+    expectBlsKeyTaken kh key = do
+      tx <- registerPoolTx <$> blsPoolParams kh (SJust key)
+      submitFailingTx tx [injectFailure $ BlsKeyAlreadyRegistered kh key]
+    expectBlsKeyTakenByNewPool :: BlsKey -> ImpTestM era ()
+    expectBlsKeyTakenByNewPool key = do
+      kh <- freshKeyHash
+      expectBlsKeyTaken kh key
     poolParams ::
       KeyHash StakePool ->
       VRFVerKeyHash StakePoolVRF ->
@@ -522,6 +777,20 @@ dijkstraOnlySpec = describe "POOL" $ do
       -- ... which also keeps any other pool from registering with it
       runPool (RegPool newStakePoolParams {sppVrf = vrf})
         `shouldReturn` Left [VRFKeyHashAlreadyRegistered (sppId newStakePoolParams) vrf]
+
+    it "re-register a pool from the genesis with its own BLS key" $ do
+      blsKey <- freshBlsKey
+      stakePoolParams <- (\pps -> pps {sppBlsKey = SJust blsKey}) <$> freshStakePool
+      -- set up before the injection, since no transaction can follow it (see `runPool`)
+      newStakePoolParams <- freshStakePool
+      injectGenesisStaking [stakePoolParams] [] []
+      -- the pool can re-register with the BLS key it is already using ...
+      runPool (RegPool stakePoolParams) >>= expectRightDeep_
+      -- ... because its BLS key is tracked just like that of a pool registered through POOL ...
+      psBlsKeyHashes <$> getPState `shouldReturn` [hashBlsKey blsKey]
+      -- ... which also keeps any other pool from registering with it
+      runPool (RegPool newStakePoolParams {sppBlsKey = SJust blsKey})
+        `shouldReturn` Left [BlsKeyAlreadyRegistered (sppId newStakePoolParams) blsKey]
   where
     -- The deposits of stake pools from the genesis never make it into the deposit pot,
     -- which the assertions of LEDGER reject, so POOL is run on its own.

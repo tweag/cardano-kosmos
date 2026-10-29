@@ -101,7 +101,7 @@ library
     Cardano.Ledger.State.CertState
     Cardano.Ledger.State.ChainAccount
     Cardano.Ledger.State.Governance
-    Cardano.Ledger.State.LeiosCommittee
+    Cardano.Ledger.State.Leios
     Cardano.Ledger.State.PoolDistr
     Cardano.Ledger.State.SnapShots
     Cardano.Ledger.State.Stake
@@ -340,7 +340,7 @@ test-suite tests
     base16-bytestring,
     binary,
     bytestring,
-    cardano-base:{cardano-base, testlib} >=0.1.3,
+    cardano-base:{cardano-base, testlib} >=0.1.7.1,
     cardano-crypto-class,
     cardano-ledger-binary:{cardano-ledger-binary, testlib},
     cardano-ledger-byron,

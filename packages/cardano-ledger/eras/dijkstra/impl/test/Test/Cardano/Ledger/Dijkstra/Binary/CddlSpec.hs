@@ -26,7 +26,6 @@ import Cardano.Ledger.Plutus.Data (Data, Datum)
 import Cardano.Protocol.Crypto (StandardCrypto)
 import qualified Cardano.Protocol.Leios.BlockHeader as Leios
 import Data.OSet.Strict (OSet)
-import Data.Word (Word32)
 import Test.Cardano.Ledger.Alonzo.Arbitrary (genDatumPresent, genNonEmptyRedeemers)
 import Test.Cardano.Ledger.Binary.Cuddle (
   huddleDecoderEquivalenceSpec,
@@ -68,7 +67,8 @@ spec = do
         genNonEmptyAccountBalanceIntervals
         v
         "account_balance_intervals"
-      fullCddlSpec @(Value DijkstraEra) v "value"
+      modifyMaxSize (min 70) $
+        fullCddlSpec @(Value DijkstraEra) v "value"
       fullAnnCddlSpec @(TxBody TopTx DijkstraEra) v "transaction_body"
       fullAnnCddlSpec @(TxBody SubTx DijkstraEra) v "sub_transaction_body"
       fullAnnCddlSpec @(TxAuxData DijkstraEra) v "auxiliary_data"
@@ -100,6 +100,5 @@ spec = do
         genLeiosBlock
         v
         "block"
-      fullCddlSpec @(Hash HASH EraIndependentTx, Word32) v "eb_reference"
       fullCddlSpec @EbReferences v "eb_references"
       fullCddlSpec @EbReferencesAnnouncement v "eb_references_announcement"

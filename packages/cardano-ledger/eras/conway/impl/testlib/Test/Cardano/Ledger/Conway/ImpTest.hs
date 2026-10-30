@@ -150,10 +150,16 @@ import Cardano.Ledger.BaseTypes (
   addEpochInterval,
   binOpEpochNo,
   inject,
+  nonZeroOr,
   textToUrl,
  )
-import Cardano.Ledger.Coin (Coin (..), CompactForm (CompactCoin))
-import Cardano.Ledger.Compactible (fromCompact)
+import Cardano.Ledger.Coin (
+  Coin (..),
+  CompactForm (CompactCoin),
+  fromCompactCoinNonZero,
+  knownNonZeroCompactCoin,
+ )
+import Cardano.Ledger.Compactible (Compactible (fromCompact), fromCompact)
 import Cardano.Ledger.Conway (ConwayEra, hardforkConwayBootstrapPhase)
 import Cardano.Ledger.Conway.Core
 import Cardano.Ledger.Conway.Genesis (ConwayGenesis (..))
@@ -187,7 +193,7 @@ import Cardano.Ledger.Conway.State
 import Cardano.Ledger.Conway.TxCert (Delegatee (..))
 import Cardano.Ledger.Credential (Credential (..))
 import Cardano.Ledger.DRep
-import Cardano.Ledger.Plutus.Language (Language (..), SLanguage (..), hashPlutusScript)
+import Cardano.Ledger.Plutus.Language (Language (..), hashPlutusScript)
 import Cardano.Ledger.Shelley.API (ApplyTxError)
 import Cardano.Ledger.Shelley.LedgerState (
   curPParamsEpochStateL,
@@ -199,7 +205,6 @@ import Cardano.Ledger.Shelley.LedgerState (
   nesELL,
   nesEpochStateL,
   nesEsL,
-  nesStakePoolDistrG,
   newEpochStateGovStateL,
   utxosGovStateL,
  )
@@ -316,6 +321,7 @@ instance ShelleyEraImp ConwayEra where
   genRegTxCert = conwayGenRegTxCert
   genUnRegTxCert = conwayGenUnRegTxCert
   delegStakeTxCert = conwayDelegStakeTxCert
+  topTxFromAnyLevel = shelleyTopTxFromAnyLevel
 
 conwayModifyImpInitProtVer ::
   forall era.
@@ -338,11 +344,7 @@ instance AllegraEraImp ConwayEra
 
 instance MaryEraImp ConwayEra
 
-instance AlonzoEraImp ConwayEra where
-  scriptTestContexts =
-    plutusTestScripts SPlutusV1
-      <> plutusTestScripts SPlutusV2
-      <> plutusTestScripts SPlutusV3
+instance AlonzoEraImp ConwayEra
 
 instance BabbageEraImp ConwayEra
 
@@ -1029,9 +1031,10 @@ expectMissingGovActionId govActionId =
 -- | Builds a RatifyEnv from the current state
 getRatifyEnv :: (ConwayEraGov era, ConwayEraCertState era) => ImpTestM era (RatifyEnv era)
 getRatifyEnv = do
+  modifyNES $ nesEsL . epochStateDRepPulsingStateL %~ completeDRepPulsingState
   eNo <- getsNES nesELL
   instantStake <- getsNES instantStakeG
-  poolDistr <- getsNES nesStakePoolDistrG
+  stakePoolDistr <- getsNES $ nesEsL . epochStateDRepPulsingStateL . psStakePoolDistrG
   drepDistr <- getsNES $ nesEsL . epochStateDRepPulsingStateL . psDRepDistrG
   drepState <- getsNES $ nesEsL . esLStateL . lsCertStateL . certVStateL . vsDRepsL
   committeeState <- getsNES $ nesEsL . esLStateL . lsCertStateL . certVStateL . vsCommitteeStateL
@@ -1039,7 +1042,12 @@ getRatifyEnv = do
   poolPs <- getsNES $ nesEsL . epochStateStakePoolsL
   pure
     RatifyEnv
-      { reVotingStakePoolDistr = toVotingStakePoolDistr poolDistr
+      { reVotingStakePoolDistr =
+          VotingStakePoolDistr
+            { vspdIndividualStake = stakePoolDistr
+            , vspdTotalVotingStake =
+                fromCompactCoinNonZero (fold stakePoolDistr `nonZeroOr` knownNonZeroCompactCoin @1)
+            }
       , reInstantStake = instantStake
       , reDRepState = drepState
       , reDRepDistr = drepDistr

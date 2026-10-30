@@ -1,7 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
@@ -23,7 +22,7 @@ import Cardano.Ledger.Conway.PParams (ppMinFeeRefScriptCostPerByteL)
 import qualified Cardano.Ledger.Conway.Rules as Conway
 import Cardano.Ledger.Conway.TxCert
 import Cardano.Ledger.Credential
-import Cardano.Ledger.Plutus.Language (SLanguage (..))
+import Cardano.Ledger.Plutus.Language (withSLanguage)
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley (ShelleyUtxoPredFailure (..))
 import Cardano.Ledger.Shelley.Scripts (
@@ -32,6 +31,7 @@ import Cardano.Ledger.Shelley.Scripts (
 import Cardano.Ledger.Shelley.UTxO (getShelleyMinFeeTxUtxo)
 import Cardano.Ledger.State
 import Cardano.Ledger.Val
+import Control.Monad (forM)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Sequence.Strict as SSeq
 import Lens.Micro
@@ -58,6 +58,9 @@ spec = describe "UTXO" $ do
       dRepCred <- KeyHashObj <$> freshKeyHash @DRepRole
       let delegatee = DelegStakeVote poolId (DRepCredential dRepCred)
       anchor <- arbitrary
+      -- TODO: Switch to `submitAnyTx` once `addSubTxIn` no longer submits a separate transaction
+      -- during fixup. Its fee is not part of `txRegister`'s fee, so the UTxO difference check
+      -- below fails
       txRegister <-
         submitTx $
           mkBasicTx mkBasicTxBody
@@ -133,12 +136,12 @@ spec = describe "UTXO" $ do
       withPostFixup (updateAddrTxWits . addUnRegDRepTxCert) $
         submitFailingTx
           (mkBasicTx txBody)
-          [ injectFailure $
+          [ injectFailure $ Conway.ConwayDRepNotRegistered dRepCred
+          , injectFailure $
               Shelley.ValueNotConservedUTxO $
                 Mismatch
                   (rootTxOutValue <> inject txAmount <> inject dRepDeposit)
                   (rootTxOutValue <> inject txAmount)
-          , injectFailure $ Conway.ConwayDRepNotRegistered dRepCred
           ]
   describe "Reference scripts" $ do
     let
@@ -147,7 +150,7 @@ spec = describe "UTXO" $ do
         modifyPParams (ppMinFeeRefScriptCostPerByteL .~ (10 %! 1))
         scriptTxIn <- nativeScript >>= impAddNativeScript >>= produceScript
         refIns <- produceRefScripts (NE.fromList refScripts)
-        tx <- submitTxWithRefInputs scriptTxIn refIns
+        tx <- submitTx $ mkTxWithInputsAndRefInputs [scriptTxIn] (NE.toList refIns)
         minFeeDiff <- do
           utxo <- getUTxO
           pp <- getsNES $ nesEsL . curPParamsEpochStateL
@@ -163,9 +166,10 @@ spec = describe "UTXO" $ do
             )
       distinctScripts = do
         nativeScripts <- replicateM 3 (fromNativeScript <$> nativeScript)
-        Just plutusScriptV2 <- pure $ mkPlutusScript @era $ alwaysSucceedsNoDatum SPlutusV2
-        Just plutusScriptV3 <- pure $ mkPlutusScript @era $ alwaysSucceedsNoDatum SPlutusV3
-        pure $ nativeScripts ++ [fromPlutusScript plutusScriptV2, fromPlutusScript plutusScriptV3]
+        plutusScripts <- forM (eraLanguages @era) $ \lang -> withSLanguage lang $ \slang -> do
+          Just plutusScript <- pure $ mkPlutusScript @era $ alwaysSucceedsNoDatum slang
+          pure $ fromPlutusScript plutusScript
+        pure $ nativeScripts ++ plutusScripts
 
     it "required reference script counts towards the minFee calculation" $ do
       spendingScript <- nativeScript
@@ -208,7 +212,7 @@ conwayOnlySpec = describe "UTXO" $ do
       let delegatee = DelegStakeVote poolId (DRepCredential dRepCred)
       anchor <- arbitrary
       txRegister <-
-        submitTx $
+        submitAnyTx $
           mkBasicTx mkBasicTxBody
             & bodyTxL . certsTxBodyL
               .~ SSeq.fromList
@@ -240,7 +244,7 @@ conwayOnlySpec = describe "UTXO" $ do
           )
       curEpochNo <- getsNES nesELL
       txUnRegister <-
-        submitTx $
+        submitAnyTx $
           mkBasicTx mkBasicTxBody
             & bodyTxL . certsTxBodyL
               .~ SSeq.fromList

@@ -11,6 +11,7 @@
 
 module Test.Cardano.Ledger.Dijkstra.Imp.UtxowSpec (spec) where
 
+import Cardano.Base.Typeable (Typeable)
 import Cardano.Ledger.Alonzo.Plutus.Context (CollectError (..))
 import Cardano.Ledger.Alonzo.Plutus.Evaluate (
   TransactionScriptFailure (ContextError, RedeemerPointsToUnknownScriptHash),
@@ -41,7 +42,7 @@ import Cardano.Ledger.Plutus (
   Language (..),
   OrdExUnits (..),
   Plutus,
-  SLanguage (..),
+  PlutusLanguage,
   hashData,
   hashPlutusScript,
   withSLanguage,
@@ -77,27 +78,30 @@ spec = describe "UTXOW" $ do
       guardKeyHash <- KeyHashObj <$> freshKeyHash
       scriptHash <- impAddNativeScript (RequireGuard guardKeyHash)
       txIn <- produceScript scriptHash
-      let tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
+      let tx :: forall l. Typeable l => Tx l era
+          tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
       submitFailingTx
         tx
         [injectFailure $ Conway.ScriptWitnessNotValidatingUTXOW $ NES.singleton scriptHash]
-      submitTx_ $ tx & bodyTxL . guardsTxBodyL .~ [guardKeyHash]
+      submitAnyTx_ $ tx & bodyTxL . guardsTxBodyL .~ [guardKeyHash]
 
     it "A native script required as guard needs to be witnessed " $ do
       let guardScript = RequireAllOf []
       let guardScriptHash = hashScript @era $ fromNativeScript guardScript
       scriptHash <- impAddNativeScript $ RequireGuard (ScriptHashObj guardScriptHash)
       txIn <- produceScript scriptHash
-      let tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
+      let tx :: forall l. Typeable l => Tx l era
+          tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
       submitFailingTx
         tx
         [injectFailure $ Conway.ScriptWitnessNotValidatingUTXOW $ NES.singleton scriptHash]
 
-      let txWithGuards = tx & bodyTxL . guardsTxBodyL .~ [ScriptHashObj guardScriptHash]
+      let txWithGuards :: forall l. Typeable l => Tx l era
+          txWithGuards = tx & bodyTxL . guardsTxBodyL .~ [ScriptHashObj guardScriptHash]
       submitFailingTx
         txWithGuards
         [injectFailure $ Conway.MissingScriptWitnessesUTXOW $ NES.singleton guardScriptHash]
-      submitTx_ $ txWithGuards & witsTxL . hashScriptTxWitsL .~ [fromNativeScript guardScript]
+      submitAnyTx_ $ txWithGuards & witsTxL . hashScriptTxWitsL .~ [fromNativeScript guardScript]
 
     it "A failing native script required as guard results in a predicate failure" $ do
       let guardScriptFailing = RequireAnyOf []
@@ -115,10 +119,9 @@ spec = describe "UTXOW" $ do
 
     it "A redundant guard is ignored" $ do
       guardKeyHash <- KeyHashObj <$> freshKeyHash
-      let tx =
-            mkBasicTx mkBasicTxBody
-              & bodyTxL . guardsTxBodyL .~ [guardKeyHash]
-      submitTx_ tx
+      submitAnyTx_ $
+        mkBasicTx mkBasicTxBody
+          & bodyTxL . guardsTxBodyL .~ [guardKeyHash]
 
     it "Nested RequiredGuard scripts" $ do
       guardKeyHash <- KeyHashObj <$> freshKeyHash
@@ -126,11 +129,12 @@ spec = describe "UTXOW" $ do
       let guardScriptHash = hashScript @era $ fromNativeScript guardScript
       scriptHash <- impAddNativeScript $ RequireGuard (ScriptHashObj guardScriptHash)
       txIn <- produceScript scriptHash
-      let tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
+      let tx :: forall l. Typeable l => Tx l era
+          tx = mkBasicTx (mkBasicTxBody & inputsTxBodyL .~ [txIn])
       submitFailingTx
         tx
         [injectFailure $ Conway.ScriptWitnessNotValidatingUTXOW $ NES.singleton scriptHash]
-      submitTx_ $
+      submitAnyTx_ $
         tx
           & bodyTxL . guardsTxBodyL .~ [ScriptHashObj guardScriptHash, guardKeyHash]
           & witsTxL . hashScriptTxWitsL .~ [fromNativeScript guardScript]
@@ -145,6 +149,8 @@ spec = describe "UTXOW" $ do
         submitFailingTx
           tx
           [injectFailure $ MissingRequiredGuards $ NES.singleton guardKeyHash]
+        -- TODO: Switch to `submitAnyTx_` once the wrapping top-level transaction in
+        -- `dijkstraTopTxFromAnyLevel` includes the required top-level guards of the sub-transaction
         submitTx_ $ tx & bodyTxL . guardsTxBodyL .~ [guardKeyHash]
 
       it "A guard required by a sub-transaction must be present in the top-level guards" $ do
@@ -170,6 +176,8 @@ spec = describe "UTXOW" $ do
         submitFailingTx
           tx
           [injectFailure $ MalformedGuardDatums $ NES.singleton guardKeyHash]
+        -- TODO: Switch to `submitAnyTx_` once the wrapping top-level transaction in
+        -- `dijkstraTopTxFromAnyLevel` includes the required top-level guards of the sub-transaction
         submitTx_ $ tx & bodyTxL . requiredTopLevelGuardsTxBodyL .~ [(guardKeyHash, SNothing)]
 
       it "A native-script guard carrying a datum is a predicate failure" $ do
@@ -185,6 +193,8 @@ spec = describe "UTXOW" $ do
         submitFailingTx
           tx
           [injectFailure $ MalformedGuardDatums $ NES.singleton guardCred]
+        -- TODO: Switch to `submitAnyTx_` once the wrapping top-level transaction in
+        -- `dijkstraTopTxFromAnyLevel` includes the required top-level guards of the sub-transaction
         submitTx_ $ tx & bodyTxL . requiredTopLevelGuardsTxBodyL .~ [(guardCred, SNothing)]
 
       it "A Plutus-script guard's datum presence is validated" $ do
@@ -292,39 +302,42 @@ spec = describe "UTXOW" $ do
       submitFailingTx tx [injectFailure $ NotAllowedSupplementalDatums (NES.singleton datumHash) []]
 
   describe "PlutusV4" $ do
-    it "Extra redeemer for a key-locked certificate fails" $ do
-      let plutus = alwaysSucceedsNoDatum SPlutusV4
-      script <- fromPlutusScript <$> mkPlutusScript plutus
-      refAddr <- freshKeyAddrNoPtr_
-      txInitial <-
-        impAnn "Sumbitting initial TX"
-          . submitTx
-          $ mkBasicTx mkBasicTxBody
-            & bodyTxL . outputsTxBodyL
-              .~ [ mkBasicTxOut (mkAddr (hashPlutusScript plutus) StakeRefNull) mempty
-                 , mkBasicTxOut refAddr mempty & referenceScriptTxOutL .~ SJust script
-                 ]
-      stakeCred <- KeyHashObj <$> freshKeyHash
-      deposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppKeyDepositL
-      redeemerData <- arbitrary @(Data era)
-      let prp = mkCertifyingPurpose $ AsIx 0
-          tx =
-            mkBasicTx mkBasicTxBody
-              & bodyTxL . inputsTxBodyL .~ [txInAt 0 txInitial]
-              & bodyTxL . referenceInputsTxBodyL .~ [txInAt 1 txInitial]
-              & bodyTxL . certsTxBodyL .~ [RegDepositTxCert stakeCred deposit]
-      -- The extra redeemer resolves to an existing item that is not script-locked. UTXOW
-      -- reports it as ExtraRedeemers and, unlike earlier Plutus versions, PlutusV4 TxInfo
-      -- translation also fails with ScriptHashNotFoundForPurpose.
-      submitFailingTx
-        (tx & witsTxL . rdmrsTxWitsL . unRedeemersL %~ Map.insert prp (redeemerData, ExUnits 0 0))
-        [ injectFailure $ Alonzo.ExtraRedeemers [prp]
-        , injectFailure $
-            CollectErrors
-              [ BadTranslation . inject $ ScriptHashNotFoundForPurpose prp
-              ]
-        ]
-      submitTx_ tx
+    forM_ [l | l <- eraLanguages @era, l >= PlutusV4] $ \lang ->
+      withSLanguage lang $ \slang -> do
+        it "Extra redeemer for a key-locked certificate fails" $ do
+          let plutus = alwaysSucceedsNoDatum slang
+          script <- fromPlutusScript <$> mkPlutusScript plutus
+          refAddr <- freshKeyAddrNoPtr_
+          txInitial <-
+            impAnn "Sumbitting initial TX"
+              . submitTx
+              $ mkBasicTx mkBasicTxBody
+                & bodyTxL . outputsTxBodyL
+                  .~ [ mkBasicTxOut (mkAddr (hashPlutusScript plutus) StakeRefNull) mempty
+                     , mkBasicTxOut refAddr mempty & referenceScriptTxOutL .~ SJust script
+                     ]
+          stakeCred <- KeyHashObj <$> freshKeyHash
+          deposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppKeyDepositL
+          redeemerData <- arbitrary @(Data era)
+          let prp = mkCertifyingPurpose $ AsIx 0
+              tx :: forall l. Typeable l => Tx l era
+              tx =
+                mkBasicTx mkBasicTxBody
+                  & bodyTxL . inputsTxBodyL .~ [txInAt 0 txInitial]
+                  & bodyTxL . referenceInputsTxBodyL .~ [txInAt 1 txInitial]
+                  & bodyTxL . certsTxBodyL .~ [RegDepositTxCert stakeCred deposit]
+          -- The extra redeemer resolves to an existing item that is not script-locked. UTXOW
+          -- reports it as ExtraRedeemers and, unlike earlier Plutus versions, PlutusV4 TxInfo
+          -- translation also fails with ScriptHashNotFoundForPurpose.
+          submitFailingTx
+            (tx & witsTxL . rdmrsTxWitsL . unRedeemersL %~ Map.insert prp (redeemerData, ExUnits 0 0))
+            [ injectFailure $ Alonzo.ExtraRedeemers [prp]
+            , injectFailure $
+                CollectErrors
+                  [ BadTranslation . inject $ ScriptHashNotFoundForPurpose prp
+                  ]
+            ]
+          submitAnyTx_ tx
 
   describe "ExUnits" $
     forM_ (filter (>= PlutusV4) $ eraLanguages @era) $ \lang ->
@@ -360,34 +373,34 @@ spec = describe "UTXOW" $ do
                        , (goodPurpose, Left . ContextError . inject $ ScriptHashNotFoundForPurpose badPurpose)
                        ]
 
-  describe "Sub-transaction Plutus evaluation" $ do
-    it "Evaluates every sub-transaction script during phase 2" $ do
-      passingSubTx <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum SPlutusV4
-      failingSubTx <- mkPlutusSpendingTx $ alwaysFailsNoDatum SPlutusV4
-      submitPhase2Invalid_ =<< withSubTransactions [passingSubTx, failingSubTx]
+  forM_ [l | l <- eraLanguages @era, l >= PlutusV4] $ \lang -> withSLanguage lang $ \slang ->
+    describe "Sub-transaction Plutus evaluation" $ do
+      it "Evaluates every sub-transaction script during phase 2" $ do
+        passingSubTx <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum slang
+        failingSubTx <- mkPlutusSpendingTx $ alwaysFailsNoDatum slang
+        submitPhase2Invalid_ =<< withSubTransactions [passingSubTx, failingSubTx]
 
-    -- See: https://github.com/IntersectMBO/formal-ledger-specifications/issues/723
-    disableInConformanceIt "Enforces the transaction budget across sub-transactions" $ do
-      subA <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum SPlutusV4
-      subB <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum SPlutusV4
-      tx <- withSubTransactions [subA, subB]
-      let limit = ExUnits 1_500_000 200_000_000
-      modifyPParams $ ppMaxTxExUnitsL .~ limit
-      submitFailingTx
-        tx
-        [ injectFailure $
-            Alonzo.ExUnitsTooBigUTxO $
-              Mismatch
-                { mismatchSupplied = OrdExUnits $ ExUnits 2_000_000 200_000_000
-                , mismatchExpected = OrdExUnits limit
-                }
-        ]
+      it "Enforces the transaction budget across sub-transactions" $ do
+        subA <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum slang
+        subB <- mkPlutusSpendingTx $ alwaysSucceedsNoDatum slang
+        tx <- withSubTransactions [subA, subB]
+        let limit = ExUnits 1_500_000 200_000_000
+        modifyPParams $ ppMaxTxExUnitsL .~ limit
+        submitFailingTx
+          tx
+          [ injectFailure $
+              Alonzo.ExUnitsTooBigUTxO $
+                Mismatch
+                  { mismatchSupplied = OrdExUnits $ ExUnits 2_000_000 200_000_000
+                  , mismatchExpected = OrdExUnits limit
+                  }
+          ]
 
 -- Reference scripts avoid the unfinished PlutusV4 witness serialization.
 mkPlutusSpendingTx ::
-  forall era.
-  DijkstraEraImp era =>
-  Plutus 'PlutusV4 ->
+  forall era l.
+  (DijkstraEraImp era, PlutusLanguage l) =>
+  Plutus l ->
   ImpTestM era (Tx SubTx era)
 mkPlutusSpendingTx plutus = do
   script <- fromPlutusScript <$> mkPlutusScript plutus

@@ -35,6 +35,7 @@ cabal.project.local
 stack.yaml.lock
 .ghc.environment.*
 ghcid.txt
+.tricorder.yaml
 
 ## Editors
 TAGS
@@ -71,3 +72,6 @@ specs/**/.ghc.environment.x86_64-linux-*
 /.direnv
 /.envrc
 .actrc
+
+## AI
+.claude/scheduled_tasks.lock

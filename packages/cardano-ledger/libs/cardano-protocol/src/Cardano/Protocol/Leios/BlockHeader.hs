@@ -144,6 +144,10 @@ hbrEbReferencesAnnouncementL :: Lens' (HeaderBodyRaw crypto) (StrictMaybe EbRefe
 hbrEbReferencesAnnouncementL =
   lens hbrEbReferencesAnnouncement (\hbr ma -> hbr {hbrEbReferencesAnnouncement = ma})
 
+hbrBlockBodyContainsLeiosCertL :: Lens' (HeaderBodyRaw crypto) Bool
+hbrBlockBodyContainsLeiosCertL =
+  lens hbrBlockBodyContainsLeiosCert (\hbr b -> hbr {hbrBlockBodyContainsLeiosCert = b})
+
 deriving instance Crypto crypto => Show (HeaderBodyRaw crypto)
 
 deriving instance Crypto crypto => Eq (HeaderBodyRaw crypto)
@@ -363,6 +367,8 @@ headerBodyRawL p = headerBodyL p . memoRawTypeL @era
 instance (Crypto c, Era era) => EraBlockHeader (Header c) era where
   blockHeaderSizeBlockHeaderG =
     blockHeaderL . to originalBytesSize
+  blockHeaderHashBlockHeaderG =
+    blockHeaderL . to hashAnnotated
   blockIssuerBlockHeaderG =
     blockHeaderL . headerBodyL (Proxy @era) . to (hashKey . hbVk)
   blockBodySizeBlockHeaderL =
@@ -377,3 +383,5 @@ instance (Crypto c, Era era) => LeiosEraBlockHeader (Header c) era where
     blockHeaderL . headerBodyRawL (Proxy @era) . hbrVersionInfoL
   ebReferencesAnnouncementBlockHeaderL =
     blockHeaderL . headerBodyRawL (Proxy @era) . hbrEbReferencesAnnouncementL
+  blockBodyContainsLeiosCertBlockHeaderL =
+    blockHeaderL . headerBodyRawL (Proxy @era) . hbrBlockBodyContainsLeiosCertL

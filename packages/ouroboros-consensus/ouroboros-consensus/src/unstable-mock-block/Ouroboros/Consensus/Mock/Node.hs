@@ -75,10 +75,6 @@ instance
   , Show (ForgeStateUpdateError (SimpleBlock SimpleMockCrypto ext))
   , Serialise ext
   , RunMockBlock SimpleMockCrypto ext
-  , ChainDepStateSupportsPeras
-      (ChainDepState (BlockProtocol (SimpleBlock SimpleMockCrypto ext)))
-  , ChainDepStateSupportsPeras
-      (Ticked (ChainDepState (BlockProtocol (SimpleBlock SimpleMockCrypto ext))))
   , LeiosProtocol (BlockProtocol (SimpleBlock SimpleMockCrypto ext))
   , PerasProtocol (BlockProtocol (SimpleBlock SimpleMockCrypto ext))
   ) =>
@@ -106,7 +102,7 @@ simpleBlockForging aCanBeLeader aForgeExt =
     , canBeLeader = aCanBeLeader
     , updateForgeState = \_ _ _ -> return $ ForgeStateUpdated ()
     , checkCanForge = \_ _ _ _ _ -> return ()
-    , forgeBlock = return . forgeSimple aForgeExt
+    , forgeBlock = \args -> return (ForgeBlockResult (forgeSimple aForgeExt args) Nothing)
     , finalize = pure ()
     }
  where

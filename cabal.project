@@ -154,6 +154,7 @@ allow-newer:
   , cardano-api:cardano-ledger-core
   , cardano-api:cardano-protocol
 
+  , cardano-config:cardano-ledger-alonzo
   , cardano-config:cardano-ledger-conway
   , cardano-config:cardano-ledger-core
   , cardano-config:cardano-ledger-dijkstra

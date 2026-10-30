@@ -171,8 +171,6 @@ runForge epochSize_ nextSlot opts chainDB blockForging cfg genTxs = do
             case mayMpRes of
               Nothing -> lift $ warnTimeout currentSlot txs
               Just mpRes -> lift $ warnRejected currentSlot txs mpRes
-    -- TODO: DBSynthesizer does not currently support including Peras certificates in blocks
-    let includePerasCert _ _ = pure Nothing
     -- Forge a block for each credential.
     -- A block is adopted when forge returns `Just ()`.
     -- If more than one is a leader in this slot, there will be a fork and some block will be orphaned in VolatileDB.
@@ -180,7 +178,16 @@ runForge epochSize_ nextSlot opts chainDB blockForging cfg genTxs = do
       mapM
         ( \bf ->
             withEarlyExit $
-              forge nullTracer nullTracer cfg chainDB mempool bf includePerasCert currentSlot
+              forge
+                nullTracer
+                nullTracer
+                cfg
+                chainDB
+                mempool
+                bf
+                (\_ -> pure Nothing)
+                (\_ _ -> pure ())
+                currentSlot
         )
         blockForging
     pure $ any isJust results

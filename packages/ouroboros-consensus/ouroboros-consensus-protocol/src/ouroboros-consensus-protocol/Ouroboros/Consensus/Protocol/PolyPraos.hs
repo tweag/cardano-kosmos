@@ -541,12 +541,6 @@ deriving instance
   (Crypto c, Show (VoidUnlessLeios proto ())) =>
   Show (PolyPraosValidationErr proto c)
 
-instance ChainDepStateSupportsPeras (PolyPraosState proto) where
-  getEpochNonce = praosStateEpochNonce
-
-instance ChainDepStateSupportsPeras (Ticked (PolyPraosState proto)) where
-  getEpochNonce = praosStateEpochNonce . tickedPraosStateChainDepState
-
 -- | 'getPerasLedgerView' for every Praos.
 getPerasLedgerViewPolyPraos ::
   Foldable (WhenPeras proto) =>
@@ -796,7 +790,7 @@ mkLeiosAnnouncement issuer ann =
   MkLeiosAnnouncement
     { announcementElectee = issuer
     , announcementEbHash =
-        Leios.MkEbHash $ Hash.hashToBytes $ extractHash $ ebReferencesAnnouncementHash ann
+        extractHash $ ebReferencesAnnouncementHash ann
     , announcementEbSize = ebReferencesAnnouncementSize ann
     }
 

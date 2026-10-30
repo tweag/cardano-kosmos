@@ -192,7 +192,6 @@ library
     Ouroboros.Consensus.Ledger.Query.Version
     Ouroboros.Consensus.Ledger.SupportsMempool
     Ouroboros.Consensus.Ledger.SupportsPeerSelection
-    Ouroboros.Consensus.Ledger.SupportsPeras
     Ouroboros.Consensus.Ledger.SupportsProtocol
     Ouroboros.Consensus.Ledger.Tables
     Ouroboros.Consensus.Ledger.Tables.Basics
@@ -406,6 +405,7 @@ library
     cardano-diffusion:api,
     cardano-ledger-binary ^>=1.10,
     cardano-ledger-core ^>=1.23,
+    cardano-ledger-dijkstra ^>=0.5,
     cardano-prelude,
     cardano-slotting,
     cardano-strict-containers,
@@ -1026,6 +1026,7 @@ test-suite leios-storage-test
   build-depends:
     base,
     bytestring,
+    cardano-crypto-class,
     cardano-slotting,
     containers,
     contra-tracer,
@@ -1042,7 +1043,6 @@ test-suite leios-storage-test
     text,
     time,
     unstable-consensus-testlib,
-    vector,
 
 benchmark mempool-bench
   import: common-bench
@@ -1159,6 +1159,7 @@ benchmark LeiosDB-bench
     async,
     base,
     bytestring,
+    cardano-crypto-class,
     cardano-slotting,
     containers,
     contra-tracer,
@@ -1167,7 +1168,6 @@ benchmark LeiosDB-bench
     resource-registry,
     temporary,
     time,
-    vector,
 
 benchmark LeiosDB-gc-bench
   import: common-bench
@@ -1179,6 +1179,7 @@ benchmark LeiosDB-gc-bench
     async,
     base,
     bytestring,
+    cardano-crypto-class,
     cardano-slotting,
     contra-tracer,
     direct-sqlite,
@@ -1190,7 +1191,6 @@ benchmark LeiosDB-gc-bench
     temporary,
     text,
     time,
-    vector,
 
 benchmark txid-eq-ord-instances-bench
   import: common-bench
@@ -1684,7 +1684,7 @@ library cardano
     cardano-crypto-class:cardano-crypto-class,
     cardano-crypto-wrapper,
     cardano-ledger-allegra ^>=1.10,
-    cardano-ledger-alonzo ^>=1.17,
+    cardano-ledger-alonzo ^>=1.18,
     cardano-ledger-api ^>=1.16,
     cardano-ledger-babbage ^>=1.15,
     cardano-ledger-binary,
@@ -1884,6 +1884,7 @@ test-suite shelley-test
   other-modules:
     Test.Consensus.Shelley.Coherence
     Test.Consensus.Shelley.EndorserBlock
+    Test.Consensus.Shelley.Forge
     Test.Consensus.Shelley.Golden
     Test.Consensus.Shelley.Integrity
     Test.Consensus.Shelley.LedgerTables
@@ -1896,9 +1897,11 @@ test-suite shelley-test
     base,
     bytestring,
     cardano-binary,
+    cardano-crypto-class,
     cardano-ledger-alonzo:{cardano-ledger-alonzo, testlib},
     cardano-ledger-api,
     cardano-ledger-babbage:testlib,
+    cardano-ledger-binary,
     cardano-ledger-conway:testlib,
     cardano-ledger-core,
     cardano-ledger-dijkstra:{cardano-ledger-dijkstra, testlib},
@@ -1924,7 +1927,6 @@ test-suite shelley-test
     tasty-quickcheck,
     unstable-cardano-testlib,
     unstable-shelley-testlib,
-    vector,
 
 library unstable-cardano-testlib
   import: common-lib

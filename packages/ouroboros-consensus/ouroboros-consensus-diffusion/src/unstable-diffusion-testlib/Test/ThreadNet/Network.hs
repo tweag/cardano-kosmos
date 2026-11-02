@@ -88,12 +88,11 @@ import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
-import Ouroboros.Consensus.Leios.Types (LeiosEb, LeiosPoint, LeiosTx, LeiosVote)
+import Ouroboros.Consensus.Leios.Types (LeiosPoint, LeiosVote)
 import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CSClient
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
-import Ouroboros.Consensus.MiniProtocol.LeiosFetch.Type (LeiosFetch)
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type (LeiosNotify)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert (PerasCertDiffusion)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote (PerasVoteDiffusion)
@@ -889,7 +888,7 @@ runThreadNetwork
           <$> allocate registry (const (ChainDB.openDB chainDbArgs)) ChainDB.closeDB
 
       let customForgeBlock ::
-            BlockForging m blk -> ForgeBlockArgs blk -> m blk
+            BlockForging m blk -> ForgeBlockArgs blk -> m (ForgeBlockResult blk)
           customForgeBlock origBlockForging args@ForgeBlockArgs{..} = do
             let currentEpoch = HFF.futureSlotToEpoch future fbCurrentSlotNo
 
@@ -949,7 +948,7 @@ runThreadNetwork
 
                 -- forge the block usings the ledger state that includes
                 -- the EBB
-                blk <-
+                forged <-
                   forgeBlock
                     origBlockForging
                     args{fbCurrentTickedLedgerState = forgetLedgerTables tickedLdgSt'}
@@ -959,7 +958,7 @@ runThreadNetwork
                 -- 'Test.ThreadNet.General.prop_general' will eventually fail
                 -- because of a block rejection.
                 void $ ChainDB.addBlock chainDB InvalidBlockPunishment.noPunishment ebb
-                pure blk
+                pure forged
 
       -- This variable holds the number of the earliest slot in which the
       -- crucial txs have not yet been added. In other words, it holds the
@@ -1200,7 +1199,7 @@ runThreadNetwork
         (AnyMessage KeepAlive)
         (AnyMessage (PeerSharing NodeId))
         (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
-        (AnyMessage (LeiosFetch LeiosPoint LeiosEb LeiosTx))
+        Lazy.ByteString
     customNodeToNodeCodecs cfg ntnVersion =
       NTN.Codecs
         { cChainSyncCodec =
@@ -1234,8 +1233,8 @@ runThreadNetwork
             mapFailureCodec CodecIdFailure $
               NTN.cLeiosNotifyCodec NTN.identityCodecs
         , cLeiosFetchCodec =
-            mapFailureCodec CodecIdFailure $
-              NTN.cLeiosFetchCodec NTN.identityCodecs
+            mapFailureCodec (CodecBytesFailure "LeiosFetch") $
+              NTN.cLeiosFetchCodec binaryProtocolCodecs
         }
      where
       binaryProtocolCodecs =
@@ -1835,7 +1834,8 @@ type LimitedApp' m addr blk =
     (AnyMessage KeepAlive)
     (AnyMessage (PeerSharing addr))
     (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
-    (AnyMessage (LeiosFetch LeiosPoint LeiosEb LeiosTx))
+    -- The annotated LeiosFetch codec needs the bytes, too.
+    Lazy.ByteString
     NodeToNodeInitiatorResult
     ()
 

@@ -2,6 +2,13 @@
 
 ## 1.21.0.0
 
+* Add `fvMinPoolCost` and `fvMinPoolMargin` fields to `Cardano.Ledger.Shelley.RewardUpdate.FreeVars`
+* Remove deprecated `leaderRew`, `memberRew` and `nonMyopicMemberRew` functions
+* Add `lsLastEbAnnouncement` field to `LedgerState` and `lsLastEbAnnouncementL`:
+  - `LedgerState` encodes `lsLastEbAnnouncement`, so the on-disk ledger state format changes and requires replay
+* Add `nesLastTickSlotNo` field to `NewEpochState` and `nesLastTickSlotNoL`:
+  - `TICK` sets it to the slot it ticks to
+  - `NewEpochState` encodes `nesLastTickSlotNo`, so the on-disk ledger state format changes and requires replay
 * Add `poolReapAssertions`
 * Export `renderPoolReapViolation`
 * Remove `nesPd` field from `NewEpochState` and `nesPdL`:
@@ -18,8 +25,12 @@
 
 ### `testlib`
 
+* Add `Test.Cardano.Ledger.Shelley.Imp.TickSpec`
+* Add `withTxsInModifiedBlock`
 * Add `initTransitionConfig` to `ShelleyEraImp`
 * Add `injectGenesisStaking` and `injectFreshGenesisStakePools`
+* Add `topTxFromAnyLevel` method to `ShelleyEraImp`
+* Add `AnyLevelTx`, `submitAnyTx`, `submitAnyTx_` and `shelleyTopTxFromAnyLevel`
 * Add `getPState`
 * Add `EraForecast` superclass to `ShelleyEraImp`, together with `Eq`, `ToExpr`, `NFData` and `Typeable` superclasses for the `TICKF` event
 * Add `ToExpr` instance for `ShelleyTickfEvent`

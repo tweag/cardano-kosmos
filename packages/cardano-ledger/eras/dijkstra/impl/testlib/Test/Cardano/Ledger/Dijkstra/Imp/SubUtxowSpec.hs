@@ -32,7 +32,6 @@ import Cardano.Ledger.Plutus (
   Data (..),
   ExUnits (..),
   Language (..),
-  SLanguage (..),
   hashData,
   hashPlutusScript,
   plutusBinary,
@@ -127,7 +126,7 @@ spec = describe "SUBUTXOW" $ do
     disableInConformanceIt "minting" $
       failingScriptFails $ do
         scriptHash <- unsatisfiableTimeLock
-        subTx <- mkTokenMintingTx scriptHash
+        AnyLevelTx subTx <- mkTokenMintingTx scriptHash
         pure (subTx, scriptHash)
 
   it "SubMissingTxMetadata" $ do
@@ -293,6 +292,23 @@ spec = describe "SUBUTXOW" $ do
             (mkTopTxWithSubTxs [mkBasicTx $ mkBasicTxBody & inputsTxBodyL .~ [txIn]])
             [injectFailure . SubUnspendableUTxONoDatumHash @era $ NES.singleton txIn]
 
+  describe "Required top-level guards" $
+    forM_ [l | l <- eraLanguages @era, l >= PlutusV4] $ \lang ->
+      withSLanguage lang $ \slang ->
+        describe (show lang) $ do
+          it "Succeeds when required guard is provided" $ do
+            let
+              guardCred = ScriptHashObj $ hashPlutusScript $ alwaysSucceedsNoDatum slang
+            datum <- arbitrary
+            let
+              subTx =
+                mkBasicTx mkBasicTxBody
+                  & bodyTxL . requiredTopLevelGuardsTxBodyL .~ Map.singleton guardCred (SJust datum)
+            submitTx_ $
+              mkBasicTx mkBasicTxBody
+                & bodyTxL . guardsTxBodyL .~ [guardCred]
+                & bodyTxL . subTransactionsTxBodyL .~ [subTx]
+
   forM_ (eraLanguages @era) $ \lang ->
     withSLanguage lang $ \slang ->
       describe (show lang) $ do
@@ -330,9 +346,9 @@ spec = describe "SUBUTXOW" $ do
           withPostFixupSubTxs (fixupResetAddrWits . (witsTxL . rdmrsTxWitsL .~ mempty)) $
             submitFailingTx
               (mkTopTxWithSubTxs [scriptSpendingSubTx txIn])
-              [ injectFailure $ Conway.CollectErrors [NoRedeemer missingRedeemer]
-              , injectFailure $
+              [ injectFailure $
                   SubMissingRedeemers @era [(missingRedeemer, redeemerSameAsDatumHash)]
+              , injectFailure $ Conway.CollectErrors [NoRedeemer missingRedeemer]
               ]
 
         it "SubExtraRedeemers, alongside a needed redeemer" $ do
@@ -348,13 +364,13 @@ spec = describe "SUBUTXOW" $ do
             $ submitFailingLegacySubTx
               lang
               (mkTopTxWithSubTxs [scriptSpendingSubTx txIn])
-            $ NE.prependList
+            $ NE.appendList
+              [injectFailure $ SubExtraRedeemers @era [extraPurpose]]
               [ injectFailure $
                   Conway.CollectErrors
                     [BadTranslation . inject $ RedeemerPointerPointsToNothing extraPurpose]
               | lang >= PlutusV4
               ]
-              [injectFailure $ SubExtraRedeemers @era [extraPurpose]]
 
         describe "SubScriptIntegrityHashMismatch" $ do
           let testHashMismatch badHash = do
@@ -441,13 +457,13 @@ submitFailingLegacySubTx lang tx expectedFailures =
     case OMap.elems $ fixedUpTx ^. bodyTxL . subTransactionsTxBodyL of
       [subTx] ->
         pure $
-          NE.prependList
+          NE.appendList
+            expectedFailures
             [ injectFailure $
                 Conway.CollectErrors
                   [BadTranslation . inject $ UnsupportedScriptInSubTx @era lang (txIdTx subTx)]
             | lang < PlutusV4
             ]
-            expectedFailures
       _ -> assertFailure "Expected exactly one sub-transaction"
 
 -- | Every distinct reason a sub-transaction requires a key witness,
@@ -643,10 +659,8 @@ malformedGuardDatumCases =
   ,
     ( "a Plutus script guard without a datum"
     , do
-        -- TODO: Plutus guards require PlutusV4, which `eraLanguages`
-        -- does not reach while `eraMaxLanguage` is PlutusV3, so this
-        -- row names the language directly instead of iterating.
-        plutusScript <- mkPlutusScript $ alwaysSucceedsNoDatum SPlutusV4
+        lang <- elements [l | l <- eraLanguages @era, l >= PlutusV4]
+        plutusScript <- withSLanguage lang $ mkPlutusScript . alwaysSucceedsNoDatum
         let guardScript = fromPlutusScript plutusScript :: Script era
             guardCred = ScriptHashObj $ hashScript guardScript
         pure (guardCred, Map.singleton guardCred SNothing)

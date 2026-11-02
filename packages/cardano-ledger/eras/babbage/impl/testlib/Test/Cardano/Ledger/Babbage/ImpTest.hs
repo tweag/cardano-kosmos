@@ -19,8 +19,7 @@ module Test.Cardano.Ledger.Babbage.ImpTest (
   produceRefScript,
   produceRefScripts,
   produceRefScriptsTx,
-  mkTxWithRefInputs,
-  submitTxWithRefInputs,
+  mkTxWithInputsAndRefInputs,
 ) where
 
 import Cardano.Ledger.Alonzo.Plutus.Context (EraPlutusContext (..))
@@ -31,7 +30,7 @@ import Cardano.Ledger.Babbage.Rules (BabbageUtxoPredFailure, BabbageUtxowPredFai
 import Cardano.Ledger.Babbage.TxInfo (BabbageContextError)
 import Cardano.Ledger.BaseTypes (Inject, StrictMaybe (..))
 import Cardano.Ledger.Plutus.CostModels (CostModelsUpdate (..), updateCostModels)
-import Cardano.Ledger.Plutus.Language (Language (..), SLanguage (..))
+import Cardano.Ledger.Plutus.Language (Language (..))
 import Cardano.Ledger.Shelley.LedgerState (
   UTxO (..),
   curPParamsEpochStateL,
@@ -41,6 +40,7 @@ import Cardano.Ledger.Shelley.LedgerState (
 import Cardano.Ledger.Tools (ensureMinCoinTxOut, setMinCoinTxOut)
 import Cardano.Ledger.TxIn (TxIn, mkTxInPartial)
 import Control.Monad (forM, (>=>))
+import Data.Data (Typeable)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
@@ -67,6 +67,7 @@ instance ShelleyEraImp BabbageEra where
   genRegTxCert = shelleyGenRegTxCert
   genUnRegTxCert = shelleyGenUnRegTxCert
   delegStakeTxCert = shelleyDelegStakeTxCert
+  topTxFromAnyLevel = shelleyTopTxFromAnyLevel
 
 babbageFixupTx ::
   ( HasCallStack
@@ -124,8 +125,7 @@ instance AllegraEraImp BabbageEra
 
 instance MaryEraImp BabbageEra
 
-instance AlonzoEraImp BabbageEra where
-  scriptTestContexts = plutusTestScripts SPlutusV1 <> plutusTestScripts SPlutusV2
+instance AlonzoEraImp BabbageEra
 
 produceRefScript ::
   (ShelleyEraImp era, BabbageEraTxOut era) =>
@@ -157,23 +157,16 @@ produceRefScriptsTx scripts = do
   let txBody = mkBasicTxBody & outputsTxBodyL .~ SSeq.fromList (NE.toList txOuts)
   submitTx (mkBasicTx txBody)
 
-mkTxWithRefInputs ::
-  (ShelleyEraImp era, BabbageEraTxBody era) =>
-  TxIn ->
-  NonEmpty TxIn ->
-  Tx TopTx era
-mkTxWithRefInputs txIn refIns =
+mkTxWithInputsAndRefInputs ::
+  (ShelleyEraImp era, BabbageEraTxBody era, Typeable l) =>
+  [TxIn] ->
+  [TxIn] ->
+  Tx l era
+mkTxWithInputsAndRefInputs txIns refIns =
   mkBasicTx $
     mkBasicTxBody
-      & referenceInputsTxBodyL .~ Set.fromList (NE.toList refIns)
-      & inputsTxBodyL .~ [txIn]
-
-submitTxWithRefInputs ::
-  (ShelleyEraImp era, BabbageEraTxBody era) =>
-  TxIn ->
-  NonEmpty TxIn ->
-  ImpTestM era (Tx TopTx era)
-submitTxWithRefInputs txIn refIns = submitTx $ mkTxWithRefInputs txIn refIns
+      & referenceInputsTxBodyL .~ Set.fromList refIns
+      & inputsTxBodyL .~ Set.fromList txIns
 
 class
   ( AlonzoEraImp era

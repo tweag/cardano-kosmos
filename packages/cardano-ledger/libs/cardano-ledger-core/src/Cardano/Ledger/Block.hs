@@ -34,12 +34,19 @@ module Cardano.Ledger.Block (
   EbReferencesAnnouncement (..),
 ) where
 
-import Cardano.Ledger.BaseTypes (Nonce (..), ProtVer (..), StrictMaybe)
+import Cardano.Ledger.BaseTypes (
+  KeyValuePairs (..),
+  Nonce (..),
+  ProtVer (..),
+  StrictMaybe,
+  ToKeyValuePairs (..),
+ )
 import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..), decodeRecordNamed, encodeListLen)
 import Cardano.Ledger.Core
 import Cardano.Ledger.TxIn (TxIn (..))
 import Cardano.Slotting.Slot (SlotNo)
 import Control.DeepSeq (NFData)
+import Data.Aeson (ToJSON, (.=))
 import Data.Foldable (toList)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -120,6 +127,7 @@ data LeiosBbodySignal era
 class Era era => EraBlockHeader h era where
   blockIssuerBlockHeaderG :: SimpleGetter (Block h era) (KeyHash BlockIssuer)
   blockHeaderSizeBlockHeaderG :: SimpleGetter (Block h era) Int
+  blockHeaderHashBlockHeaderG :: SimpleGetter (Block h era) (SafeHash EraIndependentBlockHeader)
   blockBodySizeBlockHeaderL :: Lens' (Block h era) Word32
   blockBodyHashBlockHeaderL :: Lens' (Block h era) (Hash HASH EraIndependentBlockBody)
   slotNoBlockHeaderL :: Lens' (Block h era) SlotNo
@@ -143,6 +151,8 @@ class Era era => LeiosEraBlockHeader h era where
   versionInfoBlockHeaderL :: Lens' (Block h era) BlockHeaderVersionInfo
 
   ebReferencesAnnouncementBlockHeaderL :: Lens' (Block h era) (StrictMaybe EbReferencesAnnouncement)
+
+  blockBodyContainsLeiosCertBlockHeaderL :: Lens' (Block h era) Bool
 
 -- | Version information reported by the block producer in the block header.
 --
@@ -174,6 +184,7 @@ data EbReferencesAnnouncement = EbReferencesAnnouncement
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (NoThunks, NFData)
+  deriving (ToJSON) via KeyValuePairs EbReferencesAnnouncement
 
 instance EncCBOR EbReferencesAnnouncement where
   encCBOR (EbReferencesAnnouncement h s) =
@@ -187,3 +198,9 @@ instance DecCBOR EbReferencesAnnouncement where
       EbReferencesAnnouncement
         <$> decCBOR
         <*> decCBOR
+
+instance ToKeyValuePairs EbReferencesAnnouncement where
+  toKeyValuePairs (EbReferencesAnnouncement h s) =
+    [ "hash" .= h
+    , "size" .= s
+    ]

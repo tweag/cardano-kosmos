@@ -63,6 +63,7 @@ import Data.Default (Default (def))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe.Strict (StrictMaybe (..))
+import qualified Data.Set as Set
 import Data.TreeDiff (Expr, ToExpr (toExpr))
 import GHC.Generics (Generic)
 import GHC.Natural (Natural)
@@ -166,6 +167,7 @@ pStateZero =
     , psStakePools = Map.empty
     , psFutureStakePoolParams = Map.empty
     , psRetiring = Map.empty
+    , psBlsKeyHashes = Set.empty
     }
 
 dPStateZero :: EraCertState era => CertState era
@@ -188,7 +190,7 @@ uTxOStateZero =
     mempty
 
 ledgerStateZero :: forall era. Reflect era => LedgerState era
-ledgerStateZero = LedgerState uTxOStateZero dPStateZero
+ledgerStateZero = LedgerState uTxOStateZero dPStateZero SNothing
 
 epochStateZero :: Reflect era => EpochState era
 epochStateZero =
@@ -203,6 +205,7 @@ epochStateZero =
 newEpochStateZero :: forall era. Reflect era => NewEpochState era
 newEpochStateZero =
   NewEpochState
+    minBound
     (EpochNo 0)
     blocksMadeZero
     blocksMadeZero
@@ -268,6 +271,7 @@ instance Extract (PState era) era where
       (mStakePools x)
       (mFStakePools x)
       (mRetiring x)
+      Set.empty
 
 instance Extract (VState era) era where
   extract _ = VState def def (EpochNo 0)
@@ -296,7 +300,7 @@ extractCertState x = case whichCertState (reify @era) of
       & (certVStateL .~ extract x)
 
 instance Reflect era => Extract (LedgerState era) era where
-  extract x = LedgerState (extract x) (extractCertState x)
+  extract x = LedgerState (extract x) (extractCertState x) SNothing
 
 instance Reflect era => Extract (EpochState era) era where
   extract x =
@@ -311,6 +315,7 @@ instance Reflect era => Extract (EpochState era) era where
 instance forall era. Reflect era => Extract (NewEpochState era) era where
   extract x =
     NewEpochState
+      minBound
       (mEL x)
       (BlocksMade (mBprev x))
       (BlocksMade (mBcur x))

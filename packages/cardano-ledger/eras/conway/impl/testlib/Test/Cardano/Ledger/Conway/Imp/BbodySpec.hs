@@ -9,6 +9,7 @@
 
 module Test.Cardano.Ledger.Conway.Imp.BbodySpec (spec) where
 
+import Cardano.Ledger.Alonzo.Scripts (eraLanguages)
 import Cardano.Ledger.Babbage.Core
 import Cardano.Ledger.BaseTypes (Mismatch (..), ProtVer (..), natVersion)
 import Cardano.Ledger.Coin (Coin (..))
@@ -17,14 +18,13 @@ import Cardano.Ledger.Conway.Rules (
   ConwayBbodyPredFailure (..),
   totalRefScriptSizeInBlock,
  )
-import Cardano.Ledger.Plutus (SLanguage (..), hashPlutusScript)
+import Cardano.Ledger.Plutus (hashPlutusScript, withSLanguage)
 import Cardano.Ledger.Shelley.Scripts (
   pattern RequireSignature,
  )
 import Data.Foldable (for_)
 import Data.List (inits)
 import Data.List.NonEmpty (NonEmpty (..))
-import qualified Data.List.NonEmpty as NE
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
 import Data.Traversable (for)
@@ -34,14 +34,18 @@ import Test.Cardano.Ledger.Babbage.ImpTest
 import Test.Cardano.Ledger.Conway.ImpTest (ConwayEraImp)
 import Test.Cardano.Ledger.Core.Utils (txInAt)
 import Test.Cardano.Ledger.Imp.Common
-import Test.Cardano.Ledger.Plutus.Examples (alwaysFailsNoDatum, purposeIsWellformedNoDatum)
+import Test.Cardano.Ledger.Plutus.Examples (
+  alwaysFailsWithDatum,
+  purposeIsWellformedNoDatum,
+ )
 
 spec ::
   forall era.
   ConwayEraImp era => SpecWith (ImpInit (LedgerSpec era))
 spec = describe "BBODY" $ do
   it "BodyRefScriptsSizeTooBig" $ do
-    plutusScript <- mkPlutusScript @era $ purposeIsWellformedNoDatum SPlutusV2
+    lang <- elements $ eraLanguages @era
+    plutusScript <- withSLanguage lang $ mkPlutusScript @era . purposeIsWellformedNoDatum
     let scriptSize = originalBytesSize plutusScript
     pp <- getsPParams id
 
@@ -70,7 +74,7 @@ spec = describe "BBODY" $ do
       -- reference inputs
       txIn <- freshKeyAddr_ >>= \addr -> sendCoinTo addr (Coin 100_000_000)
       refIns <- replicateM n $ produceRefScript (fromPlutusScript plutusScript)
-      pure $ mkTxWithRefInputs txIn (NE.fromList refIns)
+      pure $ mkTxWithInputsAndRefInputs [txIn] refIns
 
     submitFailingBlock
       txs
@@ -85,7 +89,9 @@ spec = describe "BBODY" $ do
 
   it "BodyRefScriptsSizeTooBig with reference scripts in the same block" $
     whenMajorVersionAtLeast @11 $ do
-      Just plutusScript <- pure $ mkPlutusScript @era $ purposeIsWellformedNoDatum SPlutusV2
+      lang <- elements $ eraLanguages @era
+      Just plutusScript <- pure $ withSLanguage lang $ \slang ->
+        mkPlutusScript @era $ purposeIsWellformedNoDatum slang
       let scriptSize = originalBytesSize plutusScript
 
       pp <- getsPParams id
@@ -149,23 +155,26 @@ spec = describe "BBODY" $ do
       -- spend script using the reference script
       spendScriptWithRefScriptTx <-
         mkTxWithExpectedSize scriptSize $
-          submitTxWithRefInputs scriptSpendIn [refScriptTx1In]
+          submitTx $
+            mkTxWithInputsAndRefInputs [scriptSpendIn] [refScriptTx1In]
       -- spend using two ref inputs
       spendScriptWithTwoRefScriptsTx <-
         mkTxWithExpectedSize (2 * scriptSize) $
-          submitTxWithRefInputs scriptSpendIn2 [refScriptTx1In, txInAt 0 (fst refScriptTx2)]
+          submitTx $
+            mkTxWithInputsAndRefInputs [scriptSpendIn2] [refScriptTx1In, txInAt 0 (fst refScriptTx2)]
       -- spend the root utxo
       rootIn <- fst <$> getImpRootTxOut
       spendRootUtxoTx <-
         mkTxWithExpectedSize scriptSize $
-          submitTxWithRefInputs rootIn [refScriptTx1In]
+          submitTx $
+            mkTxWithInputsAndRefInputs [rootIn] [refScriptTx1In]
       -- spend the reference script itself
       -- We must check the size without submitting the transaction,
       -- since applying it removes the reference script from the UTxO
       spendRefScriptTx <-
         mkTxWithExpectedSize scriptSize $
           fixupTx $
-            mkTxWithRefInputs refScriptTx1In (NE.fromList [refScriptTx1In])
+            mkTxWithInputsAndRefInputs [refScriptTx1In] [refScriptTx1In]
 
       let txsWithRefScriptSizes =
             [ refScriptTx1
@@ -196,8 +205,9 @@ spec = describe "BBODY" $ do
     protVer <- getsPParams ppProtocolVersionL
 
     -- produce an utxo with a failing script
-    failingPlutusTxIn <- do
-      let plutus = alwaysFailsNoDatum SPlutusV3
+    lang <- elements $ eraLanguages @era
+    failingPlutusTxIn <- withSLanguage lang $ \slang -> do
+      let plutus = alwaysFailsWithDatum slang
       produceScript $ hashPlutusScript plutus
 
     -- produce a utxo with a succeeding script
@@ -228,7 +238,7 @@ spec = describe "BBODY" $ do
 
       -- consume the script, passing the output from the previous collateral as reference input
       let refScriptTxIn = txInAt 1 createCollateralTx
-      useCollateralTx <- submitTxWithRefInputs scriptTxIn [refScriptTxIn]
+      useCollateralTx <- submitTx $ mkTxWithInputsAndRefInputs [scriptTxIn] [refScriptTxIn]
       totalRefScriptSizeInBlock protVer [createCollateralTx, useCollateralTx]
         <$> getUTxO `shouldReturn` scriptSize
       pure [createCollateralTx, useCollateralTx]

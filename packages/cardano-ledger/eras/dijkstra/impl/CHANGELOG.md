@@ -2,6 +2,18 @@
 
 ## 0.5.0.0
 
+* Remove the `StakePoolCostTooLowPOOL` predicate failure
+* Add `getDijkstraMinFeeTxUtxo` and use it in `getMinFeeTxUtxo`
+* Add `DecCBOR (Annotator EbReferences)` and `ToCBOR EbReferences`, so that `EbReferences` can be decoded without the full input at hand, eg from the network
+* Add `LeiosCertMissing` and `LeiosCertBlockBodyHasTxs` constructors to `DijkstraBbodyPredFailure`
+* Rename `decodeDijkstraTopTx` to `decodeDijkstraTopTxInMempool`
+* Remove the `DijkstraEraTx` type class and its `hashTx` method in favour of `HashAnnotated (Tx TopTx DijkstraEra) EraIndependentTx`
+* Add `DijkstraTopTx` and `DijkstraTopTxRaw`
+* Replace the `DijkstraTx` constructor of `DijkstraTx TopTx era`, and its `dtBody`, `dtWits`, `dtIsPhase2Valid` and `dtAuxData` fields, with the `DijkstraTopTx` constructor
+* Add `SafeToHash` and `HashAnnotated` instances for `DijkstraTx TopTx era`, and a `SafeToHash` instance for `Tx TopTx DijkstraEra`
+* Replace the `AlonzoEraTx era` constraint with `SafeToHash (Tx TopTx era)` on `toCBORForBlockInclusion`, on the `DijkstraBlockBody` pattern and on `EncCBOR (DijkstraBlockBodyRaw era)`, and with `Era era` and `SafeToHash (Tx TopTx era)` on `mkBasicBlockBodyDijkstra`
+* Add `BlsKeyAlreadyRegistered` constructor to `DijkstraPoolPredFailure`
+* Change the field type of `RequiredTopLevelGuardsNotSupported` to `NonEmptySet (Credential Guard)`
 * Add `Cardano.Ledger.Dijkstra.Block.Endorser`, with `DijkstraEndorserBlock` and related types, and the `EraEndorserBlock` class
 * Extend `DijkstraEraForecast` with Peras protocol parameters
 * Validate the treasury value and the reference scripts size in `LEDGER`, and the treasury value in `SUBLEDGER`, regardless of phase-2 validity
@@ -20,8 +32,16 @@
 * Change `eraMaxLanguage` to `PlutusV4`
 * Rename `requiredTopLevelGuardsL` to `requiredTopLevelGuardsTxBodyL`
 
+### `cddl`
+
+* Add the `nonempty_omap` generic rule, with `nonemptyOMap` and a `HuddleRule2 "nonempty_omap"` instance
+* Add the `eb_references` rule, a `nonempty_omap` from transaction hash to transaction size
+
 ### `testlib`
 
+* Add `ToExpr` instances for `DijkstraTopTx DijkstraEra` and `DijkstraTopTxRaw DijkstraEra`
+* Add the `SafeToHash (Tx TopTx era)` constraint to `genSmallDijkstraTxsBlockBody`, and replace the `AlonzoEraTx era` constraint with it on `genSmallDijkstraCertBlockBody`
+* Replace the `EraBlockBody era`, `AlonzoEraTx era` and `SafeToHash (TxWits era)` constraints on `Arbitrary (DijkstraBlockBody era)` with `SafeToHash (Tx TopTx era)`
 * Add `Arbitrary` instance for `EbReferences`
 * Add `DijkstraEraForecast` superclass to `DijkstraEraImp`
 

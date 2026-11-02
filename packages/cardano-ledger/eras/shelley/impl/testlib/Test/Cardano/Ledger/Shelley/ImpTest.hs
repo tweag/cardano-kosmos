@@ -66,6 +66,9 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   freshBlsKey,
   submitTx,
   submitTx_,
+  AnyLevelTx (..),
+  submitAnyTx,
+  submitAnyTx_,
   submitTxAnn,
   submitTxAnn_,
   submitFailingTx,
@@ -81,6 +84,7 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   submitFailingBlockM,
   withTxsInBlock_,
   withTxsInBlock,
+  withTxsInModifiedBlock,
   withTxsInFailingBlock,
   withTxsInFailingBlockM,
   modifyBlockBody,
@@ -174,6 +178,7 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   shelleyGenRegTxCert,
   shelleyGenUnRegTxCert,
   shelleyDelegStakeTxCert,
+  shelleyTopTxFromAnyLevel,
 
   -- * Logging
   Doc,
@@ -652,6 +657,10 @@ class
 
   delegStakeTxCert :: Credential Staking -> KeyHash StakePool -> TxCert era
 
+  topTxFromAnyLevel :: (forall l. Typeable l => Tx l era) -> ImpTestM era (Tx TopTx era)
+
+data AnyLevelTx era = AnyLevelTx (forall l. Typeable l => Tx l era)
+
 impSatisfySignature ::
   KeyHash Witness ->
   Set.Set (KeyHash Witness) ->
@@ -979,6 +988,10 @@ instance
   genRegTxCert = shelleyGenRegTxCert
   genUnRegTxCert = shelleyGenUnRegTxCert
   delegStakeTxCert = shelleyDelegStakeTxCert
+  topTxFromAnyLevel = shelleyTopTxFromAnyLevel
+
+shelleyTopTxFromAnyLevel :: (forall l. Typeable l => Tx l era) -> ImpTestM era (Tx TopTx era)
+shelleyTopTxFromAnyLevel atx = pure $ atx @TopTx
 
 -- | Figure out all the Byron Addresses that need witnesses as well as all of the
 -- KeyHashes for Shelley Key witnesses that are required.
@@ -1379,6 +1392,18 @@ submitTx_ = void . submitTx
 submitTx :: (HasCallStack, ShelleyEraImp era) => Tx TopTx era -> ImpTestM era (Tx TopTx era)
 submitTx tx = trySubmitTx tx >>= expectRightDeepExpr . first fst
 
+submitAnyTx ::
+  (HasCallStack, ShelleyEraImp era) =>
+  (forall l. Typeable l => Tx l era) ->
+  ImpTestM era (Tx TopTx era)
+submitAnyTx = submitTx <=< topTxFromAnyLevel
+
+submitAnyTx_ ::
+  (HasCallStack, ShelleyEraImp era) =>
+  (forall l. Typeable l => Tx l era) ->
+  ImpTestM era ()
+submitAnyTx_ = void . submitAnyTx
+
 trySubmitTx ::
   forall era.
   ( ShelleyEraImp era
@@ -1621,6 +1646,17 @@ withTxsInBlock ::
   ImpTestM era (Block TestBlockHeader era)
 withTxsInBlock = expectRightDeepExpr <=< withTxsInBlockEither id Nothing
 
+-- | Gather all the txs submitted by @act@, modify the block created from them with the supplied
+-- function and resubmit it as a block that's expected to succeed.
+withTxsInModifiedBlock ::
+  ( HasCallStack
+  , ShelleyEraImp era
+  ) =>
+  (Block TestBlockHeader era -> Block TestBlockHeader era) ->
+  ImpTestM era () ->
+  ImpTestM era (Block TestBlockHeader era)
+withTxsInModifiedBlock modifyBlock = expectRightDeepExpr <=< withTxsInBlockEither modifyBlock Nothing
+
 -- | Gather all the txs submitted by @act@ and resubmit them as a block
 -- that's expected to fail with the given predicate failures.
 withTxsInFailingBlock ::
@@ -1740,6 +1776,7 @@ tryTxsInBlock ::
 tryTxsInBlock modifyBlock txs finalState blockIssuer = do
   slotNo <- use impCurSlotNoG
   nes <- use impNESL
+  blockHeaderHash <- arbitrary
 
   let
     ProtVer curMajor curMinor = nes ^. nesEsL . curPParamsEpochStateL . ppProtocolVersionL
@@ -1749,10 +1786,12 @@ tryTxsInBlock modifyBlock txs finalState blockIssuer = do
         { tbhIssuer = blockIssuer
         , tbhBSize = fromIntegral $ blockBodySize (ProtVer (eraProtVerLow @era) 0) blockBody
         , tbhHSize = 0
+        , tbhHash = blockHeaderHash
         , tbhBHash = hashBlockBody blockBody
         , tbhSlot = slotNo
         , tbhVersionInfo = BlockHeaderVersionInfo (getVersion32 curMajor) curMinor
         , tbhEbRefsAnn = SNothing
+        , tbhBlockBodyContainsLeiosCert = False
         }
     block = modifyBlock Block {blockHeader, blockBody}
 

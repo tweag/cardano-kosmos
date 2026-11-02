@@ -64,7 +64,7 @@ module Test.Consensus.Leios.TestBlock
 
 import Cardano.Binary (DecoderError, decodeMaybe, encodeMaybe, enforceSize, fromCBOR, toCBOR)
 import qualified Cardano.Crypto.Hash as Hash
-import Cardano.Ledger.BaseTypes (BoundedRational (..), Milliseconds32 (..))
+import Cardano.Ledger.BaseTypes (BoundedRational (..), Milliseconds32 (..), Nonce (NeutralNonce))
 import Cardano.Ledger.Binary
   ( DecCBOR (..)
   , EncCBOR (..)
@@ -121,11 +121,10 @@ import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsPeerSelection
   ( LedgerSupportsPeerSelection (..)
   )
-import Ouroboros.Consensus.Ledger.SupportsPeras (LedgerStateSupportsPeras)
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
 import Ouroboros.Consensus.Leios.Protocol
-import Ouroboros.Consensus.Leios.Types (BytesSize, EbHash, decodeEbHash, encodeEbHash)
+import Ouroboros.Consensus.Leios.Types (BytesSize, EndorserBlockHash)
 import Ouroboros.Consensus.Node.InitStorage (NodeInitStorage (..))
 import Ouroboros.Consensus.Node.NetworkProtocolVersion
 import Ouroboros.Consensus.Node.Run
@@ -137,6 +136,7 @@ import Ouroboros.Consensus.Node.Serialisation
 import Ouroboros.Consensus.Peras.Cert.Mock (MockPerasCert (..))
 import Ouroboros.Consensus.Peras.Context
   ( StateSupportsPerasEpochContext (..)
+  , dummyPoolDistr
   , mkBoundedPerasEpochContextWith
   )
 import Ouroboros.Consensus.Peras.Crypto.Mock
@@ -188,7 +188,7 @@ data instance Header LeiosTestBlock = LeiosTestHeader
   , lthSlot :: !SlotNo
   , lthIssuer :: !Word64
   -- ^ Stands in for the block issuer, so that the election is a real identity.
-  , lthAnnouncement :: !(Maybe (EbHash, BytesSize))
+  , lthAnnouncement :: !(Maybe (EndorserBlockHash, BytesSize))
   , lthValidity :: !Validity
   -- ^ Whether the protocol accepts this header; see 'setInvalid'.
   , lthCounter :: !CounterVsImmTip
@@ -297,7 +297,7 @@ onHeader :: (Header LeiosTestBlock -> Header LeiosTestBlock) -> LeiosTestBlock -
 onHeader f = LeiosTestBlock . f . ltbHeader
 
 -- | Announce the endorser block with this hash, claiming this size.
-setAnnouncement :: EbHash -> BytesSize -> LeiosTestBlock -> LeiosTestBlock
+setAnnouncement :: EndorserBlockHash -> BytesSize -> LeiosTestBlock -> LeiosTestBlock
 setAnnouncement ebHash size = onHeader $ \hdr -> hdr{lthAnnouncement = Just (ebHash, size)}
 
 -- | Move this block to another slot.
@@ -570,15 +570,17 @@ instance LedgerSupportsProtocol LeiosTestBlock where
   ledgerViewForecastAt cfg st =
     constantForecastInRange (Just (ltlcForecastRange cfg)) (ltlcLeios cfg) (getTipSlot st)
 
-instance LedgerStateSupportsPeras (LedgerState LeiosTestBlock)
-
-instance LedgerStateSupportsPeras (Ticked LedgerState LeiosTestBlock)
-
 instance StateSupportsPerasEpochContext LeiosTestBlock where
   type MaybeEraIndexedEpochToPerasRoundInfo LeiosTestBlock = EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
+  getPerasPoolDistrFromLedger _ = dummyPoolDistr
+  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
+  getPerasNonceFromHeaderState _ = NeutralNonce
+  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = mkBoundedPerasEpochContextWith mkMockPerasVotingCommitteeInput
+  mkPerasParamsFromLedger _ _ = Right defaultPerasParams
+  mkPerasParamsFromTickedLedger _ _ = Right defaultPerasParams
 
 -- | A mock, as for 'Test.Util.TestBlock.TestBlock'.
 instance BlockSupportsPeras LeiosTestBlock where
@@ -684,14 +686,14 @@ instance Serialise (Header LeiosTestBlock) where
     lthLeiosCert <- decode
     pure LeiosTestHeader{..}
 
-encodeAnnouncement :: (EbHash, BytesSize) -> Encoding
+encodeAnnouncement :: (EndorserBlockHash, BytesSize) -> Encoding
 encodeAnnouncement (ebHash, size) =
-  CBOR.encodeListLen 2 <> encodeEbHash ebHash <> encode size
+  CBOR.encodeListLen 2 <> toCBOR ebHash <> encode size
 
-decodeAnnouncement :: Decoder s (EbHash, BytesSize)
+decodeAnnouncement :: Decoder s (EndorserBlockHash, BytesSize)
 decodeAnnouncement = do
   enforceSize (fromString "Announcement") 2
-  (,) <$> decodeEbHash <*> decode
+  (,) <$> fromCBOR <*> decode
 
 instance HasBinaryBlockInfo LeiosTestBlock where
   getBinaryBlockInfo blk =

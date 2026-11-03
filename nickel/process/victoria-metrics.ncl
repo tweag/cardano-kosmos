@@ -14,8 +14,15 @@ fun input =>
       ++ "  - job_name: \"cardano-tracer\"\n"
       ++ "    http_sd_configs:\n"
       ++ "      - url: \"http://%{input.prometheus.address}:%{std.string.from_number input.prometheus.port}/targets\"\n"
+      ++ "    relabel_configs:\n"
     in
     "printf '%s' '%{scrape_yaml}' > \"%{scrape_config}\""
+    ++ " && for port_file in \"%{input.directory}\"/node-data/node*/port; do"
+    ++ " [ -f \"${port_file}\" ] || continue;"
+    ++ " node=\"$(basename \"$(dirname \"${port_file}\")\")\";"
+    ++ " port=\"$(cat \"${port_file}\")\";"
+    ++ " printf '%s\\n' \"      - source_labels: [node_name]\" \"        regex: '.*_${port}'\" \"        target_label: node\" \"        replacement: '${node}'\" >> \"%{scrape_config}\";"
+    ++ " done"
     ++ " && victoria-metrics -promscrape.config=\"%{scrape_config}\" -storageDataPath=%{input.directory}/victoria-metrics-data",
   depends_on = {
     cardano-testnet = { condition = 'process_healthy },

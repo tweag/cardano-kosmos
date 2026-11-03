@@ -2338,7 +2338,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_blockNum_int{instance!~\"otlp.*\"}",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         },
@@ -2455,7 +2455,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_slotNum_int{instance!~\"otlp.*\"}",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         },
@@ -2572,7 +2572,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_epoch_int{instance!~\"otlp.*\"}",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         },
@@ -2689,7 +2689,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_forks_counter",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -2793,7 +2793,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_density_real{instance!~\"otlp.*\"}",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         },
@@ -3405,7 +3405,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_Forge_forged_counter - cardano_node_metrics_Forge_adopted_counter",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -3509,7 +3509,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_slotsMissed_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -3614,7 +3614,7 @@
           "editorMode": "code",
           "expr": "(rate(cardano_node_metrics_Forge_node_is_leader_counter[1h])/rate(cardano_node_metrics_slotNum_int[1h]))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -3744,7 +3744,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne_real",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -3848,7 +3848,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree_real",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -3952,7 +3952,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive_real",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4057,7 +4057,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_blockfetchclient_blockdelay_real*1000",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4162,7 +4162,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_served_block_counter[1h])/rate(cardano_node_metrics_blockNum_int[1h])*100",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4266,7 +4266,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_peerSelection_ActiveBigLedgerPeers_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4370,7 +4370,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_inboundGovernor_warm_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4474,7 +4474,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_inboundGovernor_hot_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4578,7 +4578,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_peerSelection_Hot_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4709,7 +4709,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txsProcessedNum_counter{instance!~\"otlp.*\"}[1h])",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         },
@@ -4826,7 +4826,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_txsInMempool_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -4931,7 +4931,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_txsSyncDuration_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -5036,7 +5036,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_mempoolBytes_int",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -5143,7 +5143,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_mempoolBytes_int / scalar(mempool_capacity_bytes)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -5482,7 +5482,7 @@
           "editorMode": "code",
           "expr": "cardano_node_metrics_RTS_gcLiveBytes_int / 1000000",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -5587,7 +5587,7 @@
           "editorMode": "code",
           "expr": "rate(rts_gc_num_gcs[1h])*3600",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6472,7 +6472,7 @@
           "editorMode": "code",
           "expr": "increase(rts_gc_gc_wall_ms[5m])",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6579,7 +6579,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_submissions_accepted_counter[5m]) / rate(cardano_node_metrics_submissions_submitted_counter[5m])",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6683,7 +6683,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txIdBlockingWaitMs_int{instance!~\"otlp.*\"}[10m]) / (rate(cardano_node_metrics_txSubmission_txIdBlockingWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txPipelineWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txSubmissionWaitMs_int{instance!~\"otlp.*\"}[10m]))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6787,7 +6787,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txPipelineWaitMs_int{instance!~\"otlp.*\"}[10m]) / (rate(cardano_node_metrics_txSubmission_txIdBlockingWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txPipelineWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txSubmissionWaitMs_int{instance!~\"otlp.*\"}[10m]))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6891,7 +6891,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txSubmissionWaitMs_int{instance!~\"otlp.*\"}[10m]) / (rate(cardano_node_metrics_txSubmission_txIdBlockingWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txPipelineWaitMs_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txSubmissionWaitMs_int{instance!~\"otlp.*\"}[10m]))",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -6995,7 +6995,7 @@
           "editorMode": "code",
           "expr": "1 - clamp_max(rate(cardano_node_metrics_txSubmission_txsRequested_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txIdsReceived_int{instance!~\"otlp.*\"}[10m]), 0.001), 1)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -7099,7 +7099,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txsAccepted_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txsReceived_int{instance!~\"otlp.*\"}[10m]), 0.001)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -7203,7 +7203,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txIdPipelinedReqsSent_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txIdBlockingReqsSent_int{instance!~\"otlp.*\"}[10m]) + rate(cardano_node_metrics_txSubmission_txIdPipelinedReqsSent_int{instance!~\"otlp.*\"}[10m]), 0.001)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -7307,7 +7307,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txsOmitted_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txsRequested_int{instance!~\"otlp.*\"}[10m]), 0.001)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -7411,7 +7411,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_lateBodies_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txsReceived_int{instance!~\"otlp.*\"}[10m]), 0.001)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }
@@ -7515,7 +7515,7 @@
           "editorMode": "code",
           "expr": "rate(cardano_node_metrics_txSubmission_txIdsReceived_int{instance!~\"otlp.*\"}[10m]) / clamp_min(rate(cardano_node_metrics_txSubmission_txIdRepliesReceived_int{instance!~\"otlp.*\"}[10m]), 0.001)",
           "interval": "",
-          "legendFormat": "{{instance}}",
+          "legendFormat": "{{node_name}}",
           "range": true,
           "refId": "A"
         }

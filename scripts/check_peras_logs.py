@@ -7,7 +7,7 @@ Usage:
 RESULTS_DIR defaults to devnet-env and must contain
   logs/*_<port>/node-*.json      (cardano-tracer logs, one dir per node;
                                   the first file holds the startup trace)
-  dijkstra-genesis.json          (quorum safety margin)
+  run-parameters.json            (captured runtime quorum settings, if available)
 
 Without --wait the logs are analysed once. With --wait the checks are re-run
 every --poll seconds until none is PENDING (e.g. cooldown not yet entered or
@@ -18,29 +18,26 @@ Exit code: 0 all PASS/WARN, 1 some FAIL, 2 still PENDING at timeout.
 """
 import argparse, collections, datetime, glob, json, os, re, sys, time
 from fractions import Fraction as F
+from peras_logs import Logs, timestamp_ns
 
 PASS, FAIL, WARN, PENDING = "PASS", "FAIL", "WARN", "PENDING"
 
 
 def ts(s):
-    s = s.rstrip("Z")
-    if "." in s:
-        a, b = s.split(".")
-        s = a + "." + b.ljust(6, "0")[:6]
-    return datetime.datetime.fromisoformat(s).timestamp()
+    return timestamp_ns(s) / 1_000_000_000
 
 
 class Run:
     
-    def __init__(self, root):
+    def __init__(self, root, since=None, until=None):
         self.root = root
+        self.trace = Logs(root, since, until)
         self.nodes = {}
-        for d in sorted(glob.glob(os.path.join(root, "logs", "*_*"))):
-            m = re.search(r"_(\d+)$", d)
-            n = self.node_number(d)
-            if not m or n is None:
-                continue
-            self.nodes[n] = {"port": m[1]}
+        for directory, node in self.trace.nodes.items():
+            port = re.search(r"_(\d+)$", directory.name)[1]
+            if node in self.nodes:
+                raise ValueError(f"node{node} appears in multiple directories; select a single run")
+            self.nodes[node] = {"port": port, "directory": directory}
         for nd in self.nodes.values():
             self.load_tracer(nd)
 
@@ -64,45 +61,60 @@ class Run:
         nd["forged"] = {}    # round -> (seat, persistent)
         nd["incl_err"] = 0
         nd["votes"] = {}   # (round, seat) -> (time, generated cert, weight)
+        nd["duplicate_votes"] = 0
+        nd["generated"] = []
         nd["certs"] = []   # (round, time, result)
         nd["invalid_forged"] = 0
-        for f in glob.glob(os.path.join(self.root, "logs", f"*_{nd['port']}", "node-*.json")):
-            for l in open(f, errors="replace"):
-                try:
-                    j = json.loads(l)
-                    t, ns, d = ts(j["at"]), j["ns"], j.get("data", {})
-                except Exception:
-                    continue
-                if ns == "Peras.Vote.Forging.CantReadEnv":
-                    nd["nokey"] += 1
-                elif ns == "Peras.Vote.Forging.RulesDecision":
-                    nd["dec"][d["round"]] = "Vote" if d["decision"].startswith("Vote") else "NoVote"
-                elif ns == "Peras.Vote.Forging.NotAVoterInRound":
-                    nd["notvoter"].append(d["round"])
-                elif ns == "Peras.Vote.Forging.ForgedVote":
-                    m = re.search(r"unPerasSeatIndex = (\d+)", d["vote"])
-                    nd["forged"][d["round"]] = (
-                        int(m[1]), "NonPersistentPerasVoteEligibilityProof" not in d["vote"])
-                elif ns == "Peras.Cert.Inclusion.Error":
-                    nd["incl_err"] += 1
-                elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
-                    m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", d["voteId"])
-                    w = re.search(r"unVoteWeight = (\d+) % (\d+)", d["vote"])
-                    nd["votes"][(int(m[1]), int(m[2]))] = (
-                        t, "AndGenerated" in d["result"], F(int(w[1]), int(w[2])) if w else F(0))
-                elif ns == "ChainDB.PerasCertDbEvent.AddCert":
-                    nd["certs"].append((int(re.search(r"\d+", d["round"])[0]), t, d["result"]))
-                elif ns == "Forge.Loop.ForgedInvalidBlock":
-                    nd["invalid_forged"] += 1
+        for record in self.trace.records:
+            if record.path.parent != nd["directory"]:
+                continue
+            try:
+                self.load_record(nd, record)
+            except (ValueError, KeyError, TypeError, AttributeError, IndexError) as error:
+                self.trace.issues.append({"location": record.location, "error": str(error)})
+
+    @staticmethod
+    def load_record(nd, record):
+        j = record.event
+        t, ns, d = record.at_ns / 1_000_000_000, j["ns"], j.get("data", {})
+        if ns == "Peras.Vote.Forging.CantReadEnv":
+            nd["nokey"] += 1
+        elif ns == "Peras.Vote.Forging.RulesDecision":
+            nd["dec"][d["round"]] = "Vote" if d["decision"].startswith("Vote") else "NoVote"
+        elif ns == "Peras.Vote.Forging.NotAVoterInRound":
+            nd["notvoter"].append(d["round"])
+        elif ns == "Peras.Vote.Forging.ForgedVote":
+            m = re.search(r"unPerasSeatIndex = (\d+)", d["vote"])
+            nd["forged"][d["round"]] = (
+                int(m[1]), "NonPersistentPerasVoteEligibilityProof" not in d["vote"])
+        elif ns == "Peras.Cert.Inclusion.Error":
+            nd["incl_err"] += 1
+        elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
+            m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", d["voteId"])
+            w = re.search(r"unVoteWeight = (\d+) % (\d+)", d["vote"])
+            if d["result"] == "PerasVoteAlreadyInDB":
+                nd["duplicate_votes"] += 1
+            elif d["result"].startswith("AddedPerasVote"):
+                generated = "AndGenerated" in d["result"]
+                nd["votes"].setdefault((int(m[1]), int(m[2])), (
+                    t, generated, F(int(w[1]), int(w[2])) if w else F(0)))
+                if generated:
+                    nd["generated"].append((int(m[1]), t))
+        elif ns == "ChainDB.PerasCertDbEvent.AddCert":
+            nd["certs"].append((int(re.search(r"\d+", d["round"])[0]), t, d["result"]))
+        elif ns == "Forge.Loop.ForgedInvalidBlock":
+            nd["invalid_forged"] += 1
 
     def threshold(self):
-        """Quorum threshold + safety margin. The base quorum is not traced, so the default 3/4 is assumed."""
+        """Use captured runtime settings; the genesis values are not used by this consensus version."""
         try:
-            g = json.load(open(os.path.join(self.root, "dijkstra-genesis.json")))
-            margin = F(str(g["perasQuorumThresholdSafetyMargin"]))
+            with open(os.path.join(self.root, "run-parameters.json")) as stream:
+                env = json.load(stream)["peras_env"]
+            threshold = F(env["PERAS_QUORUM_WEIGHT_THRESHOLD"].replace("%", "/").replace(" ", ""))
+            margin = F(env["PERAS_QUORUM_WEIGHT_THRESHOLD_SAFETY_MARGIN"].replace("%", "/").replace(" ", ""))
         except (OSError, KeyError, ValueError):
             return None
-        return F(3, 4) + margin
+        return threshold + margin
 
 
 def checks(run):
@@ -113,7 +125,9 @@ def checks(run):
 
     N = run.nodes
     if not N:
-        return [("0", "logs found", FAIL, "no nodes under logs/")]
+        return [("logs found", FAIL, "no nodes under logs/")]
+    if run.trace.issues:
+        add_report("trace input", FAIL, str(run.trace.issues[:3]))
     keyless = [n for n, nd in N.items() if nd["nokey"] and not nd["dec"]]
     keyed = [n for n in N if n not in keyless]
     seat_node = {s: n for n in keyed for (s, _) in N[n]["forged"].values()}
@@ -180,7 +194,7 @@ def checks(run):
         slow = [(round(l, 1), n, k) for l, n, k in lat if l > 1]
         d = f"{len(union)} distinct votes"
         if ls:
-            d += f"; latency median {ls[len(ls)//2]*1000:.0f} ms, max {ls[-1]*1000:.0f} ms ({len(ls)} samples)"
+            d += f"; DB observation lag median {ls[len(ls)//2]*1000:.0f} ms, max {ls[-1]*1000:.0f} ms ({len(ls)} samples; not message latency)"
         if slow:
             d += f"; {len(slow)} samples > 1 s, e.g. (latency, node, vote) = {slow[0]}"
         if missing:
@@ -211,7 +225,7 @@ def checks(run):
 
     # 7. no second generation
     dup = [(n, r, x) for n, nd in N.items()
-           for r, x in collections.Counter(k[0] for k, v in nd["votes"].items() if v[1]).items() if x > 1]
+           for r, x in collections.Counter(r for r, _ in nd["generated"]).items() if x > 1]
     add_report("no second cert generation", FAIL if dup else (PASS if gen_rounds else PENDING),
         f"duplicates (node, round, count): {dup}" if dup else "exactly one generating vote per round per node")
 
@@ -272,17 +286,22 @@ def main():
     ap.add_argument("results", nargs="?", default=os.path.join(here, "..", "devnet-env"))
     ap.add_argument("--wait", type=float, default=0, help="keep re-checking up to this many seconds")
     ap.add_argument("--poll", type=float, default=15)
+    ap.add_argument("--since", help="inclusive ISO timestamp selecting one run")
+    ap.add_argument("--until", help="exclusive ISO timestamp")
     a = ap.parse_args()
     deadline = time.time() + a.wait
     while True:
-        out = checks(Run(a.results))
-        pend = [c for c in out if c[2] == PENDING]
+        try:
+            out = checks(Run(a.results, a.since, a.until))
+        except (ValueError, OSError) as error:
+            ap.exit(1, f"{error}\n")
+        pend = [c for c in out if c[1] == PENDING]
         if not pend or time.time() >= deadline:
             break
         print(f"... {len(pend)} check(s) pending, retrying in {a.poll:.0f}s", file=sys.stderr)
         time.sleep(a.poll)
     report(out)
-    if any(c[2] == FAIL for c in out):
+    if any(c[1] == FAIL for c in out):
         sys.exit(1)
     sys.exit(2 if pend else 0)
 

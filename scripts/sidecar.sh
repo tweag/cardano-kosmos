@@ -36,6 +36,18 @@ IFS=',' read -ra ROLES <<<"${NODE_ROLES}"
 
 node_port() { cat "${DEVNET_DIR}/node-data/node$1/port" 2>/dev/null; }
 
+# Symbolic labels, numbered per role (spo1.., relay1..); must match the
+# relabelling in nickel/process/victoria-metrics.ncl.
+declare -a LABELS=()
+declare -A ROLE_COUNT=()
+for ((j = 0; j < NUM_NODES; j++)); do
+    r="${ROLES[$j]:-node}"
+    ROLE_COUNT[$r]=$(( ${ROLE_COUNT[$r]:-0} + 1 ))
+    LABELS[$j]="${r}${ROLE_COUNT[$r]}"
+done
+unset j r
+node_label() { echo "${LABELS[$(($1 - 1))]}"; }
+
 setup_database() {
     mkdir -p "$(dirname "${SIDECAR_DB}")"
 
@@ -128,7 +140,7 @@ populate_topology() {
     sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('${net}', 'localhost', 'Network', '#00FFAD', 'cloud');"$'\n'
 
     for i in $(seq 1 "${NUM_NODES}"); do
-        id="node${i}"
+        id="$(node_label "${i}")"
         role="${ROLES[$((i - 1))]:-}"
         case "${role}" in
             spo) color="#007FFF" ;;
@@ -150,14 +162,14 @@ populate_topology() {
     sql_sc <<<"${sql}"
 }
 
-# Localroot topology, derived from each node's topology.json (ports -> nodeN).
+# Localroot topology, derived from each node's topology.json (ports -> spoN/relayN).
 populate_localroots() {
     local -A port_to_node=()
     local sql="" i p target
 
     for i in $(seq 1 "${NUM_NODES}"); do
         p="$(node_port "${i}")"
-        [ -n "${p}" ] && port_to_node["${p}"]="node${i}"
+        [ -n "${p}" ] && port_to_node["${p}"]="$(node_label "${i}")"
     done
 
     for i in $(seq 1 "${NUM_NODES}"); do
@@ -166,7 +178,7 @@ populate_localroots() {
         while read -r p; do
             target="${port_to_node[${p}]:-}"
             [ -n "${target}" ] || continue
-            sql+="INSERT INTO cn_edges VALUES ('node${i}_${target}', 'node${i}', '${target}') ON CONFLICT DO NOTHING;"$'\n'
+            sql+="INSERT INTO cn_edges VALUES ('$(node_label "${i}")_${target}', '$(node_label "${i}")', '${target}') ON CONFLICT DO NOTHING;"$'\n'
         done < <(jq -r '.localRoots[]?.accessPoints[]?.port' "${topo}")
     done
 
@@ -180,9 +192,9 @@ update_tips() {
             --socket-path "${DEVNET_DIR}/socket/node${i}/sock" 2>/dev/null)"
         if read -r hash block slot < <(jq -r '"\(.hash) \(.block) \(.slot)"' <<<"${out}" 2>/dev/null) \
             && [[ "${hash}" =~ ^[0-9a-f]{64}$ ]]; then
-            values+=("('node${i}', '${hash}', ${block}, ${slot})")
+            values+=("('$(node_label "${i}")', '${hash}', ${block}, ${slot})")
         else
-            values+=("('node${i}', NULL, NULL, NULL)")
+            values+=("('$(node_label "${i}")', NULL, NULL, NULL)")
         fi
     done
 
@@ -214,7 +226,7 @@ update_graph_stats() {
 
     for i in $(seq 1 "${NUM_NODES}"); do
         p="$(node_port "${i}")"
-        [ -n "${p}" ] && port_to_node["${p}"]="node${i}"
+        [ -n "${p}" ] && port_to_node["${p}"]="$(node_label "${i}")"
     done
 
     while read -r p v; do

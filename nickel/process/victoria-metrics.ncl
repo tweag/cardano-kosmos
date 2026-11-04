@@ -1,5 +1,6 @@
+let { at, map, range, .. } = std.array in
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
-fun input =>
+fun input portsOfNodes =>
 {
   # VictoriaMetrics scrapes the cardano-tracer prometheus endpoint. The
   # scrape config must live in a real file passed via `-promscrape.config`;
@@ -9,20 +10,27 @@ fun input =>
   # config on disk first, then start the server pointing at it.
   command =
     let scrape_config = "%{input.directory}/vm-scrape.yml" in
+    let node_rules =
+      std.string.join "" (map
+        (fun idx =>
+          let port = std.string.from_number (at (idx - 1) portsOfNodes) in
+          "      - source_labels: [node_name]\n"
+          ++ "        regex: '.*_%{port}'\n"
+          ++ "        target_label: node\n"
+          ++ "        replacement: 'node%{idx}'\n"
+        )
+        (range 1 (std.array.length portsOfNodes + 1))
+      )
+    in
     let scrape_yaml =
       "scrape_configs:\n"
       ++ "  - job_name: \"cardano-tracer\"\n"
       ++ "    http_sd_configs:\n"
       ++ "      - url: \"http://%{input.prometheus.address}:%{std.string.from_number input.prometheus.port}/targets\"\n"
-      ++ "    relabel_configs:\n"
+      ++ "    metric_relabel_configs:\n"
+      ++ node_rules
     in
     "printf '%s' '%{scrape_yaml}' > \"%{scrape_config}\""
-    ++ " && for port_file in \"%{input.directory}\"/node-data/node*/port; do"
-    ++ " [ -f \"${port_file}\" ] || continue;"
-    ++ " node=\"$(basename \"$(dirname \"${port_file}\")\")\";"
-    ++ " port=\"$(cat \"${port_file}\")\";"
-    ++ " printf '%s\\n' \"      - source_labels: [node_name]\" \"        regex: '.*_${port}'\" \"        target_label: node\" \"        replacement: '${node}'\" >> \"%{scrape_config}\";"
-    ++ " done"
     ++ " && victoria-metrics -promscrape.config=\"%{scrape_config}\" -storageDataPath=%{input.directory}/victoria-metrics-data",
   depends_on = {
     cardano-testnet = { condition = 'process_healthy },

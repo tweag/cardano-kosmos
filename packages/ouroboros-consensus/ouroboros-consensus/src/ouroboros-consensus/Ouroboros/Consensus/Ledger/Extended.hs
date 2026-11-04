@@ -33,6 +33,7 @@ module Ouroboros.Consensus.Ledger.Extended
     -- * Peras epoch context resolver helpers
   , initPerasEpochContextResolver
   , getTickedPerasEpochContextResolver
+  , tickAndResolveRoundNo
 
     -- * Type family instances
   , LedgerTables (..)
@@ -69,6 +70,8 @@ import Ouroboros.Consensus.Block.Abstract
 import Ouroboros.Consensus.Block.SupportsPeras
   ( BlockSupportsPeras (..)
   , IsPerasCert (..)
+  , PerasEpochContext
+  , PerasRoundNo
   , ValidatedPerasCert (..)
   , pattern NoPerasEnabled
   )
@@ -196,6 +199,31 @@ getTickedPerasEpochContextResolver cfg getLedgerState getSlot = do
         CurrentSlot slotNo ->
           tickedPerasState (applyChainTick OmitLedgerEvents (ExtLedgerCfg cfg) slotNo extLedgerState)
   pure $ perasEpochContextResolver pstate
+
+-- | Resolve a round against the ticked window, retaining the clock diagnostics.
+tickAndResolveRoundNo ::
+  ( MonadSTM m
+  , LedgerSupportsProtocol blk
+  , BlockSupportsPeras blk
+  , StateSupportsPerasEpochContext blk
+  , All Top (HardForkIndices blk)
+  ) =>
+  TopLevelConfig blk ->
+  STM m (ExtLedgerState blk EmptyMK) ->
+  STM m CurrentSlot ->
+  PerasRoundNo ->
+  STM m (Either PerasEpochContextNotFoundForRound (PerasEpochContext blk))
+tickAndResolveRoundNo cfg getLedgerState getSlot roundNo = do
+  extLedgerState <- getLedgerState
+  currentSlot <- getSlot
+  resolver <- getTickedPerasEpochContextResolver cfg (pure extLedgerState) (pure currentSlot)
+  let extraInfoMsg = case currentSlot of
+        CurrentSlotUnknown -> "unticked because the current slot is unknown"
+        CurrentSlot slotNo -> "ticked to slot " <> show (unSlotNo slotNo)
+  pure $
+    first
+      (\(PerasEpochContextNotFoundForRound r reason) -> PerasEpochContextNotFoundForRound r (reason <> " (" <> extraInfoMsg <> ")"))
+      (unsafeResolveRoundNo resolver roundNo)
 
 {-------------------------------------------------------------------------------
   The extended ledger configuration

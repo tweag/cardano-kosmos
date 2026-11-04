@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/ouroboros-consensus.git
-	branch = 0fe302e79ba7aa163bcd2fb8a6a3e482f7210d06
-	commit = 0fe302e79ba7aa163bcd2fb8a6a3e482f7210d06
-	parent = 416db6bf4983683ebf46c264bb161b905b9dee37
+	branch = erin/object-diffusion
+	commit = 6a5ec2a99f91304c0b49109d4b5ce9447f8e116b
+	parent = bff2bec472074f68b24b78b5b29fc5e7c51729a3
 	method = merge
 	cmdver = 0.4.9

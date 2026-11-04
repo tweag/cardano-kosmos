@@ -58,7 +58,7 @@ import Ouroboros.Consensus.BlockchainTime.API (CurrentSlot (..))
 import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory (..))
 import Ouroboros.Consensus.HeaderValidation (mkHeaderWithTime)
-import Ouroboros.Consensus.Ledger.Extended (ledgerState, getTickedPerasEpochContextResolver)
+import Ouroboros.Consensus.Ledger.Extended (ledgerState, getTickedPerasEpochContextResolver, tickAndResolveRoundNo)
 import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
@@ -218,12 +218,20 @@ openDBInternal args launchBgTasks = runWithTempRegistry $ do
     -- and could directly call 'unsafeResolveRoundNo' directly instead.
     -- Consequently, we will be able to remove the chain clock as well.
     varChainClock <- newTVarIO (ChainClock (pure CurrentSlotUnknown))
-    let resolverHandle =
-          PerasEpochContextResolverHandle $
-            getTickedPerasEpochContextResolver
-              (Args.cdbsTopLevelConfig cdbSpecificArgs)
-              (LedgerDB.getVolatileTip lgrDB)
-              (readTVar varChainClock >>= \(ChainClock readCurrentSlot) -> readCurrentSlot)
+    let readClock = readTVar varChainClock >>= \(ChainClock readCurrentSlot) -> readCurrentSlot
+        resolverHandle =
+          PerasEpochContextResolverHandle
+            { getPerasEpochContextResolver =
+                getTickedPerasEpochContextResolver
+                  (Args.cdbsTopLevelConfig cdbSpecificArgs)
+                  (LedgerDB.getVolatileTip lgrDB)
+                  readClock
+            , resolveRoundNo =
+                tickAndResolveRoundNo
+                  (Args.cdbsTopLevelConfig cdbSpecificArgs)
+                  (LedgerDB.getVolatileTip lgrDB)
+                  readClock
+            }
     perasCertDB <- PerasCertDB.createDB argsPerasCertDB
     perasVoteDB <- PerasVoteDB.createDB argsPerasVoteDB resolverHandle
 

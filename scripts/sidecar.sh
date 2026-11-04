@@ -22,6 +22,9 @@ set -o pipefail
 : "${SIDECAR_DB:?}"
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
+# topology.json points peers at toxiproxy listen ports (NODE_PORTS_BASE + idx),
+# not at the nodes' own ports; see nickel/mk-node-topology.ncl.
+NODE_PORTS_BASE="${NODE_PORTS_BASE:-5000}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
 # cardano-tracer writes ForMachine JSON logs to ${LOGS_DIR}/<host>_<port>/.
@@ -77,7 +80,10 @@ CREATE TABLE ci_nodes (
     mainstat NUMERIC,
     secondarystat NUMERIC,
     color TEXT,
-    icon TEXT
+    icon TEXT,
+    -- Fixed layout for the localroot graph (relays inner ring, SPOs outer).
+    fixed_x NUMERIC,
+    fixed_y NUMERIC
 );
 
 CREATE TABLE ci_edges (
@@ -160,6 +166,26 @@ populate_topology() {
     done
 
     sql_sc <<<"${sql}"
+    populate_layout
+}
+
+# Place nodes on concentric circles: relays inside, SPOs (and others) outside.
+populate_layout() {
+    local sql
+    sql="$(for i in $(seq 1 "${NUM_NODES}"); do
+        echo "$(node_label "${i}") ${ROLES[$((i - 1))]:-node}"
+    done | awk '
+        { id[NR] = $1; inner[NR] = ($2 == "relay"); n_in += inner[NR]; n_out += !inner[NR] }
+        END {
+            pi = atan2(0, -1)
+            for (i = 1; i <= NR; i++) {
+                if (inner[i]) { k = ++a; n = n_in;  r = (n_in > 1) ? 150 : 0 }
+                else          { k = ++b; n = n_out; r = 400 }
+                t = 2 * pi * (k - 1) / n - pi / 2
+                printf "UPDATE ci_nodes SET fixed_x = %.1f, fixed_y = %.1f WHERE id = \x27%s\x27;\n", r * cos(t), r * sin(t), id[i]
+            }
+        }')"
+    [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
 # Localroot topology, derived from each node's topology.json (ports -> spoN/relayN).
@@ -170,6 +196,7 @@ populate_localroots() {
     for i in $(seq 1 "${NUM_NODES}"); do
         p="$(node_port "${i}")"
         [ -n "${p}" ] && port_to_node["${p}"]="$(node_label "${i}")"
+        port_to_node["$((NODE_PORTS_BASE + i))"]="$(node_label "${i}")"
     done
 
     for i in $(seq 1 "${NUM_NODES}"); do

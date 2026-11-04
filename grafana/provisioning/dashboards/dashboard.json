@@ -2169,7 +2169,7 @@
           "id": 2,
           "options": {
             "edges": {},
-            "layoutAlgorithm": "force",
+            "layoutAlgorithm": "layered",
             "nodes": {},
             "zoomMode": "cooperative"
           },
@@ -2181,8 +2181,8 @@
                 "uid": "sidecar_uid"
               },
               "refId": "A",
-              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
-              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
+              "queryText": "SELECT id, title, subtitle, mainstat, secondarystat, color, icon, fixed_x AS fixedX, fixed_y AS fixedY FROM ci_nodes WHERE fixed_x IS NOT NULL",
+              "rawQueryText": "SELECT id, title, subtitle, mainstat, secondarystat, color, icon, fixed_x AS fixedX, fixed_y AS fixedY FROM ci_nodes WHERE fixed_x IS NOT NULL",
               "queryType": "table",
               "timeColumns": [
                 "time",
@@ -2196,8 +2196,8 @@
               },
               "refId": "B",
               "hide": false,
-              "queryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
-              "rawQueryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
+              "queryText": "SELECT a.id, a.source, a.target, CASE WHEN b.id IS NULL THEN '→' ELSE '↔' END AS mainstat, CASE WHEN b.id IS NULL THEN '#999' ELSE '#73BF69' END AS color, CASE WHEN b.id IS NULL THEN '4,4' END AS strokeDasharray FROM cn_edges a LEFT JOIN cn_edges b ON b.source = a.target AND b.target = a.source WHERE ((a.source LIKE 'spo%' AND a.target LIKE 'relay%') OR (a.source LIKE 'relay%' AND a.target LIKE 'spo%')) AND (b.id IS NULL OR a.source < a.target);",
+              "rawQueryText": "SELECT a.id, a.source, a.target, CASE WHEN b.id IS NULL THEN '→' ELSE '↔' END AS mainstat, CASE WHEN b.id IS NULL THEN '#999' ELSE '#73BF69' END AS color, CASE WHEN b.id IS NULL THEN '4,4' END AS strokeDasharray FROM cn_edges a LEFT JOIN cn_edges b ON b.source = a.target AND b.target = a.source WHERE ((a.source LIKE 'spo%' AND a.target LIKE 'relay%') OR (a.source LIKE 'relay%' AND a.target LIKE 'spo%')) AND (b.id IS NULL OR a.source < a.target);",
               "queryType": "table",
               "timeColumns": [
                 "time",

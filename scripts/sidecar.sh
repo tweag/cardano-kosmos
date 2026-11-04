@@ -50,12 +50,26 @@ for ((j = 0; j < NUM_NODES; j++)); do
 done
 unset j r
 node_label() { echo "${LABELS[$(($1 - 1))]}"; }
+node_role() { echo "${ROLES[$(($1 - 1))]:-node}"; }
+
+# port -> label, for both the node's own port and its toxiproxy listen port.
+# Filled by build_port_map once cardano-testnet has written the port files.
+declare -A NODE_BY_PORT=()
+build_port_map() {
+    local i p
+    for i in $(seq 1 "${NUM_NODES}"); do
+        p="$(node_port "${i}")"
+        [ -n "${p}" ] && NODE_BY_PORT["${p}"]="$(node_label "${i}")"
+        NODE_BY_PORT["$((NODE_PORTS_BASE + i))"]="$(node_label "${i}")"
+    done
+}
 
 setup_database() {
     mkdir -p "$(dirname "${SIDECAR_DB}")"
 
     sql_sc <<'SQL'
 PRAGMA journal_mode = WAL;
+DROP VIEW IF EXISTS lr_edges;
 DROP TABLE IF EXISTS node_tips;
 DROP TABLE IF EXISTS ci_nodes;
 DROP TABLE IF EXISTS ci_edges;
@@ -81,12 +95,11 @@ CREATE TABLE ci_nodes (
     secondarystat NUMERIC,
     color TEXT,
     icon TEXT,
-    -- Fixed layout for the localroot graph (relays inner ring, SPOs outer).
-    fixed_x NUMERIC,
-    fixed_y NUMERIC,
-    -- Fixed layout for the physical graph (network hub centred, spokes on a ring).
-    phys_x NUMERIC,
-    phys_y NUMERIC
+    -- Fixed graph positions (Grafana fixedX/fixedY); see populate_topology.
+    phys_x NUMERIC,  -- Physical Topology: hub centred, spokes on a ring
+    phys_y NUMERIC,
+    lr_x NUMERIC,    -- Localroot Topology: relays inner ring, SPOs outer
+    lr_y NUMERIC
 );
 
 CREATE TABLE ci_edges (
@@ -100,6 +113,19 @@ CREATE TABLE cn_edges (
     source TEXT,
     target TEXT
 );
+
+-- Localroot panel: SPO<->relay links, one row per pair, marking whether the
+-- peering is mutual.
+CREATE VIEW lr_edges AS
+SELECT a.id, a.source, a.target,
+       CASE WHEN b.id IS NULL THEN '→' ELSE '↔' END AS mainstat,
+       CASE WHEN b.id IS NULL THEN '#999' ELSE '#73BF69' END AS color,
+       CASE WHEN b.id IS NULL THEN '4,4' END AS strokeDasharray
+FROM cn_edges a
+LEFT JOIN cn_edges b ON b.source = a.target AND b.target = a.source
+WHERE ((a.source LIKE 'spo%' AND a.target LIKE 'relay%')
+    OR (a.source LIKE 'relay%' AND a.target LIKE 'spo%'))
+  AND (b.id IS NULL OR a.source < a.target);
 
 CREATE TABLE ada_pots (
     epoch_no INTEGER NOT NULL,
@@ -140,90 +166,70 @@ SQL
     touch "${RUN_MARKER}"
 }
 
+# Emit UPDATEs placing the ids read from stdin evenly on a circle of radius $3,
+# writing coordinates into columns $1/$2. A single id goes to the centre.
+ring_layout() {
+    awk -v xc="$1" -v yc="$2" -v r="$3" '
+        { id[NR] = $1 }
+        END {
+            pi = atan2(0, -1); if (NR == 1) r = 0
+            for (i = 1; i <= NR; i++) {
+                t = 2 * pi * (i - 1) / NR - pi / 2
+                printf "UPDATE ci_nodes SET %s = %.1f, %s = %.1f WHERE id = \x27%s\x27;\n", xc, r * cos(t), yc, r * sin(t), id[i]
+            }
+        }'
+}
+
 # Static topology: every node plus the observability services, all attached
 # to a single "localhost" network (everything runs on loopback in kosmos).
 populate_topology() {
-    local sql="" i role color port id
-    local net="network_localhost"
+    local net="network_localhost" sql="" i id role color
+    local -a spokes=() relays=() others=()
 
-    sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('${net}', 'localhost', 'Network', '#00FFAD', 'cloud');"$'\n'
+    # add_node id title subtitle color icon
+    add_node() {
+        sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('$1', '$2', '$3', '$4', '$5');"$'\n'
+        [ "$1" = "${net}" ] && return
+        sql+="INSERT INTO ci_edges VALUES ('${net}_$1', '${net}', '$1');"$'\n'
+        spokes+=("$1")
+    }
+
+    add_node "${net}" localhost Network '#00FFAD' cloud
 
     for i in $(seq 1 "${NUM_NODES}"); do
-        id="$(node_label "${i}")"
-        role="${ROLES[$((i - 1))]:-}"
+        id="$(node_label "${i}")" role="$(node_role "${i}")"
         case "${role}" in
-            spo) color="#007FFF" ;;
-            *) color="#FEFE33" ;;
+            spo) color="#007FFF" others+=("${id}") ;;
+            relay) color="#FEFE33" relays+=("${id}") ;;
+            *) color="#FEFE33" others+=("${id}") ;;
         esac
-        port="$(node_port "${i}")"
-        sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('${id}', '${id}', '${role:-node} :${port}', '${color}', '');"$'\n'
-        sql+="INSERT INTO ci_edges VALUES ('${id}_localhost', '${id}', '${net}');"$'\n'
-        sql+="INSERT INTO ci_edges VALUES ('${net}_${id}', '${net}', '${id}');"$'\n'
+        add_node "${id}" "${id}" "${role} :$(node_port "${i}")" "${color}" ''
     done
 
     for svc in grafana:monitor victoria-metrics:gf-prometheus victoria-logs:monitor sidecar:monitor; do
-        id="${svc%%:*}"
-        sql+="INSERT INTO ci_nodes (id, title, subtitle, color, icon) VALUES ('${id}', '${id}', 'service', '#FF6B4A', '${svc##*:}');"$'\n'
-        sql+="INSERT INTO ci_edges VALUES ('${id}_localhost', '${id}', '${net}');"$'\n'
-        sql+="INSERT INTO ci_edges VALUES ('${net}_${id}', '${net}', '${id}');"$'\n'
+        add_node "${svc%%:*}" "${svc%%:*}" service '#FF6B4A' "${svc##*:}"
     done
 
+    sql+="UPDATE ci_nodes SET phys_x = 0, phys_y = 0 WHERE id = '${net}';"$'\n'
+    sql+="$(printf '%s\n' "${spokes[@]}" | ring_layout phys_x phys_y $((120 + 30 * ${#spokes[@]})))"$'\n'
+    [ "${#relays[@]}" -gt 0 ] && sql+="$(printf '%s\n' "${relays[@]}" | ring_layout lr_x lr_y 150)"$'\n'
+    [ "${#others[@]}" -gt 0 ] && sql+="$(printf '%s\n' "${others[@]}" | ring_layout lr_x lr_y 400)"$'\n'
+
     sql_sc <<<"${sql}"
-    populate_layout
-}
-
-# Place nodes on concentric circles: relays inside, SPOs (and others) outside.
-populate_layout() {
-    local sql
-    sql="$(for i in $(seq 1 "${NUM_NODES}"); do
-        echo "$(node_label "${i}") ${ROLES[$((i - 1))]:-node}"
-    done | awk '
-        { id[NR] = $1; inner[NR] = ($2 == "relay"); n_in += inner[NR]; n_out += !inner[NR] }
-        END {
-            pi = atan2(0, -1)
-            for (i = 1; i <= NR; i++) {
-                if (inner[i]) { k = ++a; n = n_in;  r = (n_in > 1) ? 150 : 0 }
-                else          { k = ++b; n = n_out; r = 400 }
-                t = 2 * pi * (k - 1) / n - pi / 2
-                printf "UPDATE ci_nodes SET fixed_x = %.1f, fixed_y = %.1f WHERE id = \x27%s\x27;\n", r * cos(t), r * sin(t), id[i]
-            }
-        }')"
-    [ -n "${sql}" ] && sql_sc <<<"${sql}"
-
-    # Physical graph: hub at the origin, everything else evenly on one ring.
-    sql="$(sqlite3 -batch -noheader -cmd ".timeout 5000" "${SIDECAR_DB}" \
-        "SELECT id FROM ci_nodes WHERE id <> 'network_localhost' ORDER BY rowid;" \
-        | awk '
-        { id[NR] = $1 }
-        END {
-            pi = atan2(0, -1); r = 120 + 30 * NR
-            print "UPDATE ci_nodes SET phys_x = 0, phys_y = 0 WHERE id = \x27network_localhost\x27;"
-            for (i = 1; i <= NR; i++) {
-                t = 2 * pi * (i - 1) / NR - pi / 2
-                printf "UPDATE ci_nodes SET phys_x = %.1f, phys_y = %.1f WHERE id = \x27%s\x27;\n", r * cos(t), r * sin(t), id[i]
-            }
-        }')"
-    [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
 # Localroot topology, derived from each node's topology.json (ports -> spoN/relayN).
 populate_localroots() {
-    local -A port_to_node=()
-    local sql="" i p target
-
-    for i in $(seq 1 "${NUM_NODES}"); do
-        p="$(node_port "${i}")"
-        [ -n "${p}" ] && port_to_node["${p}"]="$(node_label "${i}")"
-        port_to_node["$((NODE_PORTS_BASE + i))"]="$(node_label "${i}")"
-    done
+    local sql="" i p src target
 
     for i in $(seq 1 "${NUM_NODES}"); do
         local topo="${DEVNET_DIR}/node-data/node${i}/topology.json"
         [ -f "${topo}" ] || continue
+        src="$(node_label "${i}")"
         while read -r p; do
-            target="${port_to_node[${p}]:-}"
+            target="${NODE_BY_PORT[${p}]:-}"
             [ -n "${target}" ] || continue
-            sql+="INSERT INTO cn_edges VALUES ('$(node_label "${i}")_${target}', '$(node_label "${i}")', '${target}') ON CONFLICT DO NOTHING;"$'\n'
+            sql+="INSERT INTO cn_edges VALUES ('${src}_${target}', '${src}', '${target}') ON CONFLICT DO NOTHING;"$'\n'
         done < <(jq -r '.localRoots[]?.accessPoints[]?.port' "${topo}")
     done
 
@@ -265,29 +271,20 @@ vm_query() {
         | jq -r '.data.result[]? | "\(.metric.node_name // "" | split("_") | last) \(.value[1])"'
 }
 
+# vm_stat COLUMN QUERY: emit UPDATEs setting ci_nodes.COLUMN per node.
+vm_stat() {
+    local p v node
+    while read -r p v; do
+        node="${NODE_BY_PORT[${p}]:-}"
+        [[ -n "${node}" && "${v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+            && echo "UPDATE ci_nodes SET $1 = ${v} WHERE id = '${node}';"
+    done < <(vm_query "$2")
+}
+
 update_graph_stats() {
-    local -A port_to_node=() main=() secondary=()
-    local sql="" i p v node
-
-    for i in $(seq 1 "${NUM_NODES}"); do
-        p="$(node_port "${i}")"
-        [ -n "${p}" ] && port_to_node["${p}"]="$(node_label "${i}")"
-    done
-
-    while read -r p v; do
-        node="${port_to_node[${p}]:-}"
-        [[ -n "${node}" && "${v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && main["${node}"]="${v}"
-    done < <(vm_query 'cardano_node_metrics_inboundGovernor_hot')
-
-    while read -r p v; do
-        node="${port_to_node[${p}]:-}"
-        [[ -n "${node}" && "${v}" =~ ^[0-9]+(\.[0-9]+)?$ ]] && secondary["${node}"]="${v}"
-    done < <(vm_query 'rate(cardano_node_metrics_served_block_latest_count_int[1h])/rate(cardano_node_metrics_blockNum_int[1h])*100')
-
-    for node in "${!main[@]}"; do
-        sql+="UPDATE ci_nodes SET mainstat = ${main[${node}]}, secondarystat = ${secondary[${node}]:-0} WHERE id = '${node}';"$'\n'
-    done
-
+    local sql
+    sql="$(vm_stat mainstat 'cardano_node_metrics_inboundGovernor_hot'
+        vm_stat secondarystat 'rate(cardano_node_metrics_served_block_latest_count_int[1h])/rate(cardano_node_metrics_blockNum_int[1h])*100')"
     [ -n "${sql}" ] && sql_sc <<<"${sql}"
 }
 
@@ -324,6 +321,7 @@ SQL
 
 main() {
     setup_database || { echo "sidecar: database setup failed" >&2; exit 1; }
+    build_port_map
     populate_topology
     populate_localroots
 

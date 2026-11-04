@@ -83,7 +83,10 @@ CREATE TABLE ci_nodes (
     icon TEXT,
     -- Fixed layout for the localroot graph (relays inner ring, SPOs outer).
     fixed_x NUMERIC,
-    fixed_y NUMERIC
+    fixed_y NUMERIC,
+    -- Fixed layout for the physical graph (network hub centred, spokes on a ring).
+    phys_x NUMERIC,
+    phys_y NUMERIC
 );
 
 CREATE TABLE ci_edges (
@@ -183,6 +186,21 @@ populate_layout() {
                 else          { k = ++b; n = n_out; r = 400 }
                 t = 2 * pi * (k - 1) / n - pi / 2
                 printf "UPDATE ci_nodes SET fixed_x = %.1f, fixed_y = %.1f WHERE id = \x27%s\x27;\n", r * cos(t), r * sin(t), id[i]
+            }
+        }')"
+    [ -n "${sql}" ] && sql_sc <<<"${sql}"
+
+    # Physical graph: hub at the origin, everything else evenly on one ring.
+    sql="$(sqlite3 -batch -noheader -cmd ".timeout 5000" "${SIDECAR_DB}" \
+        "SELECT id FROM ci_nodes WHERE id <> 'network_localhost' ORDER BY rowid;" \
+        | awk '
+        { id[NR] = $1 }
+        END {
+            pi = atan2(0, -1); r = 120 + 30 * NR
+            print "UPDATE ci_nodes SET phys_x = 0, phys_y = 0 WHERE id = \x27network_localhost\x27;"
+            for (i = 1; i <= NR; i++) {
+                t = 2 * pi * (i - 1) / NR - pi / 2
+                printf "UPDATE ci_nodes SET phys_x = %.1f, phys_y = %.1f WHERE id = \x27%s\x27;\n", r * cos(t), r * sin(t), id[i]
             }
         }')"
     [ -n "${sql}" ] && sql_sc <<<"${sql}"

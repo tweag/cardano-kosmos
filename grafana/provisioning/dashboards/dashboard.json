@@ -2124,8 +2124,8 @@
                 "uid": "sidecar_uid"
               },
               "refId": "A",
-              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
-              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
+              "queryText": "SELECT id, title, subtitle, mainstat, secondarystat, color, icon, phys_x AS fixedX, phys_y AS fixedY FROM ci_nodes",
+              "rawQueryText": "SELECT id, title, subtitle, mainstat, secondarystat, color, icon, phys_x AS fixedX, phys_y AS fixedY FROM ci_nodes",
               "queryType": "table",
               "timeColumns": [
                 "time",
@@ -2139,8 +2139,8 @@
               },
               "refId": "B",
               "hide": false,
-              "queryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
-              "rawQueryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
+              "queryText": "SELECT id, source, target FROM ci_edges WHERE source = 'network_localhost';",
+              "rawQueryText": "SELECT id, source, target FROM ci_edges WHERE source = 'network_localhost';",
               "queryType": "table",
               "timeColumns": [
                 "time",

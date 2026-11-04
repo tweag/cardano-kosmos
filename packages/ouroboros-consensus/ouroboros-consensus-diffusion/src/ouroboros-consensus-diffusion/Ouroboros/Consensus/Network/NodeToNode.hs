@@ -130,7 +130,6 @@ import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasVote
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Outbound (objectDiffusionOutbound)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote
-import qualified Ouroboros.Consensus.MiniProtocol.Util.Idling as Idling
 import Ouroboros.Consensus.Network.LeiosNotify (runLookaheadFixedSenderPeerWithLimits)
 import Ouroboros.Consensus.Network.NodeToNode.LeiosFetch
   ( catchAndRethrow
@@ -908,8 +907,8 @@ noByteLimits =
     { blChainSync = byteLimitsChainSync (const 0)
     , blBlockFetch = byteLimitsBlockFetch (const 0)
     , blTxSubmission2 = byteLimitsTxSubmission2 (const 0)
-    , blPerasCertDiffusion = byteLimitsObjectDiffusion (const 0)
-    , blPerasVoteDiffusion = byteLimitsObjectDiffusion (const 0)
+    , blPerasCertDiffusion = byteLimitsObjectDiffusion 0 0 (const 0)
+    , blPerasVoteDiffusion = byteLimitsObjectDiffusion 0 0 (const 0)
     , blKeepAlive = byteLimitsKeepAlive (const 0)
     , blPeerSharing = byteLimitsPeerSharing (const 0)
     , blLeiosNotify = byteLimitsLeiosNotify (const 0)
@@ -932,14 +931,30 @@ byteLimits =
     { blChainSync = byteLimitsChainSync size
     , blBlockFetch = byteLimitsBlockFetch size
     , blTxSubmission2 = byteLimitsTxSubmission2 size
-    , blPerasCertDiffusion = byteLimitsObjectDiffusion size
-    , blPerasVoteDiffusion = byteLimitsObjectDiffusion size
+    , blPerasCertDiffusion =
+        byteLimitsObjectDiffusion
+          (4 + certBatchSize * 9)
+          (4 + certBatchSize * maxCertSize)
+          size
+    , blPerasVoteDiffusion =
+        byteLimitsObjectDiffusion
+          (4 + voteBatchSize * 13)
+          (4 + voteBatchSize * maxVoteSize)
+          size
     , blKeepAlive = byteLimitsKeepAlive size
     , blPeerSharing = byteLimitsPeerSharing size
     , blLeiosNotify = byteLimitsLeiosNotify size
     , blLeiosFetch = byteLimitsLeiosFetch size
     }
  where
+  -- Include four CBOR framing bytes per list message. Certificate IDs are
+  -- Word64 rounds (at most nine bytes); vote IDs add a list header and a
+  -- Word16 seat index (at most thirteen bytes in total).
+  certBatchSize =
+    fromIntegral $ perasCertDiffusionMaxObjectsUnacknowledged defaultMiniProtocolParameters
+  voteBatchSize =
+    fromIntegral $ perasVoteDiffusionMaxObjectsUnacknowledged defaultMiniProtocolParameters
+
   size :: ByteString -> Word
   size =
     (fromIntegral :: Int64 -> Word)
@@ -1247,7 +1262,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
       -- Votes must not register in or remove entries from the certificate handles.
       let state =
             ObjectDiffusionInboundStateView
-              { odisvIdling = Idling.noIdling
+              { odisvSignalCaughtUp = pure ()
               , odisvSetNextOutstandingObjectId = \_ -> pure ()
               }
       ((), trailing) <-

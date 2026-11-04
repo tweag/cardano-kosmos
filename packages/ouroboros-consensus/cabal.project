@@ -24,9 +24,9 @@ packages: .
 -- Replace with an upstream main commit or release before merging.
 source-repository-package
   type: git
-  location: https://github.com/intersectmbo/ouroboros-network.git
-  tag: 5d6a3f4e38182d91df38d664cc9604af4e9ceaae
-  --sha256: sha256-Gl3KQrjasbHk2h+BuFeFFWFNpSqsM50SW1zs8jUj4Qo=
+  location: https://github.com/tweag/ouroboros-network.git
+  tag: 4ebc795fd6e3c45c4c90a4186fc8a47d54ab779c
+  --sha256: sha256-90qApeuAfv08iLCZcSeBkpr70v9YhLUYRHhOPbQobhQ=
   subdir:
     ouroboros-network
     cardano-diffusion

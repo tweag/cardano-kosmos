@@ -41,8 +41,8 @@ import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound.State
   , ObjectDiffusionInboundState (..)
   , ObjectDiffusionInboundStateView
     ( ObjectDiffusionInboundStateView
-    , odisvIdling
     , odisvSetNextOutstandingObjectId
+    , odisvSignalCaughtUp
     )
   , bracketObjectDiffusionInbound
   , newObjectDiffusionInboundHandleCollection
@@ -53,7 +53,6 @@ import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.API
   , ObjectPoolWriter (..)
   )
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Outbound (objectDiffusionOutbound)
-import qualified Ouroboros.Consensus.MiniProtocol.Util.Idling as Idling
 import Ouroboros.Consensus.Util.IOLike
   ( IOLike
   , MonadDelay (..)
@@ -167,7 +166,7 @@ makeObjectPoolWriter (SmokeObjectPool poolContentTvar) =
     , opwHasObject = do
         poolContent <- readTVar poolContentTvar
         pure $ \objectId -> any (\obj -> getSmokeObjectId obj == objectId) poolContent
-    , opwClassifyObjectId = pure $ const ObjectIdRequestable
+    , opwObjectIdRequestability = pure $ const ObjectIdRequestable
     }
 
 mkMockPoolInterfaces ::
@@ -258,7 +257,7 @@ prop_object_after_await =
         .&&. counterexample "peers did not terminate after delivery" (isJust mTerminated)
         .&&. inboundObjects === [object]
         .&&. counterexample
-          "await must start idling and subsequent IDs must stop it"
+          "await must signal caught up and subsequent IDs must record progress"
           (take 2 idlingUpdates === [True, False])
     Left err -> counterexample (show err) $ property False
  where
@@ -276,14 +275,7 @@ prop_object_after_await =
     awaitSeen <- uncheckedNewTVarM False
     idlingUpdates <- uncheckedNewTVarM []
 
-    let idling =
-          Idling.Idling
-            { Idling.idlingStart = atomically $ do
-                modifyTVar idlingUpdates (++ [True])
-                writeTVar awaitSeen True
-            , Idling.idlingStop = atomically $ modifyTVar idlingUpdates (++ [False])
-            }
-        inbound =
+    let inbound =
           objectDiffusionInbound
             nullTracer
             (maxFifoSize, maxIdsToReq, maxObjectsToReq)
@@ -291,8 +283,11 @@ prop_object_after_await =
             nodeToNodeVersion
             (readTVar controlMessage)
             ObjectDiffusionInboundStateView
-              { odisvIdling = idling
-              , odisvSetNextOutstandingObjectId = \_ -> pure ()
+              { odisvSignalCaughtUp = atomically $ do
+                  modifyTVar idlingUpdates (++ [True])
+                  writeTVar awaitSeen True
+              , odisvSetNextOutstandingObjectId = \_ ->
+                  atomically $ modifyTVar idlingUpdates (++ [False])
               }
         outbound =
           objectDiffusionOutbound
@@ -377,11 +372,7 @@ prop_await_after_commit =
     allowCommit <- uncheckedNewTVarM False
     awaitSeen <- uncheckedNewTVarM False
 
-    let idling =
-          Idling.Idling
-            { Idling.idlingStart = atomically $ writeTVar awaitSeen True
-            , Idling.idlingStop = pure ()
-            }
+    let signalCaughtUp = atomically $ writeTVar awaitSeen True
         inboundWriter =
           ObjectPoolWriter
             { opwObjectId = getSmokeObjectId
@@ -393,7 +384,7 @@ prop_await_after_commit =
                 inboundObjects <- readTVar inboundObjectsVar
                 pure $ \objectId ->
                   any ((== objectId) . getSmokeObjectId) inboundObjects
-            , opwClassifyObjectId = pure $ const ObjectIdRequestable
+            , opwObjectIdRequestability = pure $ const ObjectIdRequestable
             }
         inbound =
           objectDiffusionInbound
@@ -403,7 +394,7 @@ prop_await_after_commit =
             nodeToNodeVersion
             (readTVar controlMessage)
             ObjectDiffusionInboundStateView
-              { odisvIdling = idling
+              { odisvSignalCaughtUp = signalCaughtUp
               , odisvSetNextOutstandingObjectId = \_ -> pure ()
               }
         outbound =
@@ -493,11 +484,7 @@ prop_server_idle_after_stale_reads =
             writeTVar idleFollowedAwaitVar hasAwaited
             writeTVar idleSeen True
           _ -> pure ()
-        idling =
-          Idling.Idling
-            { Idling.idlingStart = atomically $ writeTVar awaitSeen True
-            , Idling.idlingStop = pure ()
-            }
+        signalCaughtUp = atomically $ writeTVar awaitSeen True
         inbound =
           objectDiffusionInbound
             inboundTracer
@@ -506,7 +493,7 @@ prop_server_idle_after_stale_reads =
             nodeToNodeVersion
             (readTVar controlMessage)
             ObjectDiffusionInboundStateView
-              { odisvIdling = idling
+              { odisvSignalCaughtUp = signalCaughtUp
               , odisvSetNextOutstandingObjectId = \_ -> pure ()
               }
         outbound =
@@ -617,14 +604,10 @@ prop_request_eligible_prefix =
           TraceObjectDiffusionInboundUnblocked (SmokeObjectId 3) ->
             atomically $ writeTVar unblockedSeen True
           _ -> pure ()
-        idling =
-          Idling.Idling
-            { Idling.idlingStart = atomically $ writeTVar awaitSeen True
-            , Idling.idlingStop = pure ()
-            }
+        signalCaughtUp = atomically $ writeTVar awaitSeen True
         inboundWriter =
           (makeObjectPoolWriter inboundPool)
-            { opwClassifyObjectId = do
+            { opwObjectIdRequestability = do
                 upperBound <- readTVar requestableUpperBound
                 pure $ \(SmokeObjectId objectId) ->
                   if objectId < upperBound
@@ -639,7 +622,7 @@ prop_request_eligible_prefix =
             nodeToNodeVersion
             (readTVar controlMessage)
             ObjectDiffusionInboundStateView
-              { odisvIdling = idling
+              { odisvSignalCaughtUp = signalCaughtUp
               , odisvSetNextOutstandingObjectId =
                   \objectId -> atomically $ modifyTVar progressUpdates (++ [objectId])
               }
@@ -725,7 +708,7 @@ withCertificateProgress body = do
   bracketObjectDiffusionInbound handles 0 $ \view -> do
     let smokeView =
           ObjectDiffusionInboundStateView
-            { odisvIdling = odisvIdling view
+            { odisvSignalCaughtUp = odisvSignalCaughtUp view
             , odisvSetNextOutstandingObjectId = \(SmokeObjectId n) ->
                 odisvSetNextOutstandingObjectId view (fromIntegral n)
             }
@@ -791,7 +774,7 @@ prop_certificate_progress =
                   atomically $ writeTVar processingStarted True
                   atomically $ readTVar allowProcessing >>= check
                 opwAddObjects poolWriter objects
-            , opwClassifyObjectId = do
+            , opwObjectIdRequestability = do
                 upper <- readTVar upperBound
                 pure $ \(SmokeObjectId n) ->
                   if n < upper then ObjectIdRequestable else ObjectIdTooNew
@@ -907,7 +890,7 @@ prop_terminate_while_blocked =
           _ -> pure ()
         inboundWriter =
           (makeObjectPoolWriter inboundPool)
-            { opwClassifyObjectId = pure $ const ObjectIdTooNew
+            { opwObjectIdRequestability = pure $ const ObjectIdTooNew
             }
         inbound =
           objectDiffusionInbound
@@ -917,7 +900,7 @@ prop_terminate_while_blocked =
             nodeToNodeVersion
             (readTVar controlMessage)
             ObjectDiffusionInboundStateView
-              { odisvIdling = Idling.noIdling
+              { odisvSignalCaughtUp = pure ()
               , odisvSetNextOutstandingObjectId = \_ -> pure ()
               }
         outbound =
@@ -996,7 +979,7 @@ prop_skip_too_old_object_ids =
 
     let writer =
           (makeObjectPoolWriter inboundPool)
-            { opwClassifyObjectId = do
+            { opwObjectIdRequestability = do
                 advanced <- readTVar contextAdvanced
                 pure $ \(SmokeObjectId n) ->
                   if n < 3
@@ -1104,7 +1087,7 @@ prop_smoke_object_diffusion
               nodeToNodeVersion
               (readTVar controlMessage)
               ObjectDiffusionInboundStateView
-                { odisvIdling = Idling.noIdling
+                { odisvSignalCaughtUp = pure ()
                 , odisvSetNextOutstandingObjectId = \_ -> pure ()
                 }
 

@@ -7,6 +7,6 @@
 	remote = git@github.com:tweag/ouroboros-network.git
 	branch = object_diffusion/termination_and_caught-up
 	commit = 4ebc795fd6e3c45c4c90a4186fc8a47d54ab779c
-	parent = ecc59fa1941a942f9161fad5b74d8ee688ae7c9a
+	parent = fea13cbe26b7604d144c14a47aac8c6f61f2940d
 	method = merge
 	cmdver = 0.4.9

@@ -6,6 +6,8 @@ Usage:
                              [--from SEC] [--to SEC] [--blocks]
                              [--linear] [--gap SEC] [--burst PX_PER_SEC]
                              [--network-vote] [--network-cert] [--highlight]
+                             [--victoria-logs [URL]] [--victoria-query QUERY]
+                             [--victoria-limit N]
 
 RESULTS_DIR defaults to devnet-env (same layout as check_peras_logs.py). The
 output is a self-contained HTML/SVG page: one lane per node, time flowing to
@@ -31,6 +33,8 @@ Peras simulator (https://peras-simulation.cardano-scaling.org):
 Hover over any element for the full details.
 """
 import argparse, bisect, collections, glob, html, json, os, re, sys
+import urllib.parse
+import urllib.request
 from fractions import Fraction as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -98,8 +102,220 @@ HATCH = ('<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpace
 SHOW_BLOCKS = False
 
 
-def load(root):
+def _victoria_http_request(base_url, path, params):
+    base_url = base_url.rstrip("/")
+    url = f"{base_url}{path}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json, text/plain;q=0.9, */*;q=0.1"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _victoria_iter_tracer_records(base_url, query, limit):
+    """Best-effort fetch of cardano-tracer JSON records via victoria-logs.
+
+    The victoria-logs HTTP API and output formats vary (json, jsonl, text).
+    This function tries a small set of common options and yields dicts that
+    contain at least "at" and "ns" when present.
+    """
+    errors = []
+    attempts = [
+        ("/select/logsql/query", {"query": query, "limit": str(limit), "format": "json"}),
+        ("/select/logsql/query", {"query": query, "limit": str(limit)}),
+        ("/select/logsql/query", {"query": query, "limit": str(limit), "format": "jsonl"}),
+    ]
+    body = None
+    for path, params in attempts:
+        try:
+            body = _victoria_http_request(base_url, path, params)
+            break
+        except Exception as e:
+            errors.append(f"{path} {params.get('format', '')}: {e}")
+    if body is None:
+        raise RuntimeError("failed to query victoria-logs: " + "; ".join(errors))
+
+    txt = body.strip()
+    parsed = None
+    if txt.startswith("{") or txt.startswith("["):
+        try:
+            parsed = json.loads(txt)
+        except Exception:
+            parsed = None
+
+    def as_records(obj):
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return obj
+        if isinstance(obj, dict):
+            for k in ("data", "rows", "logs", "result"):
+                if k in obj and isinstance(obj[k], list):
+                    return obj[k]
+            return [obj]
+        if isinstance(obj, str):
+            return obj.splitlines()
+        return []
+
+    for item in as_records(parsed) if parsed is not None else txt.splitlines():
+        if isinstance(item, dict):
+            if "at" in item and "ns" in item:
+                yield item
+                continue
+            for k in ("_msg", "msg", "message"):
+                if k in item and isinstance(item[k], str):
+                    try:
+                        j = json.loads(item[k])
+                        if isinstance(j, dict) and "at" in j and "ns" in j:
+                            yield j
+                            break
+                    except Exception:
+                        pass
+            continue
+        if not isinstance(item, str):
+            continue
+        line = item.strip()
+        if not line:
+            continue
+        # Try: jsonl, or text where the last column is a JSON object.
+        for candidate in (line, line.split("\t")[-1], line[line.find("{"):] if "{" in line else ""):
+            if not candidate or not candidate.startswith("{"):
+                continue
+            try:
+                j = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(j, dict) and "at" in j and "ns" in j:
+                yield j
+                break
+
+
+def _strings_in(obj, limit=2000):
+    """Yield strings found in nested dict/list structures (best-effort, bounded)."""
+    out = 0
+    stack = [obj]
+    while stack and out < limit:
+        cur = stack.pop()
+        if cur is None:
+            continue
+        if isinstance(cur, str):
+            yield cur
+            out += 1
+        elif isinstance(cur, dict):
+            stack.extend(cur.values())
+        elif isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+
+
+def _stream_id(record):
+    """Return a stable stream id for victoria-logs records, if available."""
+    for k in ("_stream", "stream", "labels", "_labels"):
+        v = record.get(k)
+        if isinstance(v, dict) and v:
+            return tuple(sorted((str(a), str(b)) for a, b in v.items()))
+    for k in ("path", "filename", "file"):
+        v = record.get(k)
+        if isinstance(v, str) and v:
+            return (k, v)
+    return None
+
+
+def _infer_node_and_port(records, ports_by_node):
+    """Infer node number (and display port) for a set of records from one stream."""
+    ports_to_node = {int(p): int(n) for n, p in ports_by_node.items() if str(p).isdigit()}
+    hinted_nodes = []
+    hinted_ports = []
+    for rec in records:
+        for s in _strings_in(rec):
+            m = re.search(r"/node(\d+)/", s) or re.search(r"socket/node(\d+)/", s)
+            if m:
+                hinted_nodes.append(int(m[1]))
+            for p, n in ports_to_node.items():
+                if f":{p}" in s:
+                    hinted_nodes.append(n)
+                    hinted_ports.append(p)
+        if "node" in rec and isinstance(rec["node"], int):
+            hinted_nodes.append(rec["node"])
+        if "port" in rec and isinstance(rec["port"], int):
+            hinted_ports.append(rec["port"])
+    node = max(set(hinted_nodes), key=hinted_nodes.count) if hinted_nodes else None
+    port = None
+    if node is not None and node in ports_by_node:
+        port = ports_by_node[node]
+    elif hinted_ports:
+        port = str(max(set(hinted_ports), key=hinted_ports.count))
+    return node, (str(port) if port is not None else "?")
+
+
+def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000):
     """Return {node: events} with events as plain dicts, times in absolute seconds."""
+    if victoria_logs_url:
+        ports_by_node = {}
+        try:
+            ports = json.load(open(os.path.join(root, "nodes-ports.json")))
+            if isinstance(ports, list):
+                ports_by_node = {i + 1: str(p) for i, p in enumerate(ports) if isinstance(p, int)}
+        except Exception:
+            ports_by_node = {}
+
+        by_stream = collections.defaultdict(list)
+        no_stream = []
+        for rec in _victoria_iter_tracer_records(victoria_logs_url, victoria_query, victoria_limit):
+            sid = _stream_id(rec)
+            if sid is None:
+                no_stream.append(rec)
+            else:
+                by_stream[sid].append(rec)
+        if no_stream:
+            by_stream[("no_stream", "?")] += no_stream
+
+        nodes = {}
+        for sid, records in by_stream.items():
+            node, port = _infer_node_and_port(records, ports_by_node)
+            if node is None:
+                continue
+            ev = nodes.get(node)
+            if ev is None:
+                ev = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[],
+                          start=float("inf"), port=port)
+                nodes[node] = ev
+            for j in records:
+                try:
+                    t, ns, x = ts(j["at"]), j["ns"], j.get("data", {})
+                except Exception:
+                    continue
+                ev["start"] = min(ev["start"], t)
+                if ns == "Forge.Loop.ForgedBlock":
+                    ev["blocks"][x["block"]] = dict(t=t, slot=x["slot"], no=x["blockNo"], prev=x["blockPrev"])
+                elif ns == "Peras.Vote.Forging.ForgedVote":
+                    m = re.search(r"unPerasSeatIndex = (\d+)", x["vote"])
+                    s = re.search(r"Bytes32RealPoint \(SlotNo (\d+)\)", x["vote"])
+                    w = re.search(r"unVoteWeight = (\d+) % (\d+)", x["vote"])
+                    ev["votes"].append(dict(
+                        t=t, round=x["round"], seat=int(m[1]), slot=int(s[1]) if s else None,
+                        weight=F(int(w[1]), int(w[2])) if w else None,
+                        persistent="NonPersistentPerasVoteEligibilityProof" not in x["vote"]))
+                elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
+                    m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", x["voteId"])
+                    gen = "AndGenerated" in x["result"]
+                    ev["vrecv"][(int(m[1]), int(m[2]))] = (t, gen)
+                    if gen:
+                        ev["gen"].append(dict(t=t, round=int(re.search(r"pcRoundNo = PerasRoundNo (\d+)", x["result"])[1])))
+                elif ns == "ChainDB.PerasCertDbEvent.AddCert":
+                    ev["recv"].append(dict(t=t, round=int(re.search(r"\d+", x["round"])[0]), result=x["result"]))
+                elif ns == "Peras.Vote.Forging.RulesDecision":
+                    ev["rounds"].setdefault(x["round"], t)
+                    ev["dec"][x["round"]] = (t, x["decision"].startswith("Vote"), x["decision"])
+                elif ns == "Peras.Vote.Outbound.TraceObjectDiffusionOutboundSendMsgReplyObjects":
+                    ev["carry"].append((t, int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1]),
+                                        [(int(r_), int(s_)) for r_, s_ in re.findall(
+                                            r"pvRoundNo = PerasRoundNo (\d+),.*?unPerasSeatIndex = (\d+)", x["payload"])]))
+                elif re.match(r"Peras\.(Vote|Cert)\.Remote\.(Send|Receive)\.", ns):
+                    _, proto, _, way, _ = ns.split(".", 4)
+                    peer = int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1])
+                    ev["net"].append((t, proto, way, x["msg"]["kind"], peer))
+                elif ns == "Peras.Cert.Inclusion.RulesDecision" and x["decision"].startswith("IncludeCert"):
+                    ev["incl"][x["slot"]] = x["round"]
+        return nodes
+
     nodes = {}
     for d in sorted(glob.glob(os.path.join(root, "logs", "*_*"))):
         n = Run.node_number(d)
@@ -547,11 +763,15 @@ def main():
                     help="pixels per second inside busy periods (default 300, or 20000 with --network-vote/--network-cert)")
     ap.add_argument("--from", dest="t_from", type=float, default=0, help="window start, seconds into the run")
     ap.add_argument("--to", dest="t_to", type=float, help="window end, seconds into the run")
+    ap.add_argument("--victoria-logs", nargs="?", const="http://127.0.0.1:9428", default=None,
+                    help="load cardano-tracer logs from victoria-logs HTTP API instead of reading logs/ (optional URL)")
+    ap.add_argument("--victoria-query", default="*", help="LogSQL query for victoria-logs (default: *)")
+    ap.add_argument("--victoria-limit", type=int, default=200000, help="max log entries to fetch from victoria-logs")
     a = ap.parse_args()
     a.network = {p for p, on in (("Vote", a.network_vote), ("Cert", a.network_cert)) if on}
     if a.burst is None:
         a.burst = 20000 if a.network else 300
-    nodes = load(a.results)
+    nodes = load(a.results, victoria_logs_url=a.victoria_logs, victoria_query=a.victoria_query, victoria_limit=a.victoria_limit)
     if not nodes:
         sys.exit("no nodes found under logs/")
     open(a.output, "w").write(render(nodes, a.scale, a.t_from, a.t_to, a.blocks, a.linear, a.gap, a.burst, a.network, a.highlight,

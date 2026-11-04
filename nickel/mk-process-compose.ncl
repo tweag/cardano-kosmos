@@ -22,7 +22,7 @@ in fun input scenario portsOfNodes =>
     cardano-testnet = mk_cardano_testnet input scenario,
     chairman = mk_chairman input scenario,
     victoria-logs = mk_victoria_logs input,
-    vlagent = mk_vlagent input,
+    vlagent = mk_vlagent input scenario portsOfNodes,
     envoy = mk_envoy input,
     oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {

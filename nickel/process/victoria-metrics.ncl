@@ -2,10 +2,7 @@ let { at, map, range, .. } = std.array in
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
 fun input scenario portsOfNodes =>
 # Symbolic node labels, numbered per role: spo1..spoN, relay1..relayM.
-let roles =
-  scenario.topology.groups
-  |> std.array.flat_map (fun g =>
-    std.array.replicate g.count (std.string.from_enum g.role))
+let roles = scenario.topology.nodes |> map (fun n => n.role)
 in
 let label_of = fun idx =>
   let role = at (idx - 1) roles in

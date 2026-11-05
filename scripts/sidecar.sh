@@ -23,9 +23,9 @@ set -o pipefail
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
 NODE_LABELS="${NODE_LABELS:-}"
-# topology.json points peers at Envoy listener ports (NODE_PORTS_BASE + idx),
-# not at the nodes' own ports; see nickel/mk-node-topologies.ncl.
-NODE_PORTS_BASE="${NODE_PORTS_BASE:-5000}"
+# Per-node label, own port and Envoy proxy port, written by
+# scripts/setup-testnet-env.sh from nickel/mk-node-topologies.ncl.
+TOPOLOGIES_JSON="${TOPOLOGIES_JSON:-${DEVNET_DIR}/topologies.json}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
 # cardano-tracer writes ForMachine JSON logs to ${LOGS_DIR}/<host>_<port>/.
@@ -47,15 +47,19 @@ node_label() { echo "${LABELS[$(($1 - 1))]:-node$1}"; }
 node_role() { echo "${ROLES[$(($1 - 1))]:-node}"; }
 
 # port -> label, for both the node's own port and its Envoy listener port.
-# Filled by build_port_map once cardano-testnet has written the port files.
+# topology.json access points use the proxy ports; VictoriaMetrics series
+# carry the node's own port.
 declare -A NODE_BY_PORT=()
 build_port_map() {
-    local i p
-    for i in $(seq 1 "${NUM_NODES}"); do
-        p="$(node_port "${i}")"
-        [ -n "${p}" ] && NODE_BY_PORT["${p}"]="$(node_label "${i}")"
-        NODE_BY_PORT["$((NODE_PORTS_BASE + i))"]="$(node_label "${i}")"
-    done
+    local label port proxy
+    [ -f "${TOPOLOGIES_JSON}" ] || {
+        echo "sidecar: ${TOPOLOGIES_JSON} not found; topology graphs will be empty" >&2
+        return 0
+    }
+    while read -r label port proxy; do
+        NODE_BY_PORT["${port}"]="${label}"
+        NODE_BY_PORT["${proxy}"]="${label}"
+    done < <(jq -r '.[] | "\(.label) \(.port) \(.proxy_port)"' "${TOPOLOGIES_JSON}")
 }
 
 setup_database() {

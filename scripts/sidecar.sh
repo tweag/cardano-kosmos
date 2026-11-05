@@ -23,8 +23,8 @@ set -o pipefail
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
 NODE_LABELS="${NODE_LABELS:-}"
-# topology.json points peers at toxiproxy listen ports (NODE_PORTS_BASE + idx),
-# not at the nodes' own ports; see nickel/mk-node-topology.ncl.
+# topology.json points peers at Envoy listener ports (NODE_PORTS_BASE + idx),
+# not at the nodes' own ports; see nickel/mk-node-topologies.ncl.
 NODE_PORTS_BASE="${NODE_PORTS_BASE:-5000}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
@@ -46,7 +46,7 @@ IFS=',' read -ra LABELS <<<"${NODE_LABELS:-}"
 node_label() { echo "${LABELS[$(($1 - 1))]:-node$1}"; }
 node_role() { echo "${ROLES[$(($1 - 1))]:-node}"; }
 
-# port -> label, for both the node's own port and its toxiproxy listen port.
+# port -> label, for both the node's own port and its Envoy listener port.
 # Filled by build_port_map once cardano-testnet has written the port files.
 declare -A NODE_BY_PORT=()
 build_port_map() {
@@ -108,8 +108,8 @@ CREATE TABLE cn_edges (
     target TEXT
 );
 
--- Localroot panel: SPO<->relay links, one row per pair, marking whether the
--- peering is mutual.
+-- Localroot panel: the scenario's logical links (from each node's
+-- topology.json), one row per pair, marking whether the peering is mutual.
 CREATE VIEW lr_edges AS
 SELECT a.id, a.source, a.target,
        CASE WHEN b.id IS NULL THEN '→' ELSE '↔' END AS mainstat,
@@ -117,9 +117,7 @@ SELECT a.id, a.source, a.target,
        CASE WHEN b.id IS NULL THEN '4,4' END AS strokeDasharray
 FROM cn_edges a
 LEFT JOIN cn_edges b ON b.source = a.target AND b.target = a.source
-WHERE ((a.source LIKE 'spo%' AND a.target LIKE 'relay%')
-    OR (a.source LIKE 'relay%' AND a.target LIKE 'spo%'))
-  AND (b.id IS NULL OR a.source < a.target);
+WHERE b.id IS NULL OR a.source < a.target;
 
 CREATE TABLE ada_pots (
     epoch_no INTEGER NOT NULL,

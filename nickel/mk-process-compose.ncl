@@ -28,7 +28,7 @@ in fun input scenario portsOfNodes =>
     toxiproxy-setup = mk_toxiproxy_setup input scenario portsOfNodes,
     oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {
-    victoria-metrics = mk_victoria_metrics input portsOfNodes,
+    victoria-metrics = mk_victoria_metrics input scenario portsOfNodes,
     grafana = mk_grafana input,
     sidecar = mk_sidecar input scenario,
     canary = mk_canary input scenario,

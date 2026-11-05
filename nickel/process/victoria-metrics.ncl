@@ -1,6 +1,20 @@
 let { at, map, range, .. } = std.array in
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
-fun input portsOfNodes =>
+fun input scenario portsOfNodes =>
+# Symbolic node labels, numbered per role: spo1..spoN, relay1..relayM.
+let roles =
+  scenario.topology.groups
+  |> std.array.flat_map (fun g =>
+    std.array.replicate g.count (std.string.from_enum g.role))
+in
+let label_of = fun idx =>
+  let role = at (idx - 1) roles in
+  let n =
+    std.array.length
+      (std.array.filter (fun r => r == role) (std.array.slice 0 idx roles))
+  in
+  "%{role}%{std.string.from_number n}"
+in
 {
   # VictoriaMetrics scrapes the cardano-tracer prometheus endpoint. The
   # scrape config must live in a real file passed via `-promscrape.config`;
@@ -17,7 +31,7 @@ fun input portsOfNodes =>
           "      - source_labels: [node_name]\n"
           ++ "        regex: '.*_%{port}'\n"
           ++ "        target_label: node\n"
-          ++ "        replacement: 'node%{idx}'\n"
+          ++ "        replacement: '%{label_of idx}'\n"
         )
         (range 1 (std.array.length portsOfNodes + 1))
       )

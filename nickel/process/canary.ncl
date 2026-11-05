@@ -3,9 +3,8 @@ let
 in
 fun input scenario =>
 let roles =
-  scenario.topology.groups
-  |> std.array.flat_map (fun g =>
-    std.array.replicate g.count (std.string.from_enum g.role))
+  scenario.topology.nodes
+  |> std.array.map (fun n => std.string.from_enum n.role)
   |> std.string.join ","
 in
 let c = input.canary in

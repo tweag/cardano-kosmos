@@ -13,7 +13,7 @@ in
   prometheus = {
     port = 9090,
   },
-  toxiproxy = {
-    port = 8474
+  envoy = {
+    port = 9091
   },
 } | InputParams

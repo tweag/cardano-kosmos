@@ -111,15 +111,20 @@ portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' 
 
 echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
 
-envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 '"$node_ports_base"' (import "'"$scenarioFile"'") '"$portsOfNodes"')' | nickel export --format json)
+testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (import "'"$scenarioFile"'") '"$node_ports_base"'  '"$portsOfNodes"')' | nickel export --format json)
+
+for node_idx in $(seq 1 $num_of_nodes); do
+  newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
+  echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
+done
+
+topologiesPath="$DEVENV_PATH/topologies.json"
+echo $testnetTopology | jq '.nodes' > "$topologiesPath"
+
+envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 (import "'"$scenarioFile"'") (import "'"$topologiesPath"'"))' | nickel export --format json)
 
 echo $envoyConfig | jq '.main' > "$DEVENV_PATH/envoy.json"
 echo $envoyConfig | jq '.clusters' > "$DEVENV_PATH/cds.json"
 echo $envoyConfig | jq '.listeners' > "$DEVENV_PATH/lds.json"
-
-for node_idx in $(seq 1 $num_of_nodes); do
-  newTopology=$(echo '(import "nickel/mk-node-topology.ncl") "'"$ip"'" '"$node_ports_base"' '"$node_idx"' '"$num_of_nodes"'' | nickel export --format json)
-  echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
-done
 
 echo "Ready."

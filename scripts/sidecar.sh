@@ -22,6 +22,7 @@ set -o pipefail
 : "${SIDECAR_DB:?}"
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
+NODE_LABELS="${NODE_LABELS:-}"
 # topology.json points peers at toxiproxy listen ports (NODE_PORTS_BASE + idx),
 # not at the nodes' own ports; see nickel/mk-node-topology.ncl.
 NODE_PORTS_BASE="${NODE_PORTS_BASE:-5000}"
@@ -39,17 +40,10 @@ IFS=',' read -ra ROLES <<<"${NODE_ROLES}"
 
 node_port() { cat "${DEVNET_DIR}/node-data/node$1/port" 2>/dev/null; }
 
-# Symbolic labels, numbered per role (spo1.., relay1..); must match the
-# relabelling in nickel/process/victoria-metrics.ncl.
-declare -a LABELS=()
-declare -A ROLE_COUNT=()
-for ((j = 0; j < NUM_NODES; j++)); do
-    r="${ROLES[$j]:-node}"
-    ROLE_COUNT[$r]=$(( ${ROLE_COUNT[$r]:-0} + 1 ))
-    LABELS[$j]="${r}${ROLE_COUNT[$r]}"
-done
-unset j r
-node_label() { echo "${LABELS[$(($1 - 1))]}"; }
+# Symbolic labels (spo1.., relay1..), computed once in the topology schema
+# (nickel/schemas/scenario.ncl, `node_labels`).
+IFS=',' read -ra LABELS <<<"${NODE_LABELS:-}"
+node_label() { echo "${LABELS[$(($1 - 1))]:-node$1}"; }
 node_role() { echo "${ROLES[$(($1 - 1))]:-node}"; }
 
 # port -> label, for both the node's own port and its toxiproxy listen port.

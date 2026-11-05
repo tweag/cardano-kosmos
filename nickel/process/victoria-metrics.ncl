@@ -1,7 +1,7 @@
 let { at, map, range, .. } = std.array in
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
 fun input scenario portsOfNodes =>
-let label_of = (import "../node-labels.ncl") scenario in
+let label_of = fun idx => at (idx - 1) scenario.topology.node_labels in
 {
   # VictoriaMetrics scrapes the cardano-tracer prometheus endpoint. The
   # scrape config must live in a real file passed via `-promscrape.config`;

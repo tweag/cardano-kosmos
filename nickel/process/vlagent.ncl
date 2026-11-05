@@ -1,6 +1,6 @@
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
 fun input scenario portsOfNodes =>
-let label_of = (import "../node-labels.ncl") scenario in
+let label_of = fun idx => std.array.at (idx - 1) scenario.topology.node_labels in
 # cardano-tracer writes each node's logs to logs/<host>_<port>/node.json.
 # One glob per node, each paired (by position) with an extraFields entry
 # tagging its lines with the symbolic `node` label.

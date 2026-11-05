@@ -33,8 +33,31 @@ LOGS_DIR="${LOGS_DIR:-${DEVNET_DIR}/logs}"
 # Only tracer logs written after this marker belong to the current run.
 RUN_MARKER="$(dirname "${SIDECAR_DB}")/.sidecar-run-marker"
 
-# Grafana reads the database concurrently; wait on locks instead of failing.
-sql_sc() { sqlite3 -bail -batch -cmd ".timeout 5000" "${SIDECAR_DB}" "$@" >/dev/null; }
+# All writes go through one long-lived sqlite3 connection. Opening a fresh
+# connection per write made each one the "last connection" on close, which
+# checkpoints the WAL under an exclusive lock and makes concurrent Grafana
+# reads fail with "database is locked". With a connection held open, readers
+# never hit that lock. The timeout still covers contention with canary.sh.
+SQL_PID=""
+start_db() {
+    mkdir -p "$(dirname "${SIDECAR_DB}")"
+    coproc SQL { exec sqlite3 -batch -cmd ".timeout 5000" "${SIDECAR_DB}" >/dev/null; }
+}
+# Closing stdin makes sqlite3 exit cleanly (and checkpoint the WAL).
+stop_db() {
+    [ -n "${SQL_PID:-}" ] || return 0
+    exec {SQL[1]}>&- 2>/dev/null
+    wait "${SQL_PID}" 2>/dev/null
+}
+trap stop_db EXIT
+# Reads SQL from stdin. Statements are applied asynchronously but in order.
+sql_sc() {
+    if [ -z "${SQL_PID}" ] || ! kill -0 "${SQL_PID}" 2>/dev/null; then
+        echo "sidecar: (re)starting sqlite3 connection" >&2
+        start_db
+    fi
+    { cat; echo; } >&"${SQL[1]}"
+}
 
 IFS=',' read -ra ROLES <<<"${NODE_ROLES}"
 
@@ -61,7 +84,9 @@ build_port_map() {
 setup_database() {
     mkdir -p "$(dirname "${SIDECAR_DB}")"
 
-    sql_sc <<'SQL'
+    # One-off synchronous connection (not sql_sc), so a failing schema is
+    # reported through the exit status before the long-lived writer starts.
+    sqlite3 -bail -batch -cmd ".timeout 5000" "${SIDECAR_DB}" >/dev/null <<'SQL' || return 1
 PRAGMA journal_mode = WAL;
 DROP VIEW IF EXISTS lr_edges;
 DROP TABLE IF EXISTS node_tips;

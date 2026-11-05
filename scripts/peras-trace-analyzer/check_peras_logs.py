@@ -16,18 +16,12 @@ testnet.
 
 Exit code: 0 all PASS/WARN, 1 some FAIL, 2 still PENDING at timeout.
 """
-import argparse, collections, datetime, glob, json, os, re, sys, time
+import argparse, collections, json, os, re, sys, time
 from fractions import Fraction as F
 
+import peras_tracer as pt
+
 PASS, FAIL, WARN, PENDING = "PASS", "FAIL", "WARN", "PENDING"
-
-
-def ts(s):
-    s = s.rstrip("Z")
-    if "." in s:
-        a, b = s.split(".")
-        s = a + "." + b.ljust(6, "0")[:6]
-    return datetime.datetime.fromisoformat(s).timestamp()
 
 
 class Run:
@@ -35,65 +29,50 @@ class Run:
     def __init__(self, root):
         self.root = root
         self.nodes = {}
-        for d in sorted(glob.glob(os.path.join(root, "logs", "*_*"))):
-            m = re.search(r"_(\d+)$", d)
-            n = self.node_number(d)
-            if not m or n is None:
-                continue
-            self.nodes[n] = {"port": m[1]}
-        for nd in self.nodes.values():
-            self.load_tracer(nd)
+        tracer = pt.PerasTracer()
+        for src in pt.filesystem_sources(root):
+            tracer.add_source(src)
+        for ne in tracer:
+            nd = self.nodes.get(ne.node)
+            if nd is None:
+                nd = self._new_node_state(ne.port)
+                self.nodes[ne.node] = nd
+            print(ne)
+            self._apply_event(nd, ne)
 
     @staticmethod
-    def node_number(d):
-        """N of node<N>, taken from the local socket path in the startup trace
-        (found in the first rotated file; node.json only points to the latest one)."""
-        try:
-            for path in sorted(glob.glob(os.path.join(d, "node-*.json"))):
-                for l in open(path, errors="replace"):
-                    if "Startup.DiffusionInit.CreatedLocalSocket" in l:
-                        return int(re.search(r"/node(\d+)/", l)[1])
-        except (OSError, TypeError):
-            pass
-        return None
+    def _new_node_state(port: str) -> dict:
+        return {
+            "port": port,
+            "nokey": 0,
+            "dec": {},          # round -> Vote | NoVote
+            "notvoter": [],
+            "forged": {},       # round -> (seat, persistent)
+            "incl_err": 0,
+            "votes": {},        # (round, seat) -> (time, generated cert, weight)
+            "certs": [],        # (round, time, result)
+            "invalid_forged": 0,
+        }
 
-    def load_tracer(self, nd):
-        nd["nokey"] = 0
-        nd["dec"] = {}       # round -> Vote | NoVote
-        nd["notvoter"] = []
-        nd["forged"] = {}    # round -> (seat, persistent)
-        nd["incl_err"] = 0
-        nd["votes"] = {}   # (round, seat) -> (time, generated cert, weight)
-        nd["certs"] = []   # (round, time, result)
-        nd["invalid_forged"] = 0
-        for f in glob.glob(os.path.join(self.root, "logs", f"*_{nd['port']}", "node-*.json")):
-            for l in open(f, errors="replace"):
-                try:
-                    j = json.loads(l)
-                    t, ns, d = ts(j["at"]), j["ns"], j.get("data", {})
-                except Exception:
-                    continue
-                if ns == "Peras.Vote.Forging.CantReadEnv":
-                    nd["nokey"] += 1
-                elif ns == "Peras.Vote.Forging.RulesDecision":
-                    nd["dec"][d["round"]] = "Vote" if d["decision"].startswith("Vote") else "NoVote"
-                elif ns == "Peras.Vote.Forging.NotAVoterInRound":
-                    nd["notvoter"].append(d["round"])
-                elif ns == "Peras.Vote.Forging.ForgedVote":
-                    m = re.search(r"unPerasSeatIndex = (\d+)", d["vote"])
-                    nd["forged"][d["round"]] = (
-                        int(m[1]), "NonPersistentPerasVoteEligibilityProof" not in d["vote"])
-                elif ns == "Peras.Cert.Inclusion.Error":
-                    nd["incl_err"] += 1
-                elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
-                    m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", d["voteId"])
-                    w = re.search(r"unVoteWeight = (\d+) % (\d+)", d["vote"])
-                    nd["votes"][(int(m[1]), int(m[2]))] = (
-                        t, "AndGenerated" in d["result"], F(int(w[1]), int(w[2])) if w else F(0))
-                elif ns == "ChainDB.PerasCertDbEvent.AddCert":
-                    nd["certs"].append((int(re.search(r"\d+", d["round"])[0]), t, d["result"]))
-                elif ns == "Forge.Loop.ForgedInvalidBlock":
-                    nd["invalid_forged"] += 1
+    @staticmethod
+    def _apply_event(nd: dict, ne: pt.NodeEvent) -> None:
+        t, ev = ne.t, ne.event
+        if isinstance(ev, pt.CantReadEnv):
+            nd["nokey"] += 1
+        elif isinstance(ev, pt.VoteRulesDecision):
+            nd["dec"][ev.round] = "Vote" if ev.is_vote else "NoVote"
+        elif isinstance(ev, pt.NotAVoterInRound):
+            nd["notvoter"].append(ev.round)
+        elif isinstance(ev, pt.ForgedVote):
+            nd["forged"][ev.round] = (ev.seat, ev.persistent)
+        elif isinstance(ev, pt.InclusionError):
+            nd["incl_err"] += 1
+        elif isinstance(ev, pt.VoteDbAddVote):
+            nd["votes"][(ev.round, ev.seat)] = (t, ev.generated_cert, ev.weight if ev.weight is not None else F(0))
+        elif isinstance(ev, pt.CertDbAddCert):
+            nd["certs"].append((ev.round, t, ev.result))
+        elif isinstance(ev, pt.ForgedInvalidBlock):
+            nd["invalid_forged"] += 1
 
     def threshold(self):
         """Quorum threshold + safety margin. The base quorum is not traced, so the default 3/4 is assumed."""
@@ -269,7 +248,7 @@ def report(out):
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("results", nargs="?", default=os.path.join(here, "..", "devnet-env"))
+    ap.add_argument("results", nargs="?", default=os.path.join(here, "..", "..", "devnet-env")) # CWD
     ap.add_argument("--wait", type=float, default=0, help="keep re-checking up to this many seconds")
     ap.add_argument("--poll", type=float, default=15)
     a = ap.parse_args()

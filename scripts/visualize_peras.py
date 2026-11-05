@@ -21,11 +21,13 @@ Peras simulator (https://peras-simulation.cardano-scaling.org):
                      from the first generator
   network            one arrow per object-diffusion message, from the sender's lane at the
                      time it sent it to the receiver's lane at the time it received it.
-                     --network-vote draws the Vote protocol (Peras.Vote.Remote.*, solid
-                     lines, "net vote" row), --network-cert the Cert protocol
-                     (Peras.Cert.Remote.*, dashed lines, "net cert" row); they can be
+                     Through Toxiproxy, an arrow is drawn at the known endpoint's recorded
+                     time; its tooltip identifies that endpoint. No latency is inferred.
+                     --network-vote draws the Vote protocol (Peras.Vote.Remote.*, "net vote"
+                     row), --network-cert the Cert protocol (Peras.Cert.Remote.*,
+                     "net cert" row); they can be
                      combined. Colour = message type (Request/Reply ObjectIds / Objects,
-                     Init). Only the messages around the busy periods are drawn.
+                     Init, AwaitReply, ServerIdle, Done).
   round boundary     dotted vertical line, labelled r<N>
 
 Hover over any element for the full details.
@@ -41,10 +43,12 @@ COLOUR = dict(vote_yes="#5cc96e", vote_no="#e45b5b", block="skyblue", block_cert
 ROW_H, LEFT, TOP = 34, 80, 40
 # Colour of every object-diffusion message type, shared by the Vote and the Cert protocol.
 MSG_COLOUR = {"MsgInit": "#888888", "MsgRequestObjectIds": "#777777", "MsgReplyObjectIds": "#777777",
-              "MsgRequestObjects": "#7c3aed", "MsgReplyObjects": "#7c3aed", "MsgDone": "#000000"}
+              "MsgRequestObjects": "#7c3aed", "MsgReplyObjects": "#7c3aed", "MsgAwaitReply": "#d97706",
+              "MsgServerIdle": "#0891b2", "MsgDone": "#000000"}
 # message -> (stroke width, dash pattern); requests are dashed, replies solid
 MSG_STYLE = {"MsgRequestObjectIds": (0.5, "6 3"), "MsgReplyObjectIds": (0.5, "none"),
-             "MsgRequestObjects": (0.5, "6 3"), "MsgReplyObjects": (0.8, "none")}
+             "MsgRequestObjects": (0.5, "6 3"), "MsgReplyObjects": (0.8, "none"),
+             "MsgAwaitReply": (0.6, "2 2"), "MsgServerIdle": (0.6, "2 2")}
 HL_CSS = (".edge{cursor:pointer}.vnode{cursor:pointer}"
           "svg.hovering .vnode:not(.hl){opacity:.4}svg.hovering .edge:not(.hl){opacity:.12}"
           ".edge.hl .vis{stroke-width:3!important;stroke-opacity:1!important;opacity:1!important}"
@@ -98,6 +102,22 @@ HATCH = ('<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpace
 SHOW_BLOCKS = False
 
 
+def proxy_peers(root, nodes):
+    """Resolve proxy ports from the run's commands, checking their actual upstreams."""
+    try:
+        with open(os.path.join(root, "process-compose.yaml")) as stream:
+            config = stream.read()
+    except FileNotFoundError:
+        return {}
+    peers = {}
+    for proxy, upstream, node in re.findall(
+            r"toxiproxy-cli create --listen \S+:(\d+) --upstream \S+:(\d+) node(\d+)\b", config):
+        node = int(node)
+        if node in nodes and nodes[node]["port"] == upstream:
+            peers[proxy] = node
+    return peers
+
+
 def load(root):
     """Return {node: events} with events as plain dicts, times in absolute seconds."""
     nodes = {}
@@ -106,7 +126,8 @@ def load(root):
         if n is None:
             continue
         ev = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[], start=float("inf"),
-                  port=(re.search(r"_(\d+)$", d) or [None, "?"])[1])
+                  received_votes={}, port=(re.search(r"_(\d+)$", d) or [None, "?"])[1])
+        replies, batches = collections.defaultdict(collections.deque), {}
         for f in sorted(glob.glob(os.path.join(d, "node-*.json"))):
             for l in open(f, errors="replace"):
                 try:
@@ -127,10 +148,24 @@ def load(root):
                         persistent="NonPersistentPerasVoteEligibilityProof" not in x["vote"]))
                 elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
                     m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", x["voteId"])
+                    key = (int(m[1]), int(m[2]))
                     gen = "AndGenerated" in x["result"]
-                    ev["vrecv"][(int(m[1]), int(m[2]))] = (t, gen)
+                    if x["result"].startswith("AddedPerasVote"):
+                        ev["vrecv"].setdefault(key, (t, gen))
+                    batch = batches.get(j.get("thread"))
+                    if batch is not None:
+                        ev["received_votes"][batch].append(key)
                     if gen:
                         ev["gen"].append(dict(t=t, round=int(re.search(r"pcRoundNo = PerasRoundNo (\d+)", x["result"])[1])))
+                elif ns == "Peras.Vote.Inbound.TraceObjectDiffusionInboundCollectedObjects":
+                    connection = x["peer"]["connectionId"]
+                    thread = j.get("thread")
+                    if thread is not None and replies[connection]:
+                        batch = replies[connection].popleft()
+                        batches[thread] = batch
+                        ev["received_votes"][batch] = []
+                elif ns == "Peras.Vote.Inbound.TraceObjectDiffusionInboundAddedObjects":
+                    batches.pop(j.get("thread"), None)
                 elif ns == "ChainDB.PerasCertDbEvent.AddCert":
                     ev["recv"].append(dict(t=t, round=int(re.search(r"\d+", x["round"])[0]), result=x["result"]))
                 elif ns == "Peras.Vote.Forging.RulesDecision":
@@ -145,6 +180,8 @@ def load(root):
                     _, proto, _, way, _ = ns.split(".", 4)
                     peer = int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1])
                     ev["net"].append((t, proto, way, x["msg"]["kind"], peer))
+                    if (proto, way, x["msg"]["kind"]) == ("Vote", "Receive", "MsgReplyObjects"):
+                        replies[x["peer"]["connectionId"]].append((t, peer))
                 elif ns == "Peras.Cert.Inclusion.RulesDecision" and x["decision"].startswith("IncludeCert"):
                     ev["incl"][x["slot"]] = x["round"]
         nodes[n] = ev
@@ -208,7 +245,7 @@ def time_scale(times, gap, burst, pad=0.02):
 
 
 def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, gap=1.0, burst=300, network=(), highlight=False,
-           stakes=None, total_stake=0):
+           stakes=None, total_stake=0, proxies=None):
     stakes = stakes or {}
     rows = (["block"] if show_blocks else []) + ["vote", "vote received", "cert received"]
     rows += [f"net {p.lower()}" for p in ("Vote", "Cert") if p in network]
@@ -219,8 +256,13 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
     allt += [t for ev in nodes.values() for t, _, _ in ev["dec"].values()]
     if show_blocks:
         allt += [b["t"] for ev in nodes.values() for b in ev["blocks"].values()]
+    port2n = {ev["port"]: n for n, ev in nodes.items()}
+    port2n.update(proxies or {})
+    if network:
+        allt += [t for ev in nodes.values() for t, proto, _, _, peer in ev["net"]
+                 if proto in network and str(peer) in port2n]
     if not allt:
-        sys.exit("no Peras/forging events found")
+        sys.exit("no Peras/forging or selected network events found")
     t0 = min(ev["start"] for ev in nodes.values())   # first record of the earliest node: the run's time zero
     lo, hi = t_from, (t_to if t_to is not None else max(allt) - t0)
     lane = {n: i for i, n in enumerate(sorted(nodes))}
@@ -393,13 +435,17 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
     net = []
     hops = []                                    # {id, a, b, t1, t2, votes} of the arrows that carry votes
     if network:
-        port2n = {ev["port"]: n for n, ev in nodes.items()}
-        inside = lambda t: lo <= t - t0 <= hi and (linear or any(a <= t - t0 <= b for a, b, _, _ in clusters))
         sent, recvd = collections.defaultdict(list), collections.defaultdict(list)
+        observed = []
         for n, ev in nodes.items():
             for t, proto, way, msg, peer in ev["net"]:
                 m = port2n.get(str(peer))
                 if m is None or proto not in network:
+                    continue
+                if str(peer) in (proxies or {}):
+                    a, b = (n, m) if way == "Send" else (m, n)
+                    votes = ev["received_votes"].get((t, peer), []) if proto == "Vote" and way == "Receive" else []
+                    observed.append((proto, a, b, msg, t, t, way, votes))
                     continue
                 if way == "Send":
                     sent[proto, n, m, msg].append(t)
@@ -427,25 +473,30 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                     yield t1, rcv[j]
                     j += 1
 
+        messages = list(observed)
         for key, ts_ in sent.items():
             proto, a_, b_, msg = key
             for t1, t2 in pairs(ts_, recvd.get(key, [])):
-                if not (inside(t1) and inside(t2)):
-                    continue
-                used.add(msg)
-                c = MSG_COLOUR.get(msg, "#444")
                 vs = votes_in(a_, b_, t1) if (proto, msg) == ("Vote", "MsgReplyObjects") else []
-                aid = f"a{len(net)}"
-                if vs:
-                    hops.append(dict(id=aid, a=a_, b=b_, t1=t1, t2=t2, votes=vs))
-                net.append(edge(
-                    (X(t1), Y(a_, row["net " + proto.lower()])), (X(t2), Y(b_, row["net " + proto.lower()])),
-                    f'stroke="{c}" stroke-width="{MSG_STYLE.get(msg, (0.6, "6 3"))[0]}" stroke-opacity="0.8" '
-                    f'stroke-dasharray="{MSG_STYLE.get(msg, (0.6, "6 3"))[1]}" marker-end="url(#m{c[1:]})"',
-                    f"{proto} {msg}\nnode {a_} -> node {b_}\nsent t = {t1-t0:.3f}s, "
-                    f"received {(t2-t1)*1000:.1f} ms later"
-                    + ("\ncarries votes (round, seat): " + ", ".join(f"({r_}, {s_})" for r_, s_ in vs) if vs else ""),
-                    f'data-aid="{aid}"' + (f' data-votes="{" ".join(f"{r_}-{s_}" for r_, s_ in vs)}"' if vs else "")))
+                messages.append((proto, a_, b_, msg, t1, t2, None, vs))
+        for proto, a_, b_, msg, t1, t2, way, vs in sorted(messages, key=lambda m: m[4]):
+            if not (inwin(t1) and inwin(t2)):
+                continue
+            used.add(msg)
+            c = MSG_COLOUR.get(msg, "#444")
+            aid = f"a{len(net)}"
+            if vs:
+                hops.append(dict(id=aid, a=a_, b=b_, t1=t1, t2=t2, votes=vs))
+            timing = (f"sent t = {t1-t0:.3f}s, received {(t2-t1)*1000:.1f} ms later" if way is None else
+                      f"{'send' if way == 'Send' else 'receive'} recorded at node {a_ if way == 'Send' else b_}, "
+                      f"t = {t1-t0:.6f}s\nToxiproxy: opposite endpoint time unavailable; latency unknown")
+            net.append(edge(
+                (X(t1), Y(a_, row["net " + proto.lower()])), (X(t2), Y(b_, row["net " + proto.lower()])),
+                f'stroke="{c}" stroke-width="{MSG_STYLE.get(msg, (0.6, "6 3"))[0]}" stroke-opacity="0.8" '
+                f'stroke-dasharray="{MSG_STYLE.get(msg, (0.6, "6 3"))[1]}" marker-end="url(#m{c[1:]})"',
+                f"{proto} {msg}\nnode {a_} -> node {b_}\n{timing}"
+                + ("\ncarries votes (round, seat): " + ", ".join(f"({r_}, {s_})" for r_, s_ in vs) if vs else ""),
+                f'data-aid="{aid}"' + (f' data-votes="{" ".join(f"{r_}-{s_}" for r_, s_ in vs)}"' if vs else "")))
     # The path of a received vote: from the node it was received at, the last message that carried the
     # vote there, then the one that brought it to that message's sender, and so on up to the source node.
     paths = {}
@@ -464,7 +515,9 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
                       f'orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="{c}"/></marker>' for c in MSG_COLOUR.values())
     netlegend = ("".join(f"<span style='color:#fff;background:{c}'>{m[3:]}</span>"
                          for m, c in MSG_COLOUR.items() if m in used) +
-                 "<span style='border:1px solid #888'>grey: object ids, purple: objects; dashed: request, solid: reply</span>"
+                 "<span style='border:1px solid #888'>grey: object ids, purple: objects; dashed: request, solid: reply, dotted: AwaitReply/ServerIdle</span>" +
+                 ("<span style='border:1px solid #888'>Toxiproxy arrows use one endpoint's recorded time; latency unknown</span>"
+                  if observed else "")
                  ) if network else ""
     legend = ("<div class=legend>"
               + (f"<span style='background:{COLOUR['block']}'>block</span>"
@@ -513,7 +566,7 @@ def main():
     if not nodes:
         sys.exit("no nodes found under logs/")
     open(a.output, "w").write(render(nodes, a.scale, a.t_from, a.t_to, a.blocks, a.linear, a.gap, a.burst, a.network, a.highlight,
-                                         *genesis_stakes(a.results)))
+                                         *genesis_stakes(a.results), proxies=proxy_peers(a.results, nodes)))
     print(f"wrote {a.output}")
 
 

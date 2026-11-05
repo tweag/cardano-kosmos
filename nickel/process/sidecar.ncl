@@ -8,6 +8,7 @@ let roles =
   |> std.array.map (fun n => std.string.from_enum n.role)
   |> std.string.join ","
 in
+let labels = scenario.topology.node_labels |> std.string.join "," in
 {
   command = "bash scripts/sidecar.sh",
   environment = [
@@ -15,6 +16,7 @@ in
     "DEVNET_DIR=%{input.directory}",
     "NUM_NODES=%{std.string.from_number (count_nodes scenario.topology.nodes)}",
     "NODE_ROLES=%{roles}",
+    "NODE_LABELS=%{labels}",
     "NODE_PORTS_BASE=%{std.string.from_number input.node_ports_base}",
     "TESTNET_MAGIC=%{std.string.from_number scenario.topology.magic}",
     "CARDANO_CLI=%{input.cardano_binaries.cardano_cli}",

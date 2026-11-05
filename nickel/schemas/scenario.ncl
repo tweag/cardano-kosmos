@@ -49,6 +49,9 @@ let export = {
     nodes | Array Node | StakeConstraint,
     links | Array Link,
     num_of_nodes | Number | default = count_nodes nodes,
+    # Symbolic node labels, numbered per role: spo1..spoN, relay1..relayM.
+    # Indexed by position in `nodes` (0-based).
+    node_labels | Array String | default = mk_node_labels nodes,
   },
 
   count_dreps | Array Node -> Number = fun nodes =>
@@ -61,6 +64,15 @@ let export = {
     nodes
       |> map (fun n => 1)
       |> sum,
+
+  mk_node_labels | Array Node -> Array String = fun nodes =>
+    let roles = nodes |> map (fun n => std.string.from_enum n.role) in
+    generate
+      (fun i =>
+        let role = std.array.at i roles in
+        let n = length (filter (fun r => r == role) (std.array.slice 0 (i + 1) roles)) in
+        "%{role}%{std.string.from_number n}")
+      (length roles),
 
   mk_neighbours | String -> Array Node -> Array Link = fun name nodes =>
     nodes

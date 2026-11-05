@@ -38,7 +38,9 @@ import urllib.request
 from fractions import Fraction as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from check_peras_logs import Run, ts  # noqa: E402
+from check_peras_logs import Run # noqa: E402
+from peras_tracer import ts # noqa: E402
+import peras_tracer as pt  # noqa: E402
 
 COLOUR = dict(vote_yes="#5cc96e", vote_no="#e45b5b", block="skyblue", block_cert="dodgerblue", vote="sandybrown",
               cert="turquoise", node="tomato", link="#999")
@@ -316,54 +318,37 @@ def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000
                     ev["incl"][x["slot"]] = x["round"]
         return nodes
 
+    tracer = pt.PerasTracer()
+    for src in pt.filesystem_sources(root):
+        tracer.add_source(src)
     nodes = {}
-    for d in sorted(glob.glob(os.path.join(root, "logs", "*_*"))):
-        n = Run.node_number(d)
-        if n is None:
-            continue
-        ev = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[], start=float("inf"),
-                  port=(re.search(r"_(\d+)$", d) or [None, "?"])[1])
-        for f in sorted(glob.glob(os.path.join(d, "node-*.json"))):
-            for l in open(f, errors="replace"):
-                try:
-                    j = json.loads(l)
-                    t, ns, x = ts(j["at"]), j["ns"], j.get("data", {})
-                except Exception:
-                    continue
-                ev["start"] = min(ev["start"], t)
-                if ns == "Forge.Loop.ForgedBlock":
-                    ev["blocks"][x["block"]] = dict(t=t, slot=x["slot"], no=x["blockNo"], prev=x["blockPrev"])
-                elif ns == "Peras.Vote.Forging.ForgedVote":
-                    m = re.search(r"unPerasSeatIndex = (\d+)", x["vote"])
-                    s = re.search(r"Bytes32RealPoint \(SlotNo (\d+)\)", x["vote"])
-                    w = re.search(r"unVoteWeight = (\d+) % (\d+)", x["vote"])
-                    ev["votes"].append(dict(
-                        t=t, round=x["round"], seat=int(m[1]), slot=int(s[1]) if s else None,
-                        weight=F(int(w[1]), int(w[2])) if w else None,
-                        persistent="NonPersistentPerasVoteEligibilityProof" not in x["vote"]))
-                elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
-                    m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", x["voteId"])
-                    gen = "AndGenerated" in x["result"]
-                    ev["vrecv"][(int(m[1]), int(m[2]))] = (t, gen)
-                    if gen:
-                        ev["gen"].append(dict(t=t, round=int(re.search(r"pcRoundNo = PerasRoundNo (\d+)", x["result"])[1])))
-                elif ns == "ChainDB.PerasCertDbEvent.AddCert":
-                    ev["recv"].append(dict(t=t, round=int(re.search(r"\d+", x["round"])[0]), result=x["result"]))
-                elif ns == "Peras.Vote.Forging.RulesDecision":
-                    ev["rounds"].setdefault(x["round"], t)
-                    ev["dec"][x["round"]] = (t, x["decision"].startswith("Vote"), x["decision"])
-                elif ns == "Peras.Vote.Outbound.TraceObjectDiffusionOutboundSendMsgReplyObjects":
-                    # the votes inside a MsgReplyObjects (the Remote trace of the message has no payload)
-                    ev["carry"].append((t, int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1]),
-                                        [(int(r_), int(s_)) for r_, s_ in re.findall(
-                                            r"pvRoundNo = PerasRoundNo (\d+),.*?unPerasSeatIndex = (\d+)", x["payload"])]))
-                elif re.match(r"Peras\.(Vote|Cert)\.Remote\.(Send|Receive)\.", ns):
-                    _, proto, _, way, _ = ns.split(".", 4)
-                    peer = int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1])
-                    ev["net"].append((t, proto, way, x["msg"]["kind"], peer))
-                elif ns == "Peras.Cert.Inclusion.RulesDecision" and x["decision"].startswith("IncludeCert"):
-                    ev["incl"][x["slot"]] = x["round"]
-        nodes[n] = ev
+    for ne in tracer:
+        n, t, ev = ne.node, ne.t, ne.event
+        st = nodes.get(n)
+        if st is None:
+            st = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[],
+                      start=float("inf"), port=ne.port)
+            nodes[n] = st
+        st["start"] = min(st["start"], t)
+        if isinstance(ev, pt.ForgedBlock):
+            st["blocks"][ev.block] = dict(t=t, slot=ev.slot, no=ev.block_no, prev=ev.prev)
+        elif isinstance(ev, pt.ForgedVote):
+            st["votes"].append(dict(t=t, round=ev.round, seat=ev.seat, slot=ev.slot, weight=ev.weight, persistent=ev.persistent))
+        elif isinstance(ev, pt.VoteDbAddVote):
+            st["vrecv"][(ev.round, ev.seat)] = (t, ev.generated_cert)
+            if ev.generated_cert:
+                st["gen"].append(dict(t=t, round=(ev.cert_round if ev.cert_round is not None else ev.round)))
+        elif isinstance(ev, pt.CertDbAddCert):
+            st["recv"].append(dict(t=t, round=ev.round, result=ev.result))
+        elif isinstance(ev, pt.VoteRulesDecision):
+            st["rounds"].setdefault(ev.round, t)
+            st["dec"][ev.round] = (t, ev.is_vote, ev.decision)
+        elif isinstance(ev, pt.OutboundSendMsgReplyObjects):
+            st["carry"].append((t, ev.peer_port, ev.votes))
+        elif isinstance(ev, pt.RemoteMessage):
+            st["net"].append((t, ev.proto, ev.way, ev.msg_kind, ev.peer_port))
+        elif isinstance(ev, pt.CertInclusionDecision):
+            st["incl"][ev.slot] = ev.round
     return nodes
 
 
@@ -749,7 +734,7 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("results", nargs="?", default=os.path.join(here, "..", "devnet-env"))
+    ap.add_argument("results", nargs="?", default=os.path.join(here, "..", "..", "devnet-env"))
     ap.add_argument("-o", "--output", default="peras.html")
     ap.add_argument("--blocks", action="store_true", help="also draw block creation (a lot of data)")
     ap.add_argument("--network-vote", action="store_true", help="also draw the Vote object-diffusion messages")

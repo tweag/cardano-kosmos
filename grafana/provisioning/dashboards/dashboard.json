@@ -2124,8 +2124,8 @@
                 "uid": "sidecar_uid"
               },
               "refId": "A",
-              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
-              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon from ci_nodes",
+              "queryText": "SELECT *, phys_x AS fixedX, phys_y AS fixedY FROM ci_nodes",
+              "rawQueryText": "SELECT *, phys_x AS fixedX, phys_y AS fixedY FROM ci_nodes",
               "queryType": "table",
               "timeColumns": [
                 "time",
@@ -2139,8 +2139,8 @@
               },
               "refId": "B",
               "hide": false,
-              "queryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
-              "rawQueryText": "SELECT \n  id,\n  source,\n  target from ci_edges ;",
+              "queryText": "SELECT id, source, target FROM ci_edges",
+              "rawQueryText": "SELECT id, source, target FROM ci_edges",
               "queryType": "table",
               "timeColumns": [
                 "time",
@@ -2169,7 +2169,7 @@
           "id": 2,
           "options": {
             "edges": {},
-            "layoutAlgorithm": "force",
+            "layoutAlgorithm": "layered",
             "nodes": {},
             "zoomMode": "cooperative"
           },
@@ -2181,8 +2181,8 @@
                 "uid": "sidecar_uid"
               },
               "refId": "A",
-              "queryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
-              "rawQueryText": "SELECT \n  id,\n  title,\n  subtitle,\n  mainstat,\n  secondarystat,\n  color,\n  icon FROM ci_nodes WHERE id IN (SELECT source FROM cn_edges UNION SELECT target from cn_edges)",
+              "queryText": "SELECT *, lr_x AS fixedX, lr_y AS fixedY FROM ci_nodes WHERE lr_x IS NOT NULL",
+              "rawQueryText": "SELECT *, lr_x AS fixedX, lr_y AS fixedY FROM ci_nodes WHERE lr_x IS NOT NULL",
               "queryType": "table",
               "timeColumns": [
                 "time",
@@ -2196,8 +2196,8 @@
               },
               "refId": "B",
               "hide": false,
-              "queryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
-              "rawQueryText": "SELECT \n  id,\n  source,\n  target from cn_edges ;",
+              "queryText": "SELECT * FROM lr_edges",
+              "rawQueryText": "SELECT * FROM lr_edges",
               "queryType": "table",
               "timeColumns": [
                 "time",

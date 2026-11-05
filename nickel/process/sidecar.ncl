@@ -15,6 +15,7 @@ in
     "DEVNET_DIR=%{input.directory}",
     "NUM_NODES=%{std.string.from_number (count_nodes scenario.topology.nodes)}",
     "NODE_ROLES=%{roles}",
+    "NODE_PORTS_BASE=%{std.string.from_number input.node_ports_base}",
     "TESTNET_MAGIC=%{std.string.from_number scenario.topology.magic}",
     "CARDANO_CLI=%{input.cardano_binaries.cardano_cli}",
     "VM_URL=http://%{input.ip}:%{std.string.from_number input.victoria.metrics_port}",

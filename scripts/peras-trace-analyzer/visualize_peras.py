@@ -452,7 +452,23 @@ def time_scale(times, gap, burst, pad=0.02):
 def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, gap=1.0, burst=300, network=(), highlight=False,
            stakes=None, total_stake=0):
     stakes = stakes or {}
-    rows = (["block"] if show_blocks else []) + ["vote", "vote received", "cert received"]
+    max_seat = -1
+    for ev in nodes.values():
+        for v in ev.get("votes", []):
+            try:
+                max_seat = max(max_seat, int(v.get("seat")))
+            except Exception:
+                pass
+        for _, seat in ev.get("vrecv", {}).keys():
+            try:
+                max_seat = max(max_seat, int(seat))
+            except Exception:
+                pass
+    seats = max(1, max_seat + 1)
+
+    rows = (["block"] if show_blocks else []) + ["vote"]
+    rows += [f"vote received s{seat}" for seat in range(seats)]
+    rows += ["cert received"]
     rows += [f"net {p.lower()}" for p in ("Vote", "Cert") if p in network]
     row = {r: i for i, r in enumerate(rows)}
     LANE_H = 28 + len(rows) * ROW_H
@@ -588,18 +604,16 @@ def render(nodes, scale, t_from, t_to, show_blocks=SHOW_BLOCKS, linear=False, ga
     # AddVote on every node: the source is found by (round, seat) among the forged votes. Every AddVote
     # is a "vote received" marker (labelled with the sender); the one that completed the quorum is
     # outlined and also linked to the certificate generation drawn below. Votes arrive within a few
-    # milliseconds, so markers of one node are spread sideways (the tooltip has the real time).
+    # milliseconds, so markers are stacked by seat to avoid shifting time on the x axis.
     gen_ring = {}                            # round -> (time, x, y) of the first generating AddVote
     rings = []                               # (id, node, vote, time) of every vote-received ring
     for m, mev in nodes.items():
-        prev_x = -1e9
         for (r, seat), (tr, gen) in sorted(mev["vrecv"].items(), key=lambda kv: kv[1][0]):
             if not inwin(tr):
                 continue
             src = forged.get((r, seat))
-            x = max(X(tr), prev_x + 17)
-            prev_x = x
-            y = Y(m, row["vote received"])
+            x = X(tr)
+            y = Y(m, row[f"vote received s{seat}"])
             who = "self" if src and src[0] == m else (f"node {src[0]}" if src else "unknown source")
             rid = f"v{m}-{r}-{seat}"
             rings.append((rid, m, (r, seat), tr))

@@ -90,7 +90,7 @@ if [ $start_directly_in_dijkstra ]; then
 fi
 
 # TODO: move to the nickel config
-trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"}}'
+trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"},"ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB" : {"severity": "Debug", "backends": ["Forwarder"], "detail":"DNormal"}}'
 
 jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
 

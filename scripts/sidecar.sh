@@ -23,9 +23,9 @@ set -o pipefail
 : "${DEVNET_DIR:?}" "${NUM_NODES:?}" "${TESTNET_MAGIC:?}" "${CARDANO_CLI:?}"
 NODE_ROLES="${NODE_ROLES:-}"
 NODE_LABELS="${NODE_LABELS:-}"
-# topology.json points peers at toxiproxy listen ports (NODE_PORTS_BASE + idx),
-# not at the nodes' own ports; see nickel/mk-node-topology.ncl.
-NODE_PORTS_BASE="${NODE_PORTS_BASE:-5000}"
+# Per-node label, own port and Envoy proxy port, written by
+# scripts/setup-testnet-env.sh from nickel/mk-node-topologies.ncl.
+TOPOLOGIES_JSON="${TOPOLOGIES_JSON:-${DEVNET_DIR}/topologies.json}"
 VM_URL="${VM_URL:-http://127.0.0.1:8428}"
 INTERVAL="${INTERVAL:-10}"
 # cardano-tracer writes ForMachine JSON logs to ${LOGS_DIR}/<host>_<port>/.
@@ -46,16 +46,20 @@ IFS=',' read -ra LABELS <<<"${NODE_LABELS:-}"
 node_label() { echo "${LABELS[$(($1 - 1))]:-node$1}"; }
 node_role() { echo "${ROLES[$(($1 - 1))]:-node}"; }
 
-# port -> label, for both the node's own port and its toxiproxy listen port.
-# Filled by build_port_map once cardano-testnet has written the port files.
+# port -> label, for both the node's own port and its Envoy listener port.
+# topology.json access points use the proxy ports; VictoriaMetrics series
+# carry the node's own port.
 declare -A NODE_BY_PORT=()
 build_port_map() {
-    local i p
-    for i in $(seq 1 "${NUM_NODES}"); do
-        p="$(node_port "${i}")"
-        [ -n "${p}" ] && NODE_BY_PORT["${p}"]="$(node_label "${i}")"
-        NODE_BY_PORT["$((NODE_PORTS_BASE + i))"]="$(node_label "${i}")"
-    done
+    local label port proxy
+    [ -f "${TOPOLOGIES_JSON}" ] || {
+        echo "sidecar: ${TOPOLOGIES_JSON} not found; topology graphs will be empty" >&2
+        return 0
+    }
+    while read -r label port proxy; do
+        NODE_BY_PORT["${port}"]="${label}"
+        NODE_BY_PORT["${proxy}"]="${label}"
+    done < <(jq -r '.[] | "\(.label) \(.port) \(.proxy_port)"' "${TOPOLOGIES_JSON}")
 }
 
 setup_database() {
@@ -108,8 +112,8 @@ CREATE TABLE cn_edges (
     target TEXT
 );
 
--- Localroot panel: SPO<->relay links, one row per pair, marking whether the
--- peering is mutual.
+-- Localroot panel: the scenario's logical links (from each node's
+-- topology.json), one row per pair, marking whether the peering is mutual.
 CREATE VIEW lr_edges AS
 SELECT a.id, a.source, a.target,
        CASE WHEN b.id IS NULL THEN '→' ELSE '↔' END AS mainstat,
@@ -117,9 +121,7 @@ SELECT a.id, a.source, a.target,
        CASE WHEN b.id IS NULL THEN '4,4' END AS strokeDasharray
 FROM cn_edges a
 LEFT JOIN cn_edges b ON b.source = a.target AND b.target = a.source
-WHERE ((a.source LIKE 'spo%' AND a.target LIKE 'relay%')
-    OR (a.source LIKE 'relay%' AND a.target LIKE 'spo%'))
-  AND (b.id IS NULL OR a.source < a.target);
+WHERE b.id IS NULL OR a.source < a.target;
 
 CREATE TABLE ada_pots (
     epoch_no INTEGER NOT NULL,

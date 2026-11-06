@@ -42,7 +42,16 @@ fun ip scenario proxy_ports_base nodes_ports =>
         useLedgerAfterSlot = -1,
       }
   in
-  let indexed_nodes = map_with_index (fun i n => {idx = i, node = n, proxy_port = proxy_ports_base + 1 + i}) scenario.topology.nodes in
+  let indexed_nodes =
+    map_with_index
+      (fun i n => {
+        idx = i,
+        node = n,
+        label = std.array.at i scenario.topology.node_labels,
+        proxy_port = proxy_ports_base + 1 + i,
+      })
+      scenario.topology.nodes
+  in
   let nodes_with_ports = zip_with (fun n p => n & { port = p } ) indexed_nodes nodes_ports in
   let nodes_map = nodes_with_ports |> map (fun n => { field = n.node.name, value = n }) |> std.record.from_array in
   let access_points = mk_access_points scenario.topology.links nodes_map in

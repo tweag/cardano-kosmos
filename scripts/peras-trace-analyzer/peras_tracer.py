@@ -25,11 +25,47 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence,
 
 
 def ts(s: str) -> float:
-    s = s.rstrip("Z")
-    if "." in s:
-        a, b = s.split(".")
-        s = a + "." + b.ljust(6, "0")[:6]
-    return datetime.datetime.fromisoformat(s).timestamp()
+    """Parse a tracer timestamp into epoch seconds.
+
+    cardano-tracer uses ISO-8601 timestamps (usually with a trailing "Z" for UTC)
+    and can emit sub-second precision beyond microseconds. Python's
+    ``datetime.fromisoformat`` does not accept nanoseconds, and naive datetimes
+    are interpreted in the *local* timezone when converted to epoch seconds.
+
+    This function normalizes:
+    - trailing "Z" to an explicit "+00:00" offset
+    - fractional seconds to microsecond precision (truncate/pad)
+    - missing timezone to UTC (best-effort)
+    """
+    s = str(s).strip()
+    if not s:
+        raise ValueError("empty timestamp")
+
+    # Normalize UTC "Z" to an explicit offset so we don't create a naive datetime.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+
+    # Split a final offset (if any) from the main datetime part so we can safely
+    # normalize fractional seconds without disturbing "+00:00".
+    tz_m = re.search(r"([+-]\d{2}:\d{2})$", s)
+    tz = tz_m.group(1) if tz_m else ""
+    base = s[: -len(tz)] if tz else s
+    base = base.rstrip()
+
+    if "." in base:
+        head, frac = base.split(".", 1)
+        # Keep only digits from the fraction; logs should be digits only, but be resilient.
+        frac_digits = "".join(ch for ch in frac if ch.isdigit())
+        if frac_digits:
+            frac_us = (frac_digits + "000000")[:6]
+            base = head + "." + frac_us
+        else:
+            base = head
+
+    dt = datetime.datetime.fromisoformat(base + tz)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.timestamp()
 
 
 def node_number_from_dir(log_dir: str) -> Optional[int]:
@@ -105,6 +141,7 @@ class ForgedVote(PerasEvent):
     persistent: bool
     slot: Optional[int] = None
     weight: Optional[F] = None
+    boosted_block: Optional[list [str]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -114,6 +151,7 @@ class VoteDbAddVote(PerasEvent):
     generated_cert: bool
     weight: Optional[F] = None
     cert_round: Optional[int] = None
+    boosted_block: Optional[list [str]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,12 +305,14 @@ def _parse_forged_vote(x: dict) -> Optional[PerasEvent]:
     seat = int(re.search(r"unPerasSeatIndex = (\d+)", vote)[1])
     slot_m = re.search(r"Bytes32RealPoint \(SlotNo (\d+)\)", vote)
     persistent = "NonPersistentPerasVoteEligibilityProof" not in vote
+    ev_boosted_block = re.search(r"PerasBoostedBlock {unPerasBoostedBlock = At \(Bytes32RealPoint \(SlotNo (\d+)\) \"%s\"\)", x.get("vote", ""))
     return ForgedVote(
         round=int(x["round"]),
         seat=seat,
         persistent=persistent,
         slot=int(slot_m[1]) if slot_m else None,
         weight=PerasTracer.parse_weight(vote),
+        boosted_block=int(ev_boosted_block[1]) if ev_boosted_block else None,
     )
 
 
@@ -281,10 +321,12 @@ def _parse_vote_db_add_vote(x: dict) -> Optional[PerasEvent]:
     generated = "AndGenerated" in x.get("result", "")
     result_s = x.get("result", "")
     cert_m = re.search(r"pcRoundNo = PerasRoundNo (\d+)", result_s) if generated else None
+    ev_boosted_block = re.search(r"PerasBoostedBlock {unPerasBoostedBlock = At \(Bytes32RealPoint \(SlotNo (\d+)\) \"%s\"\)", x.get("vote", ""))
     return VoteDbAddVote(
         round=int(m[1]),
         seat=int(m[2]),
         generated_cert=generated,
+        boosted_block=int(ev_boosted_block[1]) if ev_boosted_block else None,
         weight=PerasTracer.parse_weight(x.get("vote", "")),
         cert_round=(int(cert_m[1]) if cert_m else None),
     )
@@ -305,7 +347,6 @@ def _parse_remote_message(proto: str, way: str) -> Callable[[dict], Optional[Per
     def parse(x: dict) -> Optional[PerasEvent]:
         peer = int(x["peer"]["connectionId"].split()[-1].rsplit(":", 1)[1])
         return RemoteMessage(proto=proto, way=way, msg_kind=x["msg"]["kind"], peer_port=peer)
-
     return parse
 
 

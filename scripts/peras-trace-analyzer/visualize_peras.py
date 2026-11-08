@@ -276,8 +276,8 @@ def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000
                 continue
             ev = nodes.get(node)
             if ev is None:
-                ev = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[],
-                          start=float("inf"), port=port)
+                ev = dict(blocks={}, votes=[], vrecv={}, vrecv_dups=[], dec={}, gen=[], recv=[], rounds={}, incl={},
+                          net=[], carry=[], start=float("inf"), port=port)
                 nodes[node] = ev
             for j in records:
                 try:
@@ -298,7 +298,11 @@ def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000
                 elif ns == "ChainDB.PerasVoteDbEvent.AddVote":
                     m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", x["voteId"])
                     gen = "AndGenerated" in x["result"]
-                    ev["vrecv"][(int(m[1]), int(m[2]))] = (t, gen)
+                    key = (int(m[1]), int(m[2]))
+                    if key not in ev["vrecv"]:
+                        ev["vrecv"][key] = (t, gen)
+                    else:
+                        ev["vrecv_dups"].append((key, t, gen))
                     if gen:
                         ev["gen"].append(dict(t=t, round=int(re.search(r"pcRoundNo = PerasRoundNo (\d+)", x["result"])[1])))
                 elif ns == "ChainDB.PerasCertDbEvent.AddCert":
@@ -326,8 +330,8 @@ def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000
         n, t, ev = ne.node, ne.t, ne.event
         st = nodes.get(n)
         if st is None:
-            st = dict(blocks={}, votes=[], vrecv={}, dec={}, gen=[], recv=[], rounds={}, incl={}, net=[], carry=[],
-                      start=float("inf"), port=ne.port)
+            st = dict(blocks={}, votes=[], vrecv={}, vrecv_dups=[], dec={}, gen=[], recv=[], rounds={}, incl={}, net=[],
+                      carry=[], start=float("inf"), port=ne.port)
             nodes[n] = st
         st["start"] = min(st["start"], t)
         if isinstance(ev, pt.ForgedBlock):
@@ -335,7 +339,11 @@ def load(root, victoria_logs_url=None, victoria_query="*", victoria_limit=200000
         elif isinstance(ev, pt.ForgedVote):
             st["votes"].append(dict(t=t, round=ev.round, seat=ev.seat, slot=ev.slot, weight=ev.weight, persistent=ev.persistent))
         elif isinstance(ev, pt.VoteDbAddVote):
-            st["vrecv"][(ev.round, ev.seat)] = (t, ev.generated_cert)
+            key = (ev.round, ev.seat)
+            if key not in st["vrecv"]:
+                st["vrecv"][key] = (t, ev.generated_cert)
+            else:
+                st["vrecv_dups"].append((key, t, ev.generated_cert))
             if ev.generated_cert:
                 st["gen"].append(dict(t=t, round=(ev.cert_round if ev.cert_round is not None else ev.round)))
         elif isinstance(ev, pt.CertDbAddCert):

@@ -50,6 +50,7 @@ class Run:
             "forged": {},       # round -> (seat, persistent)
             "incl_err": 0,
             "votes": {},        # (round, seat) -> (time, generated cert, weight)
+            "votes_dups": [],   # [(round, seat), time, generated cert, weight] duplicates (if any)
             "certs": [],        # (round, time, result)
             "invalid_forged": 0,
         }
@@ -68,7 +69,12 @@ class Run:
         elif isinstance(ev, pt.InclusionError):
             nd["incl_err"] += 1
         elif isinstance(ev, pt.VoteDbAddVote):
-            nd["votes"][(ev.round, ev.seat)] = (t, ev.generated_cert, ev.weight if ev.weight is not None else F(0))
+            key = (ev.round, ev.seat)
+            w = ev.weight if ev.weight is not None else F(0)
+            if key not in nd["votes"]:
+                nd["votes"][key] = (t, ev.generated_cert, w)
+            else:
+                nd["votes_dups"].append((key, t, ev.generated_cert, w))
         elif isinstance(ev, pt.CertDbAddCert):
             nd["certs"].append((ev.round, t, ev.result))
         elif isinstance(ev, pt.ForgedInvalidBlock):

@@ -61,6 +61,9 @@ packages:
   packages/cardano-node/bench/trace-schemas/scripts/schema-gen
   packages/cardano-node/trace-forward
 
+  packages/cardano-base/cardano-crypto-peras
+  packages/cardano-base/cardano-strict-containers
+
   packages/cardano-ledger/eras/allegra/impl
   packages/cardano-ledger/eras/alonzo/impl
   packages/cardano-ledger/eras/babbage/impl

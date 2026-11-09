@@ -23,6 +23,10 @@ import peras_tracer as pt
 
 PASS, FAIL, WARN, PENDING = "PASS", "FAIL", "WARN", "PENDING"
 
+# If a duplicate VoteDB add for the same (round, seat) arrives this long after
+# the vote was issued (forged), report it.
+DUPLICATE_VOTE_LATE_THRESHOLD_S = 30.0
+
 
 class Run:
     
@@ -37,7 +41,6 @@ class Run:
             if nd is None:
                 nd = self._new_node_state(ne.port)
                 self.nodes[ne.node] = nd
-            print(ne)
             self._apply_event(nd, ne)
 
     @staticmethod
@@ -46,8 +49,10 @@ class Run:
             "port": port,
             "nokey": 0,
             "dec": {},          # round -> Vote | NoVote
+            "dec_t": {},        # round -> time (first decision event for the round)
             "notvoter": [],
             "forged": {},       # round -> (seat, persistent)
+            "forged_votes": {}, # (round, seat) -> time (vote issued / forged)
             "incl_err": 0,
             "votes": {},        # (round, seat) -> (time, generated cert, weight)
             "votes_dups": [],   # [(round, seat), time, generated cert, weight] duplicates (if any)
@@ -62,10 +67,12 @@ class Run:
             nd["nokey"] += 1
         elif isinstance(ev, pt.VoteRulesDecision):
             nd["dec"][ev.round] = "Vote" if ev.is_vote else "NoVote"
+            nd["dec_t"].setdefault(ev.round, t)
         elif isinstance(ev, pt.NotAVoterInRound):
             nd["notvoter"].append(ev.round)
         elif isinstance(ev, pt.ForgedVote):
             nd["forged"][ev.round] = (ev.seat, ev.persistent)
+            nd["forged_votes"][(ev.round, ev.seat)] = t
         elif isinstance(ev, pt.InclusionError):
             nd["incl_err"] += 1
         elif isinstance(ev, pt.VoteDbAddVote):
@@ -241,6 +248,62 @@ def checks(run):
     ie = {n: nd["incl_err"] for n, nd in N.items() if nd["incl_err"]}
     add_report("locally forged invalid blocks", WARN if inv else PASS, str(inv) if inv else "none")
     add_report("cert inclusion errors", WARN if ie else PASS, str(ie) if ie else "none")
+
+    # Late duplicate deliveries (these can make visualisations misleading if the "latest"
+    # delivery is picked instead of the first).
+    issued = {}
+    for n, nd in N.items():
+        for k, t0 in nd.get("forged_votes", {}).items():
+            issued.setdefault(k, (n, t0))
+    # Fallback: if the forge event isn't traced, approximate the "issue time" as
+    # the earliest VoteDB add time observed across nodes.
+    for k in set().union(*(set(nd.get("votes", {})) for nd in N.values())):
+        if k not in issued:
+            best = None
+            for n, nd in N.items():
+                v = nd.get("votes", {}).get(k)
+                if v is None:
+                    continue
+                t0 = v[0]
+                best = (n, t0) if best is None or t0 < best[1] else best
+            if best is not None:
+                issued[k] = best
+
+    late = []
+    for recv_n, nd in N.items():
+        for (k, t, gen, w) in nd.get("votes_dups", []):
+            issuer = issued.get(k)
+            if issuer is None:
+                continue
+            issuer_n, t0 = issuer
+            delay = t - t0
+            r, _seat = k
+            next_round_t = nd.get("dec_t", {}).get(r + 1)
+            received_next_round = (next_round_t is not None and t >= next_round_t + 1)
+            if received_next_round or delay > DUPLICATE_VOTE_LATE_THRESHOLD_S:
+                late.append((k, issuer_n, recv_n, delay, received_next_round))
+
+    if not late:
+        add_report(
+            "late duplicate vote deliveries",
+            PASS,
+            f"none (> {DUPLICATE_VOTE_LATE_THRESHOLD_S:.0f}s from issue time, or received in next round)",
+        )
+    else:
+        # Stable output order: vote id, then receiver.
+        late.sort(key=lambda x: (x[0][0], x[0][1], x[2]))
+        detail = ";\n ".join(
+            (
+                f"vote r{k[0]} seat{k[1]}: node{issuer_n} -> node{recv_n} "
+                + (f"received later than next round (r{k[0] + 2})" if received_next_round else f"+{delay:.1f}s")
+            )
+            for (k, issuer_n, recv_n, delay, received_next_round) in late
+        )
+        add_report(
+            "late duplicate vote deliveries",
+            WARN,
+            detail,
+        )
     return out
 
 

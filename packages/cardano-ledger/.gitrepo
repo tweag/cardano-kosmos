@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/cardano-ledger.git
-	branch = 0f1b3723ecbb6944f1bc0c701026afa69f9c1794
-	commit = 0f1b3723ecbb6944f1bc0c701026afa69f9c1794
-	parent = 99dde59f3d96377f39d11984aac4231491b72834
+	branch = 8a8a8f94fa526edd5cffc1d21957990c8c56ad6c
+	commit = 8a8a8f94fa526edd5cffc1d21957990c8c56ad6c
+	parent = 447eb635fd9d708a4353a07855ae314699f8c85c
 	method = merge
 	cmdver = 0.4.9

@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:gdeest/cardano-base.git
+	branch = e767a98ac9955ab5c29c488ab86df5dd62f434a2
+	commit = e767a98ac9955ab5c29c488ab86df5dd62f434a2
+	parent = 149b82ddb3e1da5b3c1c488a5fe8c0331c2d0480
+	method = merge
+	cmdver = 0.4.9

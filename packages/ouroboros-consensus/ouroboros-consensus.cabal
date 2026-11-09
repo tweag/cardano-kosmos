@@ -234,6 +234,7 @@ library
     Ouroboros.Consensus.MiniProtocol.LocalTxMonitor.Server
     Ouroboros.Consensus.MiniProtocol.LocalTxSubmission.Server
     Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound
+    Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound.State
     Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.API
     Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasCert
     Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasVote
@@ -265,6 +266,7 @@ library
     Ouroboros.Consensus.Peras.Void
     Ouroboros.Consensus.Peras.Vote.Aggregation
     Ouroboros.Consensus.Peras.Vote.Class
+    Ouroboros.Consensus.Peras.Vote.Forging
     Ouroboros.Consensus.Peras.Vote.Mock
     Ouroboros.Consensus.Peras.Vote.V1
     Ouroboros.Consensus.Peras.Voting.Adapter
@@ -365,7 +367,6 @@ library
     Ouroboros.Consensus.Util.AnchoredSeq
     Ouroboros.Consensus.Util.Args
     Ouroboros.Consensus.Util.Assert
-    Ouroboros.Consensus.Util.Bitmap
     Ouroboros.Consensus.Util.CallStack
     Ouroboros.Consensus.Util.CBOR
     Ouroboros.Consensus.Util.Condense
@@ -402,6 +403,7 @@ library
     cardano-binary,
     cardano-crypto-class ^>=2.6,
     cardano-crypto-leios,
+    cardano-crypto-peras ^>=0.2,
     cardano-diffusion:api,
     cardano-ledger-binary ^>=1.10,
     cardano-ledger-core ^>=1.23,
@@ -658,6 +660,7 @@ library unstable-consensus-testlib
     bytestring,
     cardano-binary:{cardano-binary, testlib},
     cardano-crypto-class,
+    cardano-crypto-peras:testlib,
     cardano-ledger-binary:testlib,
     cardano-ledger-core,
     cardano-prelude,
@@ -833,12 +836,12 @@ test-suite consensus-test
     Test.Consensus.MiniProtocol.ObjectDiffusion.Smoke
     Test.Consensus.Peras.Cert.Inclusion
     Test.Consensus.Peras.Cert.V1
+    Test.Consensus.Peras.Context
     Test.Consensus.Peras.Serialisation
     Test.Consensus.Peras.Voting.Adapter
     Test.Consensus.Peras.Voting.Rules
     Test.Consensus.Peras.Voting.V1
     Test.Consensus.Peras.WeightSnapshot
-    Test.Consensus.Util.Bitmap
     Test.Consensus.Util.MonadSTM.NormalForm
     Test.Consensus.Util.Pred
     Test.Consensus.Util.Versioned
@@ -852,6 +855,7 @@ test-suite consensus-test
     bytestring,
     cardano-binary,
     cardano-crypto-class:{cardano-crypto-class, testlib},
+    cardano-crypto-peras,
     cardano-diffusion:api,
     cardano-ledger-binary,
     cardano-ledger-core:{cardano-ledger-core, testlib},
@@ -1334,6 +1338,7 @@ library diffusion
     Ouroboros.Consensus.Node.ExitPolicy
     Ouroboros.Consensus.Node.Genesis
     Ouroboros.Consensus.Node.GSM
+    Ouroboros.Consensus.Node.GSM.PeerState
     Ouroboros.Consensus.Node.Recovery
     Ouroboros.Consensus.Node.RethrowPolicy
     Ouroboros.Consensus.Node.Tracers
@@ -1367,8 +1372,10 @@ library diffusion
     random ^>=1.3,
     resource-registry,
     safe-wild-cards ^>=1.0,
+    semialign,
     serialise,
     text,
+    these,
     time,
     transformers,
     typed-protocols:{stateful, typed-protocols} ^>=1.2.2,
@@ -1507,6 +1514,7 @@ test-suite consensus-diffusion-test
     Test.Consensus.Genesis.TestSuite.SmallKey
     Test.Consensus.Genesis.TestSuite.SmallKey.Tests
     Test.Consensus.GSM
+    Test.Consensus.GSM.PeerState
     Test.Consensus.HardFork.Combinator
     Test.Consensus.HardFork.Combinator.A
     Test.Consensus.HardFork.Combinator.B
@@ -1642,6 +1650,7 @@ library cardano
     Ouroboros.Consensus.Cardano.Condense
     Ouroboros.Consensus.Cardano.Ledger
     Ouroboros.Consensus.Cardano.Node
+    Ouroboros.Consensus.Cardano.Peras
     Ouroboros.Consensus.Cardano.QueryHF
     Ouroboros.Consensus.Shelley.Crypto
     Ouroboros.Consensus.Shelley.Eras

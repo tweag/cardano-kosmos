@@ -6,7 +6,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -738,29 +737,9 @@ instance
           $ nsContextCert
 
   getPerasCertInBlock (HardForkBlock (OneEraBlock nsBlock)) =
-    bimap
-      (HardForkPerasErrorOneEraPerasError . OneEraPerasError)
-      (fmap OneEraPerasCert . hsequence')
-      . hdistribute
+    fmap OneEraPerasCert
+      . hsequence'
       . hcmap
         proxySingle
-        ( \(I block) ->
-            mkEitherF WrapPerasError (Comp . fmap WrapPerasCert) $
-              getPerasCertInBlock block
-        )
+        (\(I block) -> Comp (WrapPerasCert <$> getPerasCertInBlock block))
       $ nsBlock
-
-  readPerasPrivateKeyFromEnv _proxy =
-    fmap PerEraPerasPrivateKey $
-      hsequence' $
-        hcpure proxySingle dispatchReadKey
-   where
-    dispatchReadKey ::
-      forall blk.
-      SingleEraBlock blk =>
-      (Either String :.: WrapPerasPrivateKey) blk
-    dispatchReadKey =
-      Comp
-        . fmap WrapPerasPrivateKey
-        . readPerasPrivateKeyFromEnv
-        $ Proxy @blk

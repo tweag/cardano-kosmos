@@ -1,7 +1,7 @@
 let { Scenario, count_dreps, .. } = import "../schemas/scenario.ncl"
 in {
   name = "vanilla",
-  description = "6 SPOs, 2 relays, even stake, no faults",
+  description = "6 SPOs, 2 relays, weighted stake, no faults",
   topology = {
     magic = 42,
     groups = [

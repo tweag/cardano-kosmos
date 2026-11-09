@@ -38,8 +38,7 @@ class Run:
             if node in self.nodes:
                 raise ValueError(f"node{node} appears in multiple directories; select a single run")
             self.nodes[node] = {"port": port, "directory": directory}
-        for nd in self.nodes.values():
-            self.load_tracer(nd)
+        self.load_tracers()
 
     @staticmethod
     def node_number(d):
@@ -54,19 +53,25 @@ class Run:
             pass
         return None
 
-    def load_tracer(self, nd):
-        nd["nokey"] = 0
-        nd["dec"] = {}       # round -> Vote | NoVote
-        nd["notvoter"] = []
-        nd["forged"] = {}    # round -> (seat, persistent)
-        nd["incl_err"] = 0
-        nd["votes"] = {}   # (round, seat) -> (time, generated cert, weight)
-        nd["duplicate_votes"] = 0
-        nd["generated"] = []
-        nd["certs"] = []   # (round, time, result)
-        nd["invalid_forged"] = 0
+    def load_tracers(self):
+        by_directory = {}
+        for nd in self.nodes.values():
+            nd["nokey"] = 0
+            nd["dec"] = {}       # round -> Vote | NoVote
+            nd["notvoter"] = []
+            nd["forged"] = {}    # round -> (seat, persistent)
+            nd["incl_err"] = 0
+            nd["votes"] = {}     # (round, seat) -> (time, generated cert, weight)
+            nd["duplicate_votes"] = 0
+            nd["generated"] = []
+            nd["certs"] = []     # (round, time, result)
+            nd["invalid_forged"] = 0
+            by_directory[nd["directory"]] = nd
+
+        # Dispatch each record once instead of rescanning every node's history.
         for record in self.trace.records:
-            if record.path.parent != nd["directory"]:
+            nd = by_directory.get(record.path.parent)
+            if nd is None:
                 continue
             try:
                 self.load_record(nd, record)

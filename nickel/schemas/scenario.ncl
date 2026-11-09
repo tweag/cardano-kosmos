@@ -91,6 +91,9 @@ let export = {
       magic | Number,
       groups | Array Group | StakeConstraint,
       num_of_nodes | Number | default = count_nodes groups,
+      connections | Array (Array Number) | default =
+        map (fun node => filter (fun peer => peer != node) (std.array.range 1 (num_of_nodes + 1)))
+          (std.array.range 1 (num_of_nodes + 1)),
     },
     genesis | Genesis,
     faults | Array Fault | default = [],

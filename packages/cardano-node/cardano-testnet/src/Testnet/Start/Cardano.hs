@@ -106,7 +106,7 @@ import           Testnet.Types as TR hiding (shelleyGenesis)
 import qualified Hedgehog.Extras as H
 import           Hedgehog.Extras.Stock (sprocketSystemName)
 import           Hedgehog.Extras.Stock.IO.Network.Sprocket (sprocketArgumentName)
-import qualified Hedgehog.Extras.Stock.IO.Network.Port as H
+import qualified Hedgehog.Extras.Stock.IO.Network.Socket as H
 import           Hedgehog.Internal.Property (failException)
 
 import           RIO (MonadUnliftIO, RIO (..), runRIO, throwString, timeout)
@@ -125,7 +125,6 @@ createTestnetEnv :: ()
   => HasCallStack
   => MonadIO m
   => MonadThrow m
-  => MonadFail m
   => TestnetCreationOptions
   -> Conf
   -> m ()
@@ -164,10 +163,11 @@ createTestnetEnv
       numberedNodes = zip [1..] allNodes
       nodeIds = map fst numberedNodes
 
-  portNumbers <- forM numberedNodes
-    (\(i, _nodeOption) -> (i,) <$> H.randomPort testnetDefaultIpv4Address)
+  -- Keep every socket bound until all ports have been chosen, so a port
+  -- cannot be assigned to more than one node in this environment.
+  portNumbers <- liftIOAnnotated $ H.allocateRandomPorts (length numberedNodes)
 
-  let portNumbersMap = Map.fromList portNumbers
+  let portNumbersMap = Map.fromList $ zip nodeIds (map fromIntegral portNumbers)
 
   -- Create network topology, write port files, and write env files for custom binaries
   forM_ numberedNodes $ \(i, nodeOption) -> do

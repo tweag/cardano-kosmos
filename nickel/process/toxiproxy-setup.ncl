@@ -12,7 +12,7 @@ let
       "toxiproxy-cli toxic add -n %{toxicity_name dir_arg} -%{dir_arg} -t latency -a latency=%{latency_ms} -a jitter=%{jitter_ms} node%{node_id}"
     in
     match {
-      'upsteam => [mk_c "u"],
+      'upstream => [mk_c "u"],
       'downstream => [mk_c "d"],
       'both => [mk_c "u", mk_c "d"],
     } direction,
@@ -35,8 +35,9 @@ let mkCommand = fun input scenario portsOfNodes =>
 in
 fun input scenario portsOfNodes =>
 {
-  command = mkCommand input scenario portsOfNodes,
+  command = "set -e\n" ++ mkCommand input scenario portsOfNodes,
   environment = [
+    "TOXIPROXY_URL=http://%{input.ip}:%{input.toxiproxy.port}",
   ],
   depends_on = {
     toxiproxy-server = { condition = 'process_healthy },

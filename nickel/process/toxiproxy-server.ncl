@@ -1,7 +1,7 @@
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
 fun input =>
 {
-  command = "toxiproxy-server",
+  command = "toxiproxy-server -host %{input.ip} -port %{input.toxiproxy.port}",
   environment = [
   ],
   depends_on = {

@@ -39,7 +39,7 @@ runTestnet() {
 
     # Setup devnet-env
     if [ ! -d "$DEVENV_PATH" ]; then
-      bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH"
+      bash ./scripts/setup-testnet-env.sh "$DEVENV_PATH" "$scenarioFile"
     fi
 
     echo "Running: $scenarioFile"

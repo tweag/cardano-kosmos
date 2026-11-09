@@ -37,6 +37,7 @@ import qualified Cardano.Testnet.Test.MainnetParams
 import qualified Cardano.Testnet.Test.Manifest
 import qualified Cardano.Testnet.Test.Node.Shutdown
 import qualified Cardano.Testnet.Test.Parser
+import qualified Cardano.Testnet.Test.Ports
 import qualified Cardano.Testnet.Test.Rpc.EraSummary
 import qualified Cardano.Testnet.Test.Rpc.Eval
 import qualified Cardano.Testnet.Test.Rpc.FetchBlock
@@ -152,6 +153,7 @@ tests = do
           , ignoreOnMacAndWindows "Can get on-chain parameters from blockfrost files" Cardano.Testnet.Test.MainnetParams.hprop_mainnet_params
           , ignoreOnWindows "Writes a machine-readable manifest on startup" Cardano.Testnet.Test.Manifest.hprop_manifest
           , ignoreOnWindows "Stale manifest is removed by createTestnetEnv" Cardano.Testnet.Test.Manifest.hprop_manifest_stale
+          , ignoreOnWindows "Unique ports for 128 nodes" Cardano.Testnet.Test.Ports.hprop_unique_ports
           , H.testPropertyNamed "Manifest Windows pipe path" (fromString "hprop_manifest_windows_pipe_path")
               Cardano.Testnet.Test.Manifest.hprop_manifest_windows_pipe_path
           ]

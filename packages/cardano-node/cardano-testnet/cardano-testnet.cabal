@@ -257,6 +257,7 @@ test-suite cardano-testnet-test
                         Cardano.Testnet.Test.Misc
                         Cardano.Testnet.Test.Node.Shutdown
                         Cardano.Testnet.Test.Parser
+                        Cardano.Testnet.Test.Ports
                         Cardano.Testnet.Test.Manifest
                         Cardano.Testnet.Test.MainnetParams
                         Cardano.Testnet.Test.SanityCheck

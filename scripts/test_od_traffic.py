@@ -62,6 +62,45 @@ class TrafficTests(unittest.TestCase):
         report = analyze(Run(self.root, since='2026-11-05T00:00:00Z'))
         self.assertEqual(report['nodes'], [2])
 
+    def test_interleaved_node_histories_remain_separate(self):
+        self.write(1, [self.startup(1), self.event('Peras.Vote.Forging.ForgedVote', {
+            'round': 3, 'vote': 'unPerasSeatIndex = 2'})])
+        self.write(2, [self.startup(2), self.event('Peras.Vote.Forging.CantReadEnv')])
+        self.write(3, [self.startup(3), self.event('Peras.Cert.Inclusion.Error', at='2026-11-04T00:00:02Z')])
+        nodes = Run(self.root).nodes
+        self.assertEqual(nodes[1]['forged'], {3: (2, True)})
+        self.assertEqual(nodes[1]['nokey'], 0)
+        self.assertEqual(nodes[2]['forged'], {})
+        self.assertEqual(nodes[2]['nokey'], 1)
+        self.assertEqual(nodes[2]['incl_err'], 0)
+        self.assertEqual(nodes[3]['incl_err'], 1)
+
+    def test_invalid_node_event_retains_its_source_location(self):
+        self.write(1, [self.startup(1), self.event('Peras.Vote.Forging.CantReadEnv')])
+        path = self.write(2, [self.startup(2), self.event('Peras.Vote.Forging.ForgedVote', {
+            'round': 1, 'vote': 'invalid vote'})])
+        run = Run(self.root)
+        self.assertEqual(run.nodes[1]['nokey'], 1)
+        self.assertEqual(run.trace.issues[0]['location'], f'{path}:2')
+        self.assertEqual(analyze(run)['status'], 'FAIL')
+
+    def test_cli_writes_both_formats_and_preserves_failure_status(self):
+        collected = self.event('Peras.Vote.Inbound.TraceObjectDiffusionInboundCollectedObjects', {'payload': '2'})
+        bad_peer = self.event('Peras.Vote.Remote.Send.RequestObjects', {'msg': {'kind': 'MsgRequestObjects'}})
+        script = Path(__file__).with_name('report_od_traffic.py')
+        for name, events, status in [('ready', [collected], 0), ('failed', [collected, bad_peer], 1), ('idle', [], 2)]:
+            with self.subTest(name=name):
+                self.write(1, [self.startup(1), *events])
+                prefix = self.root / name
+                result = subprocess.run([sys.executable, str(script), str(self.root), '--output', str(prefix)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, status, result.stderr)
+                report = json.loads(prefix.with_suffix('.json').read_text())
+                text = prefix.with_suffix('.md').read_text()
+                self.assertEqual(result.stdout, text)
+                self.assertIn(f"Status: **{report['status']}**", text)
+                self.assertEqual(report['objects_collected'], {'Vote': 2} if events else {})
+
     def test_sends_are_not_double_counted_as_receives(self):
         self.write(1, [self.startup(1), self.remote(1, 2, 'Send')])
         self.write(2, [self.startup(2), self.remote(2, 1, 'Receive')])
@@ -87,6 +126,16 @@ class TrafficTests(unittest.TestCase):
         path = self.write(1, [self.startup(1)])
         path.write_text('\n' + path.read_text() + '\n')
         self.assertFalse(Logs(self.root).issues)
+
+    def test_trace_queue_overflows_invalidate_a_capture(self):
+        self.write(1, [self.startup(1)])
+        path = self.root / 'logs' / 'node1' / 'stderr.log'
+        path.parent.mkdir(parents=True)
+        path.write_text('TraceObject queue overflowed. Dropped 512 messages\n')
+        report = analyze(Run(self.root))
+        self.assertEqual(report['status'], 'FAIL')
+        check = next(c for c in report['validation'] if c['name'] == 'trace forwarding')
+        self.assertEqual(check['status'], 'FAIL')
 
     def test_object_ids_are_parsed_completely(self):
         vote = 'PerasVoteId {pviRoundNo = PerasRoundNo 3, pviSeatIndex = PerasSeatIndex {unPerasSeatIndex = 2}}'
@@ -166,6 +215,27 @@ class TrafficTests(unittest.TestCase):
         report = analyze(Run(self.root))
         coverage = next(item for item in report['validation'] if item['name'] == 'request-ID coverage')
         self.assertEqual(coverage['status'], 'WARN')
+
+    def test_proxied_requests_keep_aggregate_counts_without_guessing_requesters(self):
+        vote = '[PerasVoteId {pviRoundNo = PerasRoundNo 3, pviSeatIndex = PerasSeatIndex {unPerasSeatIndex = 2}}]'
+        self.write(1, [self.startup(1)])
+        received = self.remote(2, 1, 'Receive')
+        received['data']['peer']['connectionId'] = '127.0.0.1:3002 127.0.0.1:45678'
+        detailed = self.event('Peras.Vote.Outbound.TraceObjectDiffusionOutboundRecvMsgRequestObjects', {
+            'payload': vote, 'peer': received['data']['peer']})
+        self.write(2, [self.startup(2), received, detailed, received, detailed])
+        (self.root / 'proxy-state.json').write_text(json.dumps({
+            'node2': {'upstream': '127.0.0.1:3002', 'enabled': True}}))
+        report = analyze(Run(self.root))
+        row = report['requests']['Vote']
+        self.assertEqual(row['requested_ids'], 2)
+        self.assertEqual(row['distinct_object_ids'], 1)
+        self.assertEqual(row['requested_ids_per_distinct_object'], 2)
+        self.assertEqual(row['unidentified_request_ids'], 2)
+        self.assertIsNone(row['unique_requester_object_pairs'])
+        self.assertIsNone(row['repeat_requested_ids'])
+        self.assertEqual(next(c for c in report['validation'] if c['name'] == 'input')['status'], 'PASS')
+        self.assertEqual(next(c for c in report['validation'] if c['name'] == 'requester identity coverage')['status'], 'WARN')
 
     def test_idle_run_is_not_a_successful_traffic_experiment(self):
         self.write(1, [self.startup(1), self.remote(1, 2, 'Send', 'AwaitReply')])

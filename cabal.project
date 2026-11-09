@@ -71,6 +71,7 @@ packages:
   packages/cardano-ledger/eras/dijkstra/impl
   packages/cardano-ledger/eras/mary/impl
   packages/cardano-ledger/eras/shelley/impl
+  packages/cardano-ledger/eras/shelley/test-suite
   packages/cardano-ledger/libs/cardano-ledger-api
   packages/cardano-ledger/libs/cardano-ledger-binary
   -- Breaks nix develop at the moment

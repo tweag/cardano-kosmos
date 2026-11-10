@@ -4,6 +4,9 @@ set -e
 
 echo "Building cardano packages..."
 
+# For some reason there is a race if plutus-core is built in parallel, so we build it with -j1
+# See issue cardano-kosmos#71
+cabal build -j1 plutus-core
 cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
 
 CARDANO_CLI=$(cabal list-bin cardano-cli)

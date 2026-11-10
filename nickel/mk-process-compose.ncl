@@ -13,6 +13,12 @@ let
   mk_canary = import "./process/canary.ncl",
   mk_envoy = import "./process/envoy.ncl",
   oracle_process = import "./process/oracle.ncl",
+in
+let
+  mk_proxy = fun input => match {
+    'none => {},
+    'envoy params => { envoy = mk_envoy input.directory input.ip params.port, }
+  } input.proxy,
 in fun input scenario portsOfNodes =>
 {
   version = "0.5",
@@ -23,12 +29,11 @@ in fun input scenario portsOfNodes =>
     chairman = mk_chairman input scenario,
     victoria-logs = mk_victoria_logs input,
     vlagent = mk_vlagent input scenario portsOfNodes,
-    envoy = mk_envoy input,
     oracle = oracle_process,
   } & (if std.record.has_field "port" input.prometheus then {
     victoria-metrics = mk_victoria_metrics input scenario portsOfNodes,
     grafana = mk_grafana input,
     sidecar = mk_sidecar input scenario,
     canary = mk_canary input scenario,
-  } else {}),
+  } else {}) & ( mk_proxy input ),
 } | Project

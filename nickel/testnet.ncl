@@ -13,7 +13,6 @@ in
   prometheus = {
     port = 9090,
   },
-  envoy = {
-    port = 9091
-  },
+  proxy = 'none,
+#  proxy = 'envoy { port = 9091 },
 } | InputParams

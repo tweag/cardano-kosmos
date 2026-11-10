@@ -48,3 +48,5 @@ mv "$DEVENV_PATH/cds.json.new" "$DEVENV_PATH/cds.json"
 cat "$DEVENV_PATH/lds.json.orig" | jq 'del(.resources['"$node_idx"'])' > "$DEVENV_PATH/lds.json.new"
 mv "$DEVENV_PATH/lds.json.new" "$DEVENV_PATH/lds.json"
 
+curl -X POST http://localhost:3030/process/restart/envoy >/dev/null 2>&1
+

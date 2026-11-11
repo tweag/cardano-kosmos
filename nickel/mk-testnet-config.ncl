@@ -16,6 +16,7 @@ let mkTestnetConfig | InputParams -> Scenario -> TestnetConfig = fun input s => 
   proxy = match { 'none => "none", 'envoy params => "envoy%{params.port}" } input.proxy,
   ip = input.ip,
   node_ports_base = input.node_ports_base,
+  trace_options = input.trace_options,
 }
 in mkTestnetConfig
 

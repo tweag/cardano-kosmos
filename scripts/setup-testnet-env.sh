@@ -34,6 +34,10 @@ fi
 
 echo "Using: $scenarioFile"
 
+testnet_config=$(echo '(import "nickel/mk-testnet-config.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'")' | nickel export --format json)
+
+trace_options=$(echo $testnet_config | jq -r '.trace_options')
+
 read -r \
   nodes_arg \
   testnet_magic \
@@ -44,7 +48,10 @@ read -r \
   num_dreps \
   max_lovelace_supply \
   start_directly_in_dijkstra \
-< <(echo '(import "nickel/mk-testnet-config.ncl") (import "'"$scenarioFile"'")' | nickel export --format json | jq -r '[
+  proxy_mode \
+  ip \
+  node_ports_base \
+  < <(echo $testnet_config | jq -r '[
     .nodes_arg,
     .testnet_magic,
 
@@ -54,7 +61,11 @@ read -r \
     .genesis.active_slot_coeff_f,
     .genesis.num_dreps,
     .genesis.max_lovelace_supply,
-    .genesis.start_directly_in_dijkstra
+    .genesis.start_directly_in_dijkstra,
+    
+    .proxy,
+    .ip,
+    .node_ports_base
   ] | @tsv')
 
 echo "Running cardano_testnet create-env"
@@ -85,46 +96,37 @@ jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGene
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then
-  jq ".TestDijkstraHardForkAtEpoch = 0" $configurationFile | sponge $configurationFile
-  jq '.ExperimentalHardForksEnabled = true' $configurationFile | sponge $configurationFile
+  jq ".TestDijkstraHardForkAtEpoch = 0 |
+      .ExperimentalHardForksEnabled = true" $configurationFile | sponge $configurationFile
 fi
 
-# TODO: move to the nickel config
-trace_options='{"" : {"severity": "Info", "backends": ["Stdout HumanFormatColoured"]},"Peras" : {"severity": "Info", "backends": ["EKGBackend", "Forwarder","Stdout HumanFormatColoured"],"detail":"DNormal"},"ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB" : {"severity": "Debug", "backends": ["Forwarder"], "detail":"DNormal"}}'
-
-jq --argjson trace_options "$trace_options" '.TraceOptions = $trace_options' $configurationFile | sponge $configurationFile
-
-# substitute ports for proxy
-read -r \
-  ip \
-  node_ports_base \
-< <(nickel export nickel/testnet.ncl | jq -r '[
-    .ip,
-    .node_ports_base
-  ] | @tsv')
+jq --argjson trace_options "$trace_options" \
+  '.TraceOptions = $trace_options |
+  .TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)
 
-# save the list of ports for later
+  # save the list of ports for later
 node1Port=$(cat "$DEVENV_PATH/node-data/node1/port")
 portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' "$DEVENV_PATH/node-data/node1/topology.json")
-
 echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
 
-testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (import "'"$scenarioFile"'") '"$node_ports_base"'  '"$portsOfNodes"')' | nickel export --format json)
+if [[ $proxy_mode == "envoy"* ]]; then
+  testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (import "'"$scenarioFile"'") '"$node_ports_base"'  '"$portsOfNodes"')' | nickel export --format json)
 
-for node_idx in $(seq 1 $num_of_nodes); do
-  newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
-  echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
-done
+  for node_idx in $(seq 1 $num_of_nodes); do
+    newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
+    echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
+  done
 
-topologiesPath="$DEVENV_PATH/topologies.json"
-echo $testnetTopology | jq '.nodes' > "$topologiesPath"
+  topologiesPath="$DEVENV_PATH/topologies.json"
+  echo $testnetTopology | jq '.nodes' > "$topologiesPath"
 
-envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 (import "'"$scenarioFile"'") (import "'"$topologiesPath"'"))' | nickel export --format json)
+  envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 (import "'"$scenarioFile"'") (import "'"$topologiesPath"'"))' | nickel export --format json)
 
-echo $envoyConfig | jq '.main' > "$DEVENV_PATH/envoy.json"
-echo $envoyConfig | jq '.clusters' > "$DEVENV_PATH/cds.json"
-echo $envoyConfig | jq '.listeners' > "$DEVENV_PATH/lds.json"
+  echo $envoyConfig | jq '.main' > "$DEVENV_PATH/envoy.json"
+  echo $envoyConfig | jq '.clusters' > "$DEVENV_PATH/cds.json"
+  echo $envoyConfig | jq '.listeners' > "$DEVENV_PATH/lds.json"
+fi
 
 echo "Ready."

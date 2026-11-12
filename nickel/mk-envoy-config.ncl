@@ -22,7 +22,8 @@ fun directory ip port scenario nodes_with_ports =>
             "@type" = "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
             stat_prefix = n.node.name ++ "_tcp",
             cluster = n.node.name ++ "_outbound",
-            max_downstream_connection_duration = "1s",
+            # a bit more than timeout in network protocols
+            idle_timeout = "20s",
           }
         }],
       },

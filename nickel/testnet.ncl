@@ -13,7 +13,34 @@ in
   prometheus = {
     port = 9090,
   },
-  envoy = {
-    port = 9091
+  proxy = 'none,
+#  proxy = 'envoy { port = 9091 },
+  trace_options = {
+    "" = {
+      severity = 'Notice,
+      backends = [ '"Stdout HumanFormatColoured" ],
+    },
+    Peras = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+      detail = 'DNormal,
+    },
+    "ChainDB.PerasVoteDbEvent" = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+    Startup = {
+      severity = 'Info,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+    "ChainDB.PerasCertDbEvent" = {
+      severity = 'Debug,
+      backends = [ 'EKGBackend, 'Forwarder ],
+    },
+    "ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB" = {
+      severity = 'Debug,
+      backends = [ 'Forwarder ],
+      detail = 'DNormal,
+    },
   },
 } | InputParams

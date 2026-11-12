@@ -1,7 +1,7 @@
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
-fun input =>
+fun directory ip envoy_port =>
 {
-  command = "envoy -c %{input.directory}/envoy.json",
+  command = "envoy -c %{directory}/envoy.json",
   environment = [
   ],
   depends_on = {
@@ -9,7 +9,7 @@ fun input =>
   },
   readiness_probe = {
     exec = {
-      command = "curl -sf http://%{input.ip}:%{input.envoy.port}/ready",
+      command = "curl -sf http://%{ip}:%{envoy_port}/ready",
     },
     initial_delay_seconds = 1,
     period_seconds = 2,

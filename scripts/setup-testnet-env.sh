@@ -112,16 +112,23 @@ portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' 
 echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
 
 if [[ $proxy_mode == "envoy"* ]]; then
-  testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (import "'"$scenarioFile"'") '"$node_ports_base"'  '"$portsOfNodes"')' | nickel export --format json)
+  use_proxy=true
+else
+  use_proxy=false
+fi
 
-  for node_idx in $(seq 1 $num_of_nodes); do
-    newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
-    echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
-  done
+# Apply the scenario's links in both modes; only the target port differs.
+testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (import "'"$scenarioFile"'") '"$use_proxy"' '"$node_ports_base"'  '"$portsOfNodes"')' | nickel export --format json)
 
-  topologiesPath="$DEVENV_PATH/topologies.json"
-  echo $testnetTopology | jq '.nodes' > "$topologiesPath"
+for node_idx in $(seq 1 $num_of_nodes); do
+  newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
+  echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
+done
 
+topologiesPath="$DEVENV_PATH/topologies.json"
+echo $testnetTopology | jq '.nodes' > "$topologiesPath"
+
+if [[ $proxy_mode == "envoy"* ]]; then
   envoyConfig=$(echo '((import "nickel/mk-envoy-config.ncl") "'"$DEVENV_PATH"'" "'"$ip"'" 9091 (import "'"$scenarioFile"'") (import "'"$topologiesPath"'"))' | nickel export --format json)
 
   echo $envoyConfig | jq '.main' > "$DEVENV_PATH/envoy.json"

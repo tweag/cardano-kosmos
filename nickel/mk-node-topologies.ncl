@@ -1,4 +1,6 @@
-fun ip scenario proxy_ports_base nodes_ports =>
+# use_proxy: when true, links target each node's Envoy listener (proxy_port);
+# otherwise they target the node's own port directly.
+fun ip scenario use_proxy proxy_ports_base nodes_ports =>
   let { map, zip_with, map_with_index, fold_left, flatten, filter, .. } = std.array in
   let { for_each, .. } = import "prelude.ncl" in
   let
@@ -12,7 +14,7 @@ fun ip scenario proxy_ports_base nodes_ports =>
             |> filter (fun l => l.from == node_name)
             |> map (fun link => 
               let dest_node = std.record.get link.to nodes_map in
-              { address = ip, port = dest_node.proxy_port }
+              { address = ip, port = if use_proxy then dest_node.proxy_port else dest_node.port }
             )
           }
         )

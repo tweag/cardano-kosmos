@@ -7,10 +7,15 @@
 , macOS-security
 , windowsCompilerNixName
 , herald
+, ouroboros-consensus-src
 }:
 let
 
   inherit (haskell-nix) haskellLib;
+
+  hasConsensusOverride = builtins.pathExists "${ouroboros-consensus-src}/ouroboros-consensus.cabal";
+  consensusRepoUrl = "https://github.com/IntersectMBO/ouroboros-consensus";
+  consensusRev = ouroboros-consensus-src.rev or "0000000000000000000000000000000000000000";
 
   # This creates the Haskell package set.
   # https://input-output-hk.github.io/haskell.nix/user-guide/projects/
@@ -45,9 +50,21 @@ let
           flags: -systemd
         package cardano-tracer
           flags: -systemd
+      ''
+      + lib.optionalString hasConsensusOverride ''
+        source-repository-package
+          type: git
+          location: ${consensusRepoUrl}
+          tag: ${consensusRev}
+
+        package ouroboros-consensus
+          tests: False
+          benchmarks: False
       '';
       inputMap = {
         "https://chap.intersectmbo.org/" = CHaP;
+      } // lib.optionalAttrs hasConsensusOverride {
+        "${consensusRepoUrl}/${consensusRev}" = ouroboros-consensus-src;
       };
       shell = {
         name = lib.mkDefault "cabal-dev-shell";

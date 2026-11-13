@@ -27,8 +27,6 @@ constraints:
   , any.proto-lens >= 0.7.1.7
   -- https://github.com/channable/alfred-margaret/pull/76
   , any.alfred-margaret < 2.1.1.0 || > 2.1.1.0
-  -- Force cardano-crypto-class 2.6.x to avoid backtracking into 2.5.x
-  , any.cardano-crypto-class ^>= 2.6
 
 -- acts has a finitary flag; disabling it avoids pulling in finitary entirely,
 -- which sidesteps the GHC type-checker plugin incompatibility with
@@ -62,6 +60,15 @@ packages:
   packages/cardano-node/bench/cardano-timeseries-io
   packages/cardano-node/bench/trace-schemas/scripts/schema-gen
   packages/cardano-node/trace-forward
+
+  packages/cardano-base/cardano-base
+  packages/cardano-base/cardano-binary
+  packages/cardano-base/cardano-crypto-class
+  packages/cardano-base/cardano-crypto-leios
+  packages/cardano-base/cardano-crypto-peras
+  packages/cardano-base/cardano-crypto-praos
+  packages/cardano-base/cardano-slotting
+  packages/cardano-base/cardano-strict-containers
 
   packages/cardano-ledger/eras/allegra/impl
   packages/cardano-ledger/eras/alonzo/impl
@@ -175,3 +182,12 @@ allow-older:
 
   , cardano-api:ouroboros-consensus
 
+-- cardano-keys' only CHaP release (11.0.0.0) uses the BLS signing context
+-- that cardano-base master removed; use the context-less commit upstream's
+-- leios-main-compat pins.
+source-repository-package
+  type: git
+  location: https://github.com/IntersectMBO/cardano-keys
+  tag: a549816eca553796229df017980ea945cfda3d29
+  --sha256: sha256-UFi8gv6+WtpjeAUaY+dkOiAWUeQTjT9XqpFhQjq9FFA=
+  subdir: cardano-keys

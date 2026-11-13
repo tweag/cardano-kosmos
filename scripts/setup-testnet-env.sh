@@ -4,6 +4,11 @@ set -e
 
 echo "Building cardano packages..."
 
+# plutus-core is built in place, since it depends on the vendored
+# cardano-strict-containers. Several of its components start at once and
+# cabal unpacks the source once per component without a lock, which can
+# leave truncated files. Building it with a single job unpacks it only once.
+cabal build -j1 plutus-core
 cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
 
 CARDANO_CLI=$(cabal list-bin cardano-cli)

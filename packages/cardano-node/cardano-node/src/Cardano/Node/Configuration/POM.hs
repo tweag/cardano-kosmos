@@ -119,6 +119,12 @@ data NodeConfiguration
          -- versions.
        , ncExperimentalProtocolsEnabled :: !Bool
 
+         -- | Enable the Peras experimental feature flag.
+         --
+         -- This flag defaults to 'False' and should only be set to 'True' when
+         -- testing Peras-enabled node-to-node features.
+       , ncPerasEnabled :: !Bool
+
          -- BlockFetch configuration
        , ncMaxConcurrencyBulkSync :: !(Maybe MaxConcurrencyBulkSync)
        , ncMaxConcurrencyDeadline :: !(Maybe MaxConcurrencyDeadline)
@@ -232,8 +238,9 @@ data PartialNodeConfiguration
        , pncConfigFile      :: !(Last ConfigYamlFilePath)
        , pncTopologyFile    :: !(Last TopologyFile)
        , pncDatabaseFile    :: !(Last NodeDatabasePaths)
-         -- | pncProtocolFiles can only be supplied with command line arguments.
+         -- | Protocol credentials can be supplied on the command line.
        , pncProtocolFiles   :: !(Last ProtocolFilepaths)
+       , pncShelleyBLSKeyFile :: !(Last (Maybe FilePath))
        , pncValidateDB      :: !(Last Bool)
        , pncShutdownConfig  :: !(Last ShutdownConfig)
 
@@ -246,6 +253,7 @@ data PartialNodeConfiguration
        , pncDiffusionMode      :: !(Last DiffusionMode)
 
        , pncExperimentalProtocolsEnabled :: !(Last Bool)
+       , pncPerasEnabled :: !(Last Bool)
 
          -- BlockFetch configuration
        , pncMaxConcurrencyBulkSync :: !(Last MaxConcurrencyBulkSync)
@@ -316,6 +324,7 @@ instance AdjustFilePaths PartialNodeConfiguration where
   adjustFilePaths f x =
     x { pncProtocolConfig = adjustFilePaths f (pncProtocolConfig x)
       , pncSocketConfig   = adjustFilePaths f (pncSocketConfig x)
+      , pncShelleyBLSKeyFile = fmap (fmap f) (pncShelleyBLSKeyFile x)
       }
 
 instance Semigroup PartialNodeConfiguration where
@@ -329,6 +338,7 @@ instance FromJSON PartialNodeConfiguration where
       -- Node parameters, not protocol-specific
       pncSocketPath <- Last <$> v .:? "SocketPath"
       pncDatabaseFile <- Last <$> v .:? "DatabasePath"
+      pncShelleyBLSKeyFile <- Last <$> v .:? "ShelleyBLSKeyFile"
       pncDiffusionMode
         <- Last . fmap getDiffusionMode <$> v .:? "DiffusionMode"
       pncExperimentalProtocolsEnabled <- fmap Last $ do
@@ -341,6 +351,8 @@ instance FromJSON PartialNodeConfiguration where
             fail "TestEnableDevelopmentNetworkProtocols has been renamed to ExperimentalProtocolsEnabled in the configuration file"
 
         pure mValue
+
+      pncPerasEnabled <- Last <$> v .:? "PerasEnabled"
 
       -- Blockfetch parameters
       pncMaxConcurrencyBulkSync <- Last <$> v .:? "MaxConcurrencyBulkSync"
@@ -426,6 +438,7 @@ instance FromJSON PartialNodeConfiguration where
            , pncSocketConfig = Last . Just $ SocketConfig mempty mempty mempty pncSocketPath
            , pncDiffusionMode
            , pncExperimentalProtocolsEnabled
+           , pncPerasEnabled
            , pncMaxConcurrencyBulkSync
            , pncMaxConcurrencyDeadline
            , pncTraceForwardSocket = mempty
@@ -433,6 +446,7 @@ instance FromJSON PartialNodeConfiguration where
            , pncTopologyFile = mempty
            , pncDatabaseFile
            , pncProtocolFiles = mempty
+           , pncShelleyBLSKeyFile
            , pncValidateDB = mempty
            , pncShutdownConfig = mempty
            , pncStartAsNonProducingNode
@@ -769,8 +783,10 @@ defaultPartialNodeConfiguration =
     , pncSocketConfig = Last . Just $ SocketConfig mempty mempty mempty mempty
     , pncDiffusionMode = Last $ Just InitiatorAndResponderDiffusionMode
     , pncExperimentalProtocolsEnabled = Last $ Just False
+    , pncPerasEnabled = Last $ Just False
     , pncTopologyFile = Last . Just $ TopologyFile "configuration/cardano/mainnet-topology.json"
-    , pncProtocolFiles = Last . Just $ ProtocolFilepaths Nothing Nothing Nothing Nothing Nothing Nothing
+    , pncProtocolFiles = Last . Just $ ProtocolFilepaths Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+    , pncShelleyBLSKeyFile = mempty
     , pncValidateDB = Last $ Just False
     , pncShutdownConfig = Last . Just $ ShutdownConfig Nothing Nothing
     , pncStartAsNonProducingNode = Last $ Just False
@@ -860,6 +876,7 @@ makeNodeConfiguration pnc = do
   startAsNonProducingNode <- lastToEither "Missing StartAsNonProducingNode" $ pncStartAsNonProducingNode pnc
   protocolConfig <- lastToEither "Missing ProtocolConfig" $ pncProtocolConfig pnc
   protocolFiles <- lastToEither "Missing ProtocolFiles" $ pncProtocolFiles pnc
+  let configuredShelleyBLSKeyFile = getLast (pncShelleyBLSKeyFile pnc) >>= id
   diffusionMode <- lastToEither "Missing DiffusionMode" $ pncDiffusionMode pnc
   shutdownConfig <- lastToEither "Missing ShutdownConfig" $ pncShutdownConfig pnc
   socketConfig <- lastToEither "Missing SocketConfig" $ pncSocketConfig pnc
@@ -997,6 +1014,10 @@ makeNodeConfiguration pnc = do
     lastToEither "Missing ExperimentalProtocolsEnabled" $
       pncExperimentalProtocolsEnabled pnc
 
+  perasEnabled <-
+    lastToEither "Missing PerasEnabled" $
+      pncPerasEnabled pnc
+
   ncRpcConfig <- makeRpcConfig $ (pncRpcConfig pnc){nodeSocketPath=ncSocketPath socketConfig}
 
   return $ NodeConfiguration
@@ -1004,6 +1025,8 @@ makeNodeConfiguration pnc = do
              , ncTopologyFile = topologyFile
              , ncDatabaseFile = databaseFile
              , ncProtocolFiles = protocolFiles
+                 { shelleyBLSKeyFile = shelleyBLSKeyFile protocolFiles
+                     <|> configuredShelleyBLSKeyFile }
              , ncValidateDB = validateDB
              , ncShutdownConfig = shutdownConfig
              , ncStartAsNonProducingNode = startAsNonProducingNode
@@ -1011,6 +1034,7 @@ makeNodeConfiguration pnc = do
              , ncSocketConfig = socketConfig
              , ncDiffusionMode = diffusionMode
              , ncExperimentalProtocolsEnabled = experimentalProtocols
+             , ncPerasEnabled = perasEnabled
              , ncMaxConcurrencyBulkSync = getLast $ pncMaxConcurrencyBulkSync pnc
              , ncMaxConcurrencyDeadline = getLast $ pncMaxConcurrencyDeadline pnc
              , ncTraceForwardSocket = getLast $ pncTraceForwardSocket pnc

@@ -49,6 +49,7 @@ import Cardano.CLI.EraIndependent.Key.Run qualified as Key
 import Cardano.CLI.EraIndependent.Node.Command qualified as Cmd
 import Cardano.CLI.EraIndependent.Node.Run
   ( runNodeIssueOpCertCmd
+  , runNodeKeyGenBLSCmd
   , runNodeKeyGenColdCmd
   , runNodeKeyGenKesCmd
   , runNodeKeyGenVrfCmd
@@ -737,6 +738,12 @@ createPoolCredentials fmt dir = do
       (File @(VerificationKey ()) $ dir </> "vrf.vkey")
       (File @(SigningKey ()) $ dir </> "vrf.skey")
 
+  runNodeKeyGenBLSCmd $
+    Cmd.NodeKeyGenBLSCmdArgs
+      fmt
+      (File @(VerificationKey ()) $ dir </> "bls.vkey")
+      (File @(SigningKey ()) $ dir </> "bls.skey")
+
   runNodeKeyGenColdCmd $
     Cmd.NodeKeyGenColdCmdArgs
       fmt
@@ -792,6 +799,10 @@ buildPoolParams nw dir index specifiedRelays = do
     firstExceptT GenesisCmdTextEnvReadFileError
       . newExceptT
       $ readFileTextEnvelope poolRewardVKF
+  poolBlsSK <-
+    firstExceptT GenesisCmdTextEnvReadFileError
+      . newExceptT
+      $ readFileTextEnvelope @(SigningKey BlsKey) poolBlsSKF
 
   pure
     L.StakePoolParams
@@ -802,7 +813,7 @@ buildPoolParams nw dir index specifiedRelays = do
       , L.sppMargin = minBound
       , L.sppAccountAddress =
           toShelleyStakeAddr $ makeStakeAddress nw $ StakeCredentialByKey (verificationKeyHash rewardsSVK)
-      , L.sppBlsKey = L.SNothing
+      , L.sppBlsKey = L.SJust (toLedgerBlsKey poolBlsSK)
       , L.sppOwners = mempty
       , L.sppRelays = lookupPoolRelay specifiedRelays
       , L.sppMetadata = L.SNothing
@@ -813,6 +824,7 @@ buildPoolParams nw dir index specifiedRelays = do
   poolColdVKF = File $ dir </> "cold.vkey"
   poolVrfVKF = File $ dir </> "vrf.vkey"
   poolRewardVKF = File $ dir </> "staking-reward.vkey"
+  poolBlsSKF = File $ dir </> "bls.skey"
 
 -- | This function should only be used for testing purposes.
 -- Keys returned by this function are not cryptographically secure.

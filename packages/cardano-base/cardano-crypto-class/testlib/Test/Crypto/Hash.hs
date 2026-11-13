@@ -1,0 +1,292 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Test.Crypto.Hash (
+  tests,
+)
+where
+
+import Cardano.Crypto.Hash
+import Control.Exception (bracket)
+import Data.Bifunctor
+import qualified Data.Bits as Bits (xor)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Short as SBS
+import Data.Maybe (fromJust)
+import Data.MemPack
+import Data.Proxy (Proxy (..))
+import Data.String (fromString)
+import GHC.TypeLits
+import Test.Cardano.Base.Bytes (genByteString)
+import Test.Crypto.Util (
+  Lock,
+  prop_bad_cbor_bytes,
+  prop_cbor,
+  prop_cbor_size,
+  prop_no_thunks,
+  prop_raw_deserialise,
+  withLock,
+ )
+import Test.Hspec (Spec, describe)
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck
+import Test.QuickCheck.Instances ()
+
+import qualified Cardano.Crypto.Libsodium as NaCl
+
+--
+-- The list of all tests
+--
+tests :: Lock -> Spec
+tests lock =
+  describe "Crypto.Hash" $ do
+    testHashAlgorithm (Proxy :: Proxy SHA256)
+    testHashAlgorithm (Proxy :: Proxy SHA3_256)
+    testHashAlgorithm (Proxy :: Proxy Blake2b_224)
+    testHashAlgorithm (Proxy :: Proxy Blake2b_256)
+    testHashAlgorithm (Proxy :: Proxy Keccak256)
+    testSodiumHashAlgorithm lock (Proxy :: Proxy SHA256)
+    testSodiumHashAlgorithm lock (Proxy :: Proxy Blake2b_256)
+    testIncrementalHashAlgorithm (Proxy :: Proxy Blake2b_224)
+    testIncrementalHashAlgorithm (Proxy :: Proxy Blake2b_256)
+    testHashAlgorithm (Proxy :: Proxy SHA512)
+    testHashAlgorithm (Proxy :: Proxy SHA3_512)
+    testPackedBytes
+
+testHashAlgorithm ::
+  forall proxy h.
+  HashAlgorithm h =>
+  proxy h ->
+  Spec
+testHashAlgorithm p =
+  describe (hashAlgorithmName p) $ do
+    prop "hash size" $ prop_hash_correct_hashSize @h @[Int]
+    prop "serialise" $ prop_hash_cbor @h
+    prop "fail fromCBOR" $ prop_bad_cbor_bytes @(Hash h ())
+    prop "hashFromBytes" $ prop_raw_deserialise (hashFromBytes @h @())
+    prop "hashFromBytesShort" $ prop_raw_deserialise (hashFromBytesShort @h @() . SBS.toShort)
+    prop "ToCBOR size" $ prop_hash_cbor_size @h
+    prop "hashFromStringAsHex/hashToStringFromHash" $
+      prop_hash_hashFromStringAsHex_hashToStringFromHash @h @Float
+    prop "hashFromStringAsHex/fromString" $ prop_hash_hashFromStringAsHex_fromString @h @Float
+    prop "show/read" $ prop_hash_show_read @h @Float
+    prop "NoThunks" $ prop_no_thunks @(Hash h Int)
+    prop "MemPack RoundTrip" $ prop_MemPackRoundTrip @(Hash h Int)
+
+prop_MemPackRoundTrip :: forall a. (MemPack a, Eq a, Show a) => a -> Property
+prop_MemPackRoundTrip a =
+  unpackError (pack a) === a
+    .&&. unpackError (packByteString a) === a
+
+testSodiumHashAlgorithm ::
+  forall proxy h.
+  NaCl.SodiumHashAlgorithm h =>
+  Lock ->
+  proxy h ->
+  Spec
+testSodiumHashAlgorithm lock p =
+  describe (hashAlgorithmName p) $ do
+    prop "sodium and crypton work the same" $ prop_libsodium_model @h lock Proxy
+
+testPackedBytesN :: forall n. KnownNat n => TestHash n -> Spec
+testPackedBytesN h = do
+  describe (hashAlgorithmName (Proxy :: Proxy (TestHash n))) $ do
+    prop "roundtrip" $ prop_roundtrip h
+    prop "compare" $ prop_compare h
+    prop "xor" $ prop_xor h
+
+testPackedBytes :: Spec
+testPackedBytes =
+  describe "PackedBytes" $ do
+    testPackedBytesN (TestHash :: TestHash 0)
+    testPackedBytesN (TestHash :: TestHash 1)
+    testPackedBytesN (TestHash :: TestHash 2)
+    testPackedBytesN (TestHash :: TestHash 3)
+    testPackedBytesN (TestHash :: TestHash 4)
+    testPackedBytesN (TestHash :: TestHash 5)
+    testPackedBytesN (TestHash :: TestHash 6)
+    testPackedBytesN (TestHash :: TestHash 7)
+    testPackedBytesN (TestHash :: TestHash 8)
+    testPackedBytesN (TestHash :: TestHash 9)
+    testPackedBytesN (TestHash :: TestHash 10)
+    testPackedBytesN (TestHash :: TestHash 11)
+    testPackedBytesN (TestHash :: TestHash 12)
+    testPackedBytesN (TestHash :: TestHash 13)
+    testPackedBytesN (TestHash :: TestHash 14)
+    testPackedBytesN (TestHash :: TestHash 15)
+    testPackedBytesN (TestHash :: TestHash 16)
+    testPackedBytesN (TestHash :: TestHash 17)
+    testPackedBytesN (TestHash :: TestHash 18)
+    testPackedBytesN (TestHash :: TestHash 19)
+    testPackedBytesN (TestHash :: TestHash 20)
+    testPackedBytesN (TestHash :: TestHash 21)
+    testPackedBytesN (TestHash :: TestHash 22)
+    testPackedBytesN (TestHash :: TestHash 23)
+    testPackedBytesN (TestHash :: TestHash 24)
+    testPackedBytesN (TestHash :: TestHash 25)
+    testPackedBytesN (TestHash :: TestHash 26)
+    testPackedBytesN (TestHash :: TestHash 27)
+    testPackedBytesN (TestHash :: TestHash 28)
+    testPackedBytesN (TestHash :: TestHash 29)
+    testPackedBytesN (TestHash :: TestHash 30)
+    testPackedBytesN (TestHash :: TestHash 31)
+    testPackedBytesN (TestHash :: TestHash 32)
+
+prop_hash_cbor :: HashAlgorithm h => Hash h Int -> Property
+prop_hash_cbor = prop_cbor
+
+prop_hash_cbor_size :: HashAlgorithm h => Hash h Int -> Property
+prop_hash_cbor_size = prop_cbor_size
+
+prop_hash_correct_hashSize ::
+  forall h a.
+  HashAlgorithm h =>
+  Hash h a ->
+  Property
+prop_hash_correct_hashSize h =
+  BS.length (hashToBytes h) === fromIntegral @Word @Int (hashSize (Proxy :: Proxy h))
+
+prop_hash_show_read ::
+  forall h a.
+  HashAlgorithm h =>
+  Hash h a ->
+  Property
+prop_hash_show_read h = read (show h) === h
+
+prop_hash_hashFromStringAsHex_fromString ::
+  forall h a.
+  HashAlgorithm h =>
+  Hash h a ->
+  Property
+prop_hash_hashFromStringAsHex_fromString h = let s = hashToStringAsHex h in fromJust (hashFromStringAsHex @h @a s) === fromString s
+
+prop_hash_hashFromStringAsHex_hashToStringFromHash ::
+  forall h a.
+  HashAlgorithm h =>
+  Hash h a ->
+  Property
+prop_hash_hashFromStringAsHex_hashToStringFromHash h = fromJust (hashFromStringAsHex @h @a (hashToStringAsHex h)) === h
+
+prop_libsodium_model ::
+  forall h.
+  NaCl.SodiumHashAlgorithm h =>
+  Lock ->
+  Proxy h ->
+  BS.ByteString ->
+  Property
+prop_libsodium_model lock p bs = ioProperty . withLock lock $ do
+  actual <-
+    bracket
+      (NaCl.digestMLockedBS p bs)
+      NaCl.mlsbFinalize
+      NaCl.mlsbToByteString
+  return (expected === actual)
+  where
+    expected = digest p bs
+
+testIncrementalHashAlgorithm ::
+  forall proxy h.
+  IncrementalHashAlgorithm h =>
+  proxy h ->
+  Spec
+testIncrementalHashAlgorithm p =
+  describe (hashAlgorithmName p ++ " incremental") $ do
+    prop "chunked equivalence" $ prop_incremental_chunked @h
+
+-- | Incremental hashing produces the same result as single-shot.
+prop_incremental_chunked ::
+  forall h.
+  IncrementalHashAlgorithm h =>
+  Property
+prop_incremental_chunked =
+  forAll genInput $ \bs ->
+    forAll (chop bs) $ \chunks -> do
+      let ((), actual) = withHashContextST @h $ \ctx ->
+            mapM_ (hashUpdate ctx) chunks
+      counterexample ("input length: " ++ show (BS.length bs)) $
+        counterexample ("chunks: " ++ show (map BS.length chunks)) $
+          actual === hashWith @h id bs
+  where
+    -- arbitrary bytestrings are too short to cross the hash algorithm block size
+    -- (e.g. Blake2b uses 128 bytes)
+    genInput = choose (0, 4096) >>= genByteString
+
+    chop :: BS.ByteString -> Gen [BS.ByteString]
+    chop bs
+      | BS.null bs = pure [BS.empty]
+      | otherwise = do
+          n <- choose (0, BS.length bs)
+          let (chunk, rest) = BS.splitAt n bs
+          (chunk :) <$> chop rest
+
+--
+-- Arbitrary instances
+--
+
+instance HashAlgorithm h => Arbitrary (Hash h a) where
+  arbitrary = castHash . hashWith BS.pack <$> vector 16
+  shrink = const []
+
+--
+-- Test Hash Algorithm
+--
+
+data TestHash (n :: Nat) = TestHash
+
+instance KnownNat n => HashAlgorithm (TestHash n) where
+  type HashSize (TestHash n) = n
+  hashAlgorithmName px = "TestHash " ++ show (hashSize px)
+  digest px _ = BS.pack (replicate (fromIntegral @Word @Int (hashSize px)) 0)
+
+prop_roundtrip ::
+  forall n.
+  KnownNat n =>
+  TestHash n ->
+  Property
+prop_roundtrip h =
+  forAll (vectorOf (fromInteger (natVal h)) arbitrary) $ \xs ->
+    let sbs = SBS.pack xs
+        bs = SBS.fromShort sbs
+        sbsHash = hashFromBytesShort sbs :: Maybe (Hash (TestHash n) ())
+        bsHash = hashFromBytes bs :: Maybe (Hash (TestHash n) ())
+     in fmap hashToBytesShort sbsHash === Just sbs
+          .&&. fmap hashToBytes bsHash === Just bs
+
+prop_compare ::
+  forall n.
+  KnownNat n =>
+  TestHash n ->
+  Property
+prop_compare h =
+  let n = fromInteger (natVal h)
+      distinct k = splitAt k <$> vectorOf (k * 2) arbitrary
+      prefixCount = max 0 (n - 2)
+      prefix = replicate prefixCount 0
+      similar = bimap (prefix ++) (prefix ++) <$> distinct (n - prefixCount)
+   in forAll (frequency [(10, distinct n), (40, similar)]) $ \(xs1, xs2) ->
+        let sbs1 = SBS.pack xs1
+            sbs2 = SBS.pack xs2
+         in compare
+              (hashFromBytesShort sbs1 :: Maybe (Hash (TestHash n) ()))
+              (hashFromBytesShort sbs2 :: Maybe (Hash (TestHash n) ()))
+              === compare sbs1 sbs2
+
+prop_xor ::
+  forall n.
+  KnownNat n =>
+  TestHash n ->
+  Property
+prop_xor h =
+  let n = fromInteger (natVal h)
+   in forAll (bimap BS.pack BS.pack . splitAt n <$> vectorOf (n * 2) arbitrary) $ \(bs1, bs2) ->
+        Just (BS.pack (BS.zipWith Bits.xor bs1 bs2))
+          === ( hashToBytes
+                  <$> ( xor
+                          <$> (hashFromBytes bs1 :: Maybe (Hash (TestHash n) ()))
+                          <*> (hashFromBytes bs2 :: Maybe (Hash (TestHash n) ()))
+                      )
+              )

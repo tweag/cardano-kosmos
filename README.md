@@ -11,7 +11,7 @@ nix develop
 ./scripts/run-peras-testnet.sh
 ```
 
-That will build all necessary dependencies and start the Peras testnet process-compose.
+That will build all necessary dependencies and start the Peras testnet process-compose. If you want to use `buck2` for faster rebuilds, use `nix develop .#with-buck2`.
 
 To reconfigure the testnet or scenario params, change `nickel/scenarios/<scenario>.ncl` or `nickel/testnet.ncl` and reconfigure before run:
 

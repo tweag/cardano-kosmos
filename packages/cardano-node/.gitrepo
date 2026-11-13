@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/cardano-node.git
-	branch = 38bc01a6b0c710de7afde64977e71df8be4060bc
-	commit = 38bc01a6b0c710de7afde64977e71df8be4060bc
-	parent = d217488845707692af49efa1174d7ad0d86cfddb
+	branch = 1c5b4b8c91db9008b360e303fb03f4090b1eada1
+	commit = 1c5b4b8c91db9008b360e303fb03f4090b1eada1
+	parent = 79d6b594769b6beaf8e4339b02c6f993d3850e41
 	method = merge
 	cmdver = 0.4.9

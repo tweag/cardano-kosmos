@@ -82,6 +82,11 @@ jq ".securityParam = $security_param_k |
 
 jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGenesisFile
 
+# create-testnet-data writes the full PlutusV4 parameter list, but the ledger's
+# Dijkstra genesis decoder only accepts the initial 251 parameters.
+dijkstraGenesisFile="${DEVENV_PATH}/dijkstra-genesis.json"
+jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then

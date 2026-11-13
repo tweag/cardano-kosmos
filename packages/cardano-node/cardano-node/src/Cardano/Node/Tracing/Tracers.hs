@@ -4,7 +4,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -37,7 +36,6 @@ import           Cardano.Node.Tracing.Tracers.NodeVersion (getNodeVersion)
 import           Cardano.Node.Tracing.Tracers.Rpc ()
 import           Cardano.Node.Tracing.Tracers.Shutdown ()
 import           Cardano.Node.Tracing.Tracers.Startup ()
-import           Control.Tracer (nullTracer)
 import           Ouroboros.Consensus.Ledger.Inspect (LedgerEvent)
 import           Ouroboros.Consensus.MiniProtocol.ChainSync.Client (TraceChainSyncClientEvent)
 import qualified Ouroboros.Consensus.Network.NodeToClient as NodeToClient
@@ -57,14 +55,12 @@ import qualified Ouroboros.Network.Diffusion as Diffusion
 
 import           Codec.CBOR.Read (DeserialiseFailure)
 import           Control.Monad (unless)
-import           Cardano.Network.OrphanInstances ()
+import           Control.Tracer (nullTracer)
 import           Data.Aeson (ToJSON (..))
 import           Data.Proxy (Proxy (..))
 import           Network.Mux.Trace (TraceLabelPeer (..))
 import qualified Network.Mux.Trace as Mux
 import           Network.Mux.Tracing ()
-
-import Ouroboros.Consensus.Block.SupportsPeras (PerasError)
 
 -- | Construct tracers for all system components.
 --
@@ -77,7 +73,6 @@ mkDispatchTracers
     (TraceLabelPeer
       (ConnectionId RemoteAddress) (TraceChainSyncClientEvent blk))
   , LogFormatting (TraceGsmEvent (Tip blk))
-  , LogFormatting (PerasError blk)
   , MetaTrace (TraceGsmEvent (Tip blk))
   , ToJSON (HeaderHash blk)
   )
@@ -202,7 +197,6 @@ mkConsensusTracers :: forall blk.
   , LogFormatting (TraceLabelPeer
                     (ConnectionId RemoteAddress) (TraceChainSyncClientEvent blk))
   , LogFormatting (TraceGsmEvent (Tip blk))
-  , LogFormatting (PerasError blk)
   , MetaTrace (TraceGsmEvent (Tip blk))
   , ToJSON (HeaderHash blk)
   )
@@ -378,18 +372,15 @@ mkConsensusTracers configReflection trBase trForward mbTrEKG _trDataPoint trConf
                 ["Peras", "Vote", "Outbound"]
     configureTracers configReflection trConfig [txPerasVoteOut]
 
-    !txPerasCertInclusion <-  mkCardanoTracer
+    !perasCertInclusionTr  <-  mkCardanoTracer
                 trBase trForward mbTrEKG
                 ["Peras", "Cert", "Inclusion"]
-    configureTracers configReflection trConfig [txPerasCertInclusion]
+    configureTracers configReflection trConfig [perasCertInclusionTr]
 
-    !txPerasVoteForging <-  mkCardanoTracer
+    !perasVoteForgingTr  <-  mkCardanoTracer
                 trBase trForward mbTrEKG
                 ["Peras", "Vote", "Forging"]
-    configureTracers configReflection trConfig [txPerasVoteForging]
-
-    !testnetTrac <- mkCardanoTracer trBase trForward mbTrEKG ["Testnet"]
-    configureTracers configReflection trConfig [testnetTrac]
+    configureTracers configReflection trConfig [perasVoteForgingTr]
 
     pure $ Consensus.Tracers
       { Consensus.chainSyncClientTracer = mkTracer $
@@ -451,11 +442,14 @@ mkConsensusTracers configReflection trBase trForward mbTrEKG _trDataPoint trConf
           traceWith txPerasVoteIn
       , Consensus.perasVoteDiffusionOutboundTracer = mkTracer $
           traceWith txPerasVoteOut
-      , Consensus.perasCertInclusionTracer = mkTracer $ traceWith txPerasCertInclusion
-      , Consensus.perasVoteForgingTracer = mkTracer $ traceWith txPerasVoteForging
+      , Consensus.perasCertInclusionTracer = mkTracer $
+          traceWith perasCertInclusionTr
+      , Consensus.perasVoteForgingTracer = mkTracer $
+          traceWith perasVoteForgingTr
       , Consensus.leiosFetchServerTracer = nullTracer
       , Consensus.leiosDbTracer = nullTracer
-      , Consensus.testnetTracer = mkTracer $ traceWith testnetTrac
+      , Consensus.leiosNotifyClientTracer = nullTracer
+      , Consensus.leiosVoteStateTracer = nullTracer
       }
 
 mkNodeToClientTracers :: forall blk.

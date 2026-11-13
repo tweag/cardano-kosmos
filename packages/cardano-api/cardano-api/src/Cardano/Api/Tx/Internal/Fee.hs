@@ -90,12 +90,12 @@ import Cardano.Ledger.Credential as Ledger (Credential, credKeyHashWitness)
 import Cardano.Ledger.Keys (asWitness)
 import Cardano.Ledger.Plutus.Language qualified as Plutus
 
+import Control.Monad (unless, when)
 import Data.Bifunctor (bimap, first, second)
 import Data.Bitraversable (bitraverse)
 import Data.ByteString.Short (ShortByteString)
 import Data.Function ((&))
 import Data.List (sortBy)
-import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -131,10 +131,9 @@ estimateOrCalculateBalancedTxBody
   -> TxBodyContent BuildTx era
   -> Set PoolId
   -> Map StakeCredential L.Coin
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> AddressInEra era
   -> Either (AutoBalanceError era) (BalancedTxBody era)
-estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids stakeDelegDeposits drepDelegDeposits changeAddr =
+estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids stakeDelegDeposits changeAddr =
   case feeEstMode of
     CalculateWithSpendableUTxO utxo systemstart ledgerEpochInfo mOverride ->
       first AutoBalanceCalculationError $
@@ -145,7 +144,6 @@ estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids s
           (LedgerProtocolParameters pparams)
           poolids
           stakeDelegDeposits
-          drepDelegDeposits
           utxo
           txBodyContent
           changeAddr
@@ -168,7 +166,6 @@ estimateOrCalculateBalancedTxBody era feeEstMode pparams txBodyContent poolids s
                   pparams
                   poolids
                   stakeDelegDeposits
-                  drepDelegDeposits
                   exUnitsMap
                   totalPotentialCollateral
                   numKeyWits
@@ -208,9 +205,6 @@ estimateBalancedTxBody
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ A map of all deposits for DRep credentials that are being
-  --   unregistered in this transaction.
   -> Map ScriptWitnessIndex ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -228,7 +222,7 @@ estimateBalancedTxBody
   -> AddressInEra era
   -- ^ Change address.
   -> Value
-  -- ^ Total value of UTXOs being spent.
+  -- ^ Total value of the UTxOs being spent, including native assets.
   -> Either (TxFeeEstimationError era) (BalancedTxBody era)
 estimateBalancedTxBody
   w
@@ -236,7 +230,6 @@ estimateBalancedTxBody
   pparams
   poolids
   stakeDelegDeposits
-  drepDelegDeposits
   exUnitsMap
   totalPotentialCollateral
   intendedKeyWits
@@ -292,8 +285,23 @@ estimateBalancedTxBody
             , negateValue (lovelaceToValue totalDeposits)
             ]
 
+    -- Deposits larger than the declared ADA make the fake input negative; the ledger rejects
+    -- negative coins when compacting outputs.
+    let availableAda = selectLovelace availableUTxOValue
+    when (availableAda < 0) . Left . TxFeeEstimationBalanceError $
+      TxBodyErrorBalanceNegative availableAda mempty
+
     let partialChange = toLedgerValue w $ calculatePartialChangeValue sbe availableUTxOValue txbodycontent1
-        maxLovelaceChange = L.Coin (2 ^ (64 :: Integer)) - 1
+
+    -- Check the asset balance before building the change output: the ledger compacts
+    -- outputs eagerly and errors on negative quantities.
+    let L.MaryValue partialCoin partialMultiAsset =
+          maryEraOnwardsConstraints w partialChange :: L.MaryValue
+    unless (L.pointwise (>=) (L.MaryValue (L.Coin 0) partialMultiAsset) mempty) $
+      Left . TxFeeEstimationBalanceError $
+        TxBodyErrorBalanceNegative partialCoin partialMultiAsset
+
+    let maxLovelaceChange = L.Coin (2 ^ (64 :: Integer)) - 1
         changeWithMaxLovelace = partialChange & A.adaAssetL sbe .~ maxLovelaceChange
         changeTxOut =
           forShelleyBasedEraInEon
@@ -360,9 +368,9 @@ estimateBalancedTxBody
             , txTotalCollateral = reqCol
             }
 
-    let fakeUTxO = createFakeUTxO sbe changeaddr txbodycontent1 $ selectLovelace availableUTxOValue
+    let fakeUTxO = createFakeUTxO sbe changeaddr txbodycontent1 availableUTxOValue
         balance =
-          evaluateTransactionBalance sbe pparams poolids stakeDelegDeposits drepDelegDeposits fakeUTxO txbody2
+          evaluateTransactionBalance sbe pparams poolids stakeDelegDeposits fakeUTxO txbody2
         balanceTxOut = TxOut changeaddr balance TxOutDatumNone ReferenceScriptNone
 
     -- Step 6. Check all txouts have the min required UTxO value
@@ -572,6 +580,9 @@ estimateTransactionKeyWitnessCount
     maxWitnessesInSimpleScript (RequireAllOf simpleScripts) = sum $ map maxWitnessesInSimpleScript simpleScripts
     maxWitnessesInSimpleScript (RequireAnyOf simpleScripts) = maximum $ map maxWitnessesInSimpleScript simpleScripts
     maxWitnessesInSimpleScript (RequireMOf n simpleScripts) = sum $ take n $ sortBy (comparing Down) (map maxWitnessesInSimpleScript simpleScripts)
+    -- Count the key witness directly identified by the guard credential.
+    -- Any signer requirements inside a referenced script are not inferred here.
+    maxWitnessesInSimpleScript (RequireGuard cred) = maybe 0 (const 1) (credKeyHashWitness cred)
 
     -- Mirrors ledger's 'Cardano.Ledger.Conway.UTxO.voterWitnesses': a committee or
     -- DRep voter needs a VKey witness only when its credential is key-based.
@@ -822,10 +833,6 @@ extractPlutusScriptAndLanguage p =
 --
 -- Finding the (non-zero) balance of a partially constructed transaction is
 -- useful for adjusting a transaction to be fully balanced.
--- Note: the DRep deposit map is no longer consulted. The ledger dropped that
--- lookup from 'evalBalanceTxBody' ("we do not need to look into DRep state in
--- order to figure out the refund"); the parameter is kept so callers do not
--- have to change.
 evaluateTransactionBalance
   :: forall era
    . ()
@@ -833,11 +840,10 @@ evaluateTransactionBalance
   -> Ledger.PParams (ShelleyLedgerEra era)
   -> Set PoolId
   -> Map StakeCredential L.Coin
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> UTxO era
   -> TxBody era
   -> TxOutValue era
-evaluateTransactionBalance sbe pp poolids stakeDelegDeposits _drepDelegDeposits utxo (ShelleyTxBody _ txbody _ _ _ _) =
+evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo (ShelleyTxBody _ txbody _ _ _ _) =
   shelleyBasedEraConstraints sbe $
     TxOutValueShelleyBased sbe $
       L.evalBalanceTxBody
@@ -1047,9 +1053,6 @@ makeTransactionBodyAutoBalance
   -> Map StakeCredential L.Coin
   -- ^ The map of all deposits for stake credentials that are being
   --   unregistered in this transaction
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ The map of all deposits for DRep credentials that are being
-  --   unregistered in this transaction
   -> UTxO era
   -- ^ The transaction inputs (including reference and collateral ones), not the entire 'UTxO'.
   -> TxBodyContent BuildTx era
@@ -1065,7 +1068,6 @@ makeTransactionBodyAutoBalance
   lpp@(LedgerProtocolParameters pp)
   poolids
   stakeDelegDeposits
-  drepDelegDeposits
   utxo
   txbodycontent
   changeaddr
@@ -1087,7 +1089,7 @@ makeTransactionBodyAutoBalance
 
       txbodyForChange <- first TxBodyError $ createTransactionBody sbe txbodycontent
       let initialChangeTxOutValue =
-            evaluateTransactionBalance sbe pp poolids stakeDelegDeposits drepDelegDeposits utxo txbodyForChange
+            evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo txbodyForChange
           initialChangeTxOut =
             TxOut
               changeaddr
@@ -1198,7 +1200,7 @@ makeTransactionBodyAutoBalance
               , txReturnCollateral = retColl
               , txTotalCollateral = reqCol
               }
-      let balance = evaluateTransactionBalance sbe pp poolids stakeDelegDeposits drepDelegDeposits utxo txbody2
+      let balance = evaluateTransactionBalance sbe pp poolids stakeDelegDeposits utxo txbody2
           balanceTxOut = TxOut changeaddr balance TxOutDatumNone ReferenceScriptNone
       first (uncurry TxBodyErrorMinUTxONotMet)
         . mapM_ (checkMinUTxOValue sbe pp)
@@ -1285,6 +1287,9 @@ checkNonNegative sbe bpparams txout@(TxOut _ balance _ _) = do
       isPositiveValue = L.pointwise (>) outValue mempty
   if
     | L.isZero outValue -> pure Empty -- empty TxOut - ok, it's removed at the end
+    -- Negative asset quantities must be rejected before calculateMinimumUTxO compacts the value.
+    | not (L.pointwise (>=) (L.MaryValue (L.Coin 0) multiAsset) mempty) ->
+        Left $ TxBodyErrorBalanceNegative coin multiAsset
     | L.isZero coin ->
         -- no ADA, just non-ADA assets: positive lovelace is required in such case
         Left $
@@ -1478,35 +1483,33 @@ calculatePartialChangeValue sbe incoming txbodycontent = do
   newUtxoValue =
     mconcat [fromLedgerValue sbe v | (TxOut _ (TxOutValueShelleyBased _ v) _ _) <- txOuts txbodycontent]
 
--- | Build a single-entry UTxO for the first input holding the declared total ADA, so the balance
--- can be evaluated without the real UTxO set. The first output is the template, or a plain
--- output at the change address when there are no outputs. Native assets outside the first
--- output are not represented.
--- TODO: Include multiassets
+-- | Build a single-entry UTxO for the first input holding the declared available value at the
+-- change address, so the balance can be evaluated without the real UTxO set.
 createFakeUTxO
   :: ShelleyBasedEra era
   -> AddressInEra era
-  -- ^ The change address used when there are no outputs.
+  -- ^ The change address, used as the address of the fake entry.
   -> TxBodyContent BuildTx era
   -- ^ The transaction body content.
-  -> Coin
-  -- ^ The total ADA declared by the caller.
+  -> Value
+  -- ^ The value available at the inputs, as declared by the caller.
   -> UTxO era
-createFakeUTxO sbe changeAddress txbodycontent totalAdaInUTxO = do
-  let singleTxIn = maybe [] (return . fst) $ List.uncons [txin | (txin, _) <- txIns txbodycontent]
-      changeValue = lovelaceToTxOutValue sbe totalAdaInUTxO
-      singleTxOut =
-        maybe
-          [TxOut changeAddress changeValue TxOutDatumNone ReferenceScriptNone]
-          (return . updateTxOut sbe totalAdaInUTxO . toCtxUTxOTxOut . fst)
-          . List.uncons
-          $ txOuts txbodycontent
-  UTxO . fromList $ zip singleTxIn singleTxOut
-
-updateTxOut :: ShelleyBasedEra era -> Coin -> TxOut CtxUTxO era -> TxOut CtxUTxO era
-updateTxOut sbe updatedValue txout =
-  let ledgerout = shelleyBasedEraConstraints sbe $ toShelleyTxOut sbe txout & L.coinTxOutL .~ updatedValue
-   in fromShelleyTxOut sbe ledgerout
+createFakeUTxO sbe changeAddress txbodycontent availableValue = do
+  let fakeTxOutValue =
+        forShelleyBasedEraInEon
+          sbe
+          (lovelaceToTxOutValue sbe $ selectLovelace availableValue)
+          ( \w ->
+              maryEraOnwardsConstraints w $
+                TxOutValueShelleyBased sbe (toLedgerValue w availableValue)
+          )
+      fakeTxOut =
+        TxOut
+          changeAddress
+          fakeTxOutValue
+          TxOutDatumNone
+          ReferenceScriptNone
+  UTxO $ Map.fromList [(txin, fakeTxOut) | (txin, _) <- take 1 $ txIns txbodycontent]
 
 -- Essentially we check for the existence of collateral inputs. If they exist we
 -- create a fictitious collateral return output. Why? Because we need to put dummy values

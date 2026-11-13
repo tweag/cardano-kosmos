@@ -61,7 +61,6 @@ import Cardano.CLI.Type.Error.StakePoolCmdError
 import Cardano.CLI.Type.Key
 import Cardano.Crypto.Hash qualified as Crypto
 import Cardano.Ledger.Conway.Genesis (ConwayExtraConfig (..))
-import Cardano.Ledger.Shelley qualified as L (ShelleyEra)
 import Cardano.Ledger.Shelley.Genesis (InjectionData (..), ShelleyExtraConfig (..))
 import Cardano.Prelude (canonicalEncodePretty)
 import Cardano.Protocol.Crypto qualified as C

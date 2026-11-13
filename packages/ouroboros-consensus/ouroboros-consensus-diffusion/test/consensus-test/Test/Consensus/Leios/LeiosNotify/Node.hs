@@ -8,7 +8,9 @@
 -- connections against peers run by the Leios node-vs-environment tests.
 module Test.Consensus.Leios.LeiosNotify.Node (tests) where
 
+import Cardano.Crypto.DSIGN.Class (signDSIGN)
 import Cardano.Crypto.Hash (Hash (UnsafeHash))
+import Cardano.Crypto.Leios (LeiosCommittee, LeiosSeatId (..), LeiosSigningKey, leiosSignContext)
 import Cardano.Network.NodeToNode (defaultMiniProtocolParameters)
 import Cardano.Network.NodeToNode.Version (NodeToNodeVersion (..))
 import Control.Concurrent.Class.MonadSTM.Strict
@@ -24,6 +26,7 @@ import Data.Foldable (for_)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Proxy (Proxy (..))
+import Data.Ratio ((%))
 import qualified Data.Set as Set
 import Data.Word (Word16, Word8)
 import Ouroboros.Consensus.Block (SlotNo (..), blockHash)
@@ -36,7 +39,9 @@ import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client
 import qualified Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements as Announcements
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
-  ( maxAnnouncementAgeRecv
+  ( defaultLeiosAnnouncementAgeLimits
+  , maxAnnouncementAgeRecv
+  , mkLeiosAnnouncementAgeLimits
   )
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Server
@@ -49,8 +54,6 @@ import Ouroboros.Consensus.Network.LeiosNotify
 import qualified Ouroboros.Consensus.Network.NodeToNode as NTN
 import Ouroboros.Consensus.Node.ExitPolicy (NodeToNodeInitiatorResult)
 import Ouroboros.Consensus.NodeKernel (getLeiosNotifyClientStates)
-import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
-import Ouroboros.Consensus.Storage.ChainDB.API.Types.InvalidBlockPunishment (noPunishment)
 import qualified Ouroboros.Consensus.Util.IOLike as IOLike
 import Ouroboros.Network.Channel (Channel)
 import Ouroboros.Network.Driver.Limits (ProtocolLimitFailure (..))
@@ -60,8 +63,8 @@ import Ouroboros.Network.Mux
   , TemperatureBundle (..)
   , WithProtocolTemperature (..)
   )
+import Test.Cardano.Crypto.Leios.Gen (TestSeatType (..), mkCommitteeFromTestSeats)
 import Test.Consensus.Leios.Environment
-import Test.Consensus.Leios.LeiosNotify.Codec (signedVote)
 import Test.Consensus.Leios.LeiosNotify.Protocol
   ( ExcessiveOutcome (..)
   , WhetherDisconnected (..)
@@ -142,6 +145,10 @@ tests =
           @?= Just (NodeClientDisconnected AnnouncementInFuture)
     , testCase "the node's client disconnects a peer that relays a too-old announcement" $
         runSimOrThrow (timeout 1000 nodeClientTooOld)
+          @?= Just (NodeClientDisconnected AnnouncementTooOld)
+    , testCase
+        "the node's client disconnects a peer that relays an announcement older than its configured limit"
+        $ runSimOrThrow (timeout 1000 nodeClientOlderThanConfigured)
           @?= Just (NodeClientDisconnected AnnouncementTooOld)
     , testCase "the node prunes its clients' state as its immutable tip advances" $
         runSimOrThrow (timeout 1000 nodePrunesClientState) @?= Just ((1, 1, 1, 1), (0, 0, 0, 0))
@@ -315,6 +322,7 @@ data DisconnectReason
   | VoteTooEarly
   | VoteTooLate
   | VoteOutsideHorizon
+  | VoteInvalid
   | OfferOutsideHorizon
   deriving (Eq, Show)
 
@@ -348,6 +356,7 @@ disconnectReason e
       ExnLeiosVoteTooEarly{} -> VoteTooEarly
       ExnLeiosVoteTooLate{} -> VoteTooLate
       ExnLeiosVoteOutsideHorizon{} -> VoteOutsideHorizon
+      ExnLeiosInvalidVote{} -> VoteInvalid
   | otherwise = Nothing
 
 -- | Run a peer's server that answers each request with whatever @next@ yields
@@ -373,16 +382,16 @@ runNodeClientAgainst ::
   STM (IOSim s) (Message (LeiosNotify LeiosPoint (Header Blk) LeiosVote) StBusy StIdle) ->
   Int ->
   IOSim s NodeClientOutcome
-runNodeClientAgainst nut next target = do
+runNodeClientAgainst node next target = do
   requests <- newTVarIO 0
   let envPeer =
         EnvPeer
-          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec nut) requests next
+          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec node) requests next
           , epLeiosNotifyClient = Nothing
-          , epLeiosFetchServer = refusingLeiosFetchServer nut
+          , epLeiosFetchServer = refusingLeiosFetchServer node
           , epLeiosFetchClient = Nothing
           }
-  withNodeVsEnvConnection nut (PeerAddr 1) envPeer $ \conn -> do
+  withNodeVsEnvConnection node (PeerAddr 1) envPeer $ \conn -> do
     client <- nodeLeiosNotifyClient conn
     early <-
       atomically $
@@ -401,24 +410,24 @@ runNodeClientAgainst nut next target = do
 -- | A peer that never has a notification: the node keeps exactly its
 -- pipelining bound of requests outstanding.
 nodeClientKeepsPipelineFull :: IOSim s NodeClientOutcome
-nodeClientKeepsPipelineFull = withNode $ \nut ->
-  runNodeClientAgainst nut retry leiosNotifyPipelineDepth
+nodeClientKeepsPipelineFull = withNode $ \node ->
+  runNodeClientAgainst node retry leiosNotifyPipelineDepth
 
 -- | Six replies, announcements from six elections, free six slots in the
 -- pipeline, which the node fills again.
 nodeClientRefillsPipeline :: IOSim s NodeClientOutcome
-nodeClientRefillsPipeline = withNode $ \nut -> do
+nodeClientRefillsPipeline = withNode $ \node -> do
   queue <- newTQueueIO
   atomically $
     mapM_ (writeTQueue queue) $
       [ MsgLeiosBlockAnnouncement $ ltbHeader $ setIssuer issuer $ ann 1 $ firstLeiosBlock 0
       | issuer <- [0 .. 5]
       ]
-  runNodeClientAgainst nut (readTQueue queue) (leiosNotifyPipelineDepth + 6)
+  runNodeClientAgainst node (readTQueue queue) (leiosNotifyPipelineDepth + 6)
 
 nodeClientUnpromptedCancel :: IOSim s NodeClientOutcome
-nodeClientUnpromptedCancel = withNode $ \nut ->
-  runNodeClientAgainst nut (pure MsgCanceled) maxBound
+nodeClientUnpromptedCancel = withNode $ \node ->
+  runNodeClientAgainst node (pure MsgCanceled) maxBound
 
 -- | Announce an endorser block whose hash repeats the given byte 32 times.
 ann :: Word8 -> LeiosTestBlock -> LeiosTestBlock
@@ -426,33 +435,48 @@ ann n = setAnnouncement (UnsafeHash (SBS.replicate 32 n)) 1000
 
 -- | A peer that relays these headers, one per request.
 nodeClientAgainstAnnouncements :: [LeiosTestBlock] -> IOSim s NodeClientOutcome
-nodeClientAgainstAnnouncements blks = withNode $ \nut -> do
+nodeClientAgainstAnnouncements blks = withNode $ \node -> do
   queue <- newTQueueIO
   atomically $ mapM_ (writeTQueue queue . MsgLeiosBlockAnnouncement . ltbHeader) blks
-  runNodeClientAgainst nut (readTQueue queue) (leiosNotifyPipelineDepth + length blks)
+  runNodeClientAgainst node (readTQueue queue) (leiosNotifyPipelineDepth + length blks)
 
 -- | The announcement arrives long after its slot: the peer connects only then.
 nodeClientTooOld :: IOSim s NodeClientOutcome
-nodeClientTooOld = withNode $ \nut -> do
-  threadDelay (realToFrac maxAnnouncementAgeRecv + 100)
+nodeClientTooOld =
+  withNode $
+    nodeClientConnectingAt (realToFrac (maxAnnouncementAgeRecv defaultLeiosAnnouncementAgeLimits) + 100)
+
+-- | The announcement arrives 39 s after its slot began, which only a receive
+-- limit smaller than the default rejects.
+nodeClientOlderThanConfigured :: IOSim s NodeClientOutcome
+nodeClientOlderThanConfigured =
+  withNodeAgeLimits limits $ nodeClientConnectingAt 40
+ where
+  limits = either (error . show) id $ mkLeiosAnnouncementAgeLimits 10 30
+
+-- | The peer connects only at the given time, and relays the announcement of
+-- 'firstLeiosBlock', whose slot begins at 1 s.
+nodeClientConnectingAt :: DiffTime -> NodeUnderTest (IOSim s) -> IOSim s NodeClientOutcome
+nodeClientConnectingAt at node = do
+  threadDelay at
   queue <- newTQueueIO
   atomically $ writeTQueue queue $ MsgLeiosBlockAnnouncement $ ltbHeader $ ann 1 (firstLeiosBlock 0)
-  runNodeClientAgainst nut (readTQueue queue) (leiosNotifyPipelineDepth + 1)
+  runNodeClientAgainst node (readTQueue queue) (leiosNotifyPipelineDepth + 1)
 
 -- | By the time the node connects, the current slot is past what its
 -- immutable tip, still at genesis, can forecast to.
 nodeClientGated :: IOSim s Int
-nodeClientGated = withNodeForecastingOnly 5 $ \nut -> do
+nodeClientGated = withNodeForecastingOnly 5 $ \node -> do
   threadDelay 10
   requests <- newTVarIO 0
   let envPeer =
         EnvPeer
-          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec nut) requests retry
+          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec node) requests retry
           , epLeiosNotifyClient = Nothing
-          , epLeiosFetchServer = refusingLeiosFetchServer nut
+          , epLeiosFetchServer = refusingLeiosFetchServer node
           , epLeiosFetchClient = Nothing
           }
-  withNodeVsEnvConnection nut (PeerAddr 1) envPeer $ \conn -> do
+  withNodeVsEnvConnection node (PeerAddr 1) envPeer $ \conn -> do
     threadDelay 10
     n <- readTVarIO requests
     connTerminate conn
@@ -462,14 +486,14 @@ nodeClientGated = withNodeForecastingOnly 5 $ \nut -> do
 -- | How many elections, body offers, closure offers and votes the client's state
 -- holds once one of each is in, and once the immutable tip has passed them.
 nodePrunesClientState :: IOSim s ((Int, Int, Int, Int), (Int, Int, Int, Int))
-nodePrunesClientState = withNode $ \nut -> do
+nodePrunesClientState = withNodeCommittee committee 100000 $ \node -> do
   requests <- newTVarIO 0
   queue <- newTQueueIO
   let envPeer =
         EnvPeer
-          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec nut) requests (readTQueue queue)
+          { epLeiosNotifyServer = runReplyingServer (envLeiosNotifyCodec node) requests (readTQueue queue)
           , epLeiosNotifyClient = Nothing
-          , epLeiosFetchServer = refusingLeiosFetchServer nut
+          , epLeiosFetchServer = refusingLeiosFetchServer node
           , epLeiosFetchClient = Nothing
           }
   withAsync
@@ -483,18 +507,18 @@ nodePrunesClientState = withNode $ \nut -> do
         ]
     )
     $ \_feeder ->
-      withNodeVsEnvConnection nut (PeerAddr 1) envPeer $ \_conn -> do
+      withNodeVsEnvConnection node (PeerAddr 1) envPeer $ \_conn -> do
         atomically $ readTVar requests >>= check . (> leiosNotifyPipelineDepth + 3)
-        beforePruning <- clientStateSize nut
-        advanceImmutableTip nut
-        afterPruning <- clientStateSize nut
+        beforePruning <- clientStateSize node
+        advanceImmutableTip node
+        afterPruning <- clientStateSize node
         pure (beforePruning, afterPruning)
 
 -- | How many elections, body offers, closure offers and votes the node's
 -- clients remember.
 clientStateSize :: NodeUnderTest (IOSim s) -> IOSim s (Int, Int, Int, Int)
-clientStateSize nut = atomically $ do
-  states <- IOLike.readTVar (getLeiosNotifyClientStates (nutKernel nut))
+clientStateSize node = atomically $ do
+  states <- IOLike.readTVar (getLeiosNotifyClientStates (nodeKernel node))
   sizes <- mapM (fmap size . IOLike.readTVar) (Map.elems states)
   pure
     ( sum [e | (e, _, _, _) <- sizes]
@@ -528,15 +552,27 @@ feedAt queue = go 0
 nodeClientAgainstSchedule ::
   [(DiffTime, Message (LeiosNotify LeiosPoint (Header Blk) LeiosVote) StBusy StIdle)] ->
   IOSim s NodeClientOutcome
-nodeClientAgainstSchedule schedule = withNode $ \nut -> do
+nodeClientAgainstSchedule schedule = withNodeCommittee committee 100000 $ \node -> do
   queue <- newTQueueIO
   let msgs = (0, someAnnouncement) : schedule
   withAsync (feedAt queue msgs) $ \_feeder ->
-    runNodeClientAgainst nut (readTQueue queue) (leiosNotifyPipelineDepth + length msgs)
+    runNodeClientAgainst node (readTQueue queue) (leiosNotifyPipelineDepth + length msgs)
 
--- | A vote from this seat for the announcement this block carries.
+-- | A vote from this seat for the announcement this block carries, signed with
+-- the seat's key.
 voteFor :: LeiosTestBlock -> Word16 -> LeiosVote
-voteFor blk seat = signedVote (toRankingBlockHash (Proxy @LeiosTestBlock) (blockHash blk)) seat
+voteFor blk seat =
+  MkLeiosVote
+    rbHash
+    (LeiosSeatId seat)
+    (signDSIGN leiosSignContext rbHash (seatKeys !! fromIntegral seat))
+ where
+  rbHash = toRankingBlockHash (Proxy @LeiosTestBlock) (blockHash blk)
+
+-- | One more seat than a votes message holds votes, each with a key.
+seatKeys :: [LeiosSigningKey]
+committee :: LeiosCommittee
+(seatKeys, committee) = mkCommitteeFromTestSeats [(WithKey, 1 % 17) | _ <- [0 .. 16 :: Int]]
 
 someAnnouncingBlock :: LeiosTestBlock
 someAnnouncingBlock = ann 1 (firstLeiosBlock 0)
@@ -547,9 +583,9 @@ equivocation = ann 2 (forkLeiosBlock (firstLeiosBlock 0))
 
 -- | Make the first two slots immutable: k is 10, so twelve blocks do it.
 advanceImmutableTip :: NodeUnderTest (IOSim s) -> IOSim s ()
-advanceImmutableTip nut = do
+advanceImmutableTip node = do
   threadDelay 20
-  mapM_ (ChainDB.addBlock_ (nutChainDB nut) noPunishment) $
+  addBlocks node $
     take 12 $
       iterate successorLeiosBlock (firstLeiosBlock 1)
   threadDelay 1
@@ -558,27 +594,27 @@ advanceImmutableTip nut = do
 -- the immutable tip has passed it.
 nodeClientOfferTooOld ::
   Message (LeiosNotify LeiosPoint (Header Blk) LeiosVote) StBusy StIdle -> IOSim s NodeClientOutcome
-nodeClientOfferTooOld offer = withNode $ \nut -> do
+nodeClientOfferTooOld offer = withNode $ \node -> do
   queue <- newTQueueIO
   atomically $ writeTQueue queue someAnnouncement
   announced <- newEmptyTMVarIO
   let feed = do
         atomically $ readTMVar announced
-        advanceImmutableTip nut
+        advanceImmutableTip node
         atomically $ writeTQueue queue offer
       next = do
         msg <- readTQueue queue
         _ <- tryPutTMVar announced ()
         pure msg
-  withAsync feed $ \_feeder -> runNodeClientAgainst nut next maxBound
+  withAsync feed $ \_feeder -> runNodeClientAgainst node next maxBound
 
 -- | A peer that announces 'someOfferedPoint', then sends these.
 nodeClientAgainstOffers ::
   [Message (LeiosNotify LeiosPoint (Header Blk) LeiosVote) StBusy StIdle] -> IOSim s NodeClientOutcome
-nodeClientAgainstOffers msgs = withNode $ \nut -> do
+nodeClientAgainstOffers msgs = withNode $ \node -> do
   queue <- newTQueueIO
   atomically $ mapM_ (writeTQueue queue) (someAnnouncement : msgs)
-  runNodeClientAgainst nut (readTQueue queue) (leiosNotifyPipelineDepth + 1 + length msgs)
+  runNodeClientAgainst node (readTQueue queue) (leiosNotifyPipelineDepth + 1 + length msgs)
 
 someAnnouncement :: Message (LeiosNotify LeiosPoint (Header Blk) LeiosVote) StBusy StIdle
 someAnnouncement = MsgLeiosBlockAnnouncement $ ltbHeader $ ann 1 (firstLeiosBlock 0)
@@ -593,19 +629,19 @@ newtype NodeServerOutcome = NodeServerOutcome Int
 -- | The node never has a notification, so the peer's requests are all
 -- outstanding when it quits.
 nodeServerCancels :: IOSim s NodeServerOutcome
-nodeServerCancels = withNode $ \nut -> do
+nodeServerCancels = withNode $ \node -> do
   requests <- newTVarIO 0
   replies <- newTVarIO 0
   stop <- newEmptyTMVarIO
-  let codec' = envLeiosNotifyCodec nut
+  let codec' = envLeiosNotifyCodec node
       envPeer =
         EnvPeer
           { epLeiosNotifyServer = runReplyingServer codec' requests retry
           , epLeiosNotifyClient = Just $ runPipelinedClient codec' replies 3 stop
-          , epLeiosFetchServer = refusingLeiosFetchServer nut
+          , epLeiosFetchServer = refusingLeiosFetchServer node
           , epLeiosFetchClient = Nothing
           }
-  withNodeVsEnvConnection nut (PeerAddr 1) envPeer $ \conn -> do
+  withNodeVsEnvConnection node (PeerAddr 1) envPeer $ \conn -> do
     threadDelay 10
     atomically $ putTMVar stop ()
     for_ (connPeerLeiosNotifyClient conn) $ \client -> atomically client >>= either throwIO pure
@@ -616,20 +652,20 @@ nodeServerCancels = withNode $ \nut -> do
 -- | A peer pipelining one request more than the node's server allows, so the
 -- node disconnects it.
 nodeServerExcessive :: IOSim s ExcessiveOutcome
-nodeServerExcessive = withNode $ \nut -> do
+nodeServerExcessive = withNode $ \node -> do
   requests <- newTVarIO 0
   replies <- newTVarIO 0
   stop <- newEmptyTMVarIO
-  let codec' = envLeiosNotifyCodec nut
+  let codec' = envLeiosNotifyCodec node
       envPeer =
         EnvPeer
           { epLeiosNotifyServer = runReplyingServer codec' requests retry
           , epLeiosNotifyClient =
               Just $ runPipelinedClient codec' replies (leiosNotifyPipelineDepth + 1) stop
-          , epLeiosFetchServer = refusingLeiosFetchServer nut
+          , epLeiosFetchServer = refusingLeiosFetchServer node
           , epLeiosFetchClient = Nothing
           }
-  withNodeVsEnvConnection nut (PeerAddr 1) envPeer $ \conn -> do
+  withNodeVsEnvConnection node (PeerAddr 1) envPeer $ \conn -> do
     server <- nodeLeiosNotifyServer conn
     atomically server >>= \case
       Left e | Just ExnLeiosNotifyExcessiveRequests <- fromException e -> pure $ ExcessiveOutcome Disconnected
@@ -638,17 +674,17 @@ nodeServerExcessive = withNode $ \nut -> do
 -- | Whether the node's initiator bundle, and its initiator-and-responder bundle,
 -- include LeiosNotify among their hot mini-protocols for this version.
 nodeRunsLeiosNotify :: NodeToNodeVersion -> IOSim s (Bool, Bool)
-nodeRunsLeiosNotify ntnVersion = withNode $ \nut ->
+nodeRunsLeiosNotify ntnVersion = withNode $ \node ->
   pure
     ( runsLeiosNotify $
-        NTN.initiator mempty defaultMiniProtocolParameters ntnVersion versionData (nutApps nut ())
+        NTN.initiator mempty defaultMiniProtocolParameters ntnVersion versionData (nodeApps node ())
     , runsLeiosNotify $
         NTN.initiatorAndResponder
           mempty
           defaultMiniProtocolParameters
           ntnVersion
           versionData
-          (nutApps nut ())
+          (nodeApps node ())
     )
  where
   versionData = nodeVersionData ntnVersion

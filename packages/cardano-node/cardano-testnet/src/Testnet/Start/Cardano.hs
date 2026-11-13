@@ -40,6 +40,9 @@ import           Cardano.Api
 import           Cardano.Api.Byron (GenesisData (..))
 import qualified Cardano.Api.Byron as Byron
 
+import           Cardano.Configuration.Edit (configurationDocumentFromValue,
+                   configurationDocumentValue, readConfigurationDocument,
+                   writeConfigurationDocument)
 import           Cardano.Network.Diffusion.Topology (CardanoNetworkTopology)
 import           Cardano.Node.Configuration.NodeAddress (PortNumber)
 import           Cardano.Node.Configuration.TopologyP2P ()
@@ -47,7 +50,7 @@ import           Cardano.Node.Testnet.Paths (defaultConfigFile, defaultNodeEnvFi
                    defaultNodeTopologyFile, defaultNodesDataDir, defaultPortFile,
                    defaultUtxoAddrPath)
 import           Cardano.Prelude (NonEmpty ((:|)), canonicalEncodePretty, readMaybe)
-import           Cardano.Tracer.Configuration (LogFormat(..))
+import           Cardano.Tracer.Configuration (LogFormat (..))
 import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint (..))
 
 import           Prelude hiding (lines)
@@ -59,12 +62,8 @@ import           Control.Monad.Catch
 import           Control.Monad.Trans.Maybe (runMaybeT)
 import           Control.Monad.Trans.Resource (MonadResource, getInternalState)
 import           Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Aeson.Encode.Pretty as A
-import qualified Data.ByteString.Base16 as B16
-import qualified Data.ByteString.Char8 as BSC
-import qualified Data.ByteString.Lazy.Char8 as BSL8
-import qualified Data.Yaml as Yaml
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Default.Class ()
 import           Data.Either
@@ -80,15 +79,15 @@ import qualified Data.Text as Text
 import           Data.Time (diffUTCTime)
 import           Data.Time.Clock (NominalDiffTime)
 import qualified Data.Time.Clock as DTC
+import qualified Data.Yaml as Yaml
 import           GHC.Exts (fromList)
 import           GHC.Stack
 import qualified System.Directory as IO
-import           System.FilePath ((</>), dropExtension)
+import           System.FilePath (dropExtension, (</>))
 import qualified System.Process as Process
 
-import           Testnet.CardanoTracer (CardanoTracerConf(..), CardanoTracerRuntime(..), startCardanoTracer)
-import qualified Ouroboros.Consensus.Committee.Crypto.BLS as BLS
-
+import           Testnet.CardanoTracer (CardanoTracerConf (..), CardanoTracerRuntime (..),
+                   startCardanoTracer)
 import           Testnet.ChainWatchdog (chainForecastHorizon, chainStallWatchdog, stderrTracer)
 import           Testnet.Components.Configuration
 import qualified Testnet.Defaults as Defaults
@@ -96,7 +95,7 @@ import           Testnet.Filepath
 import           Testnet.Manifest (buildManifest, removeStaleManifest, writeManifest)
 import           Testnet.Orphans ()
 import qualified Testnet.Ping as Ping
-import           Testnet.Process.RunIO (execCli', execCli_, liftIOAnnotated, mkExecConfig, defaultExecConfig)
+import           Testnet.Process.RunIO (execCli', execCli_, liftIOAnnotated, mkExecConfig)
 import           Testnet.Property.Assert (assertExpectedSposInLedgerState)
 import           Testnet.Runtime as TR
 import           Testnet.Signal (interruptNodesOnSigINT)
@@ -105,8 +104,8 @@ import           Testnet.Types as TR hiding (shelleyGenesis)
 
 import qualified Hedgehog.Extras as H
 import           Hedgehog.Extras.Stock (sprocketSystemName)
-import           Hedgehog.Extras.Stock.IO.Network.Sprocket (sprocketArgumentName)
 import qualified Hedgehog.Extras.Stock.IO.Network.Port as H
+import           Hedgehog.Extras.Stock.IO.Network.Sprocket (sprocketArgumentName)
 import           Hedgehog.Internal.Property (failException)
 
 import           RIO (MonadUnliftIO, RIO (..), runRIO, throwString, timeout)
@@ -135,8 +134,7 @@ createTestnetEnv
     , creationNodes=TestnetNodesWithOptions{optSpoNodes, optRelayNodes}
     }
   Conf
-    { genesisHashesPolicy
-    , tempAbsPath=TmpAbsolutePath tmpAbsPath
+    { tempAbsPath=TmpAbsolutePath tmpAbsPath
     } = do
 
   -- Fresh-run rule: delete any manifest a previous run left in this directory,
@@ -152,13 +150,8 @@ createTestnetEnv
     creationOptions
     (TmpAbsolutePath tmpAbsPath)
 
-  let configurationFile = tmpAbsPath </> defaultConfigFile
-  -- Add Byron, Shelley and Alonzo genesis hashes to node configuration
-  config <- case genesisHashesPolicy of
-    WithHashes -> createConfigJson (TmpAbsolutePath tmpAbsPath) sbe
-    WithoutHashes -> pure $ createConfigJsonNoHash sbe
-
-  liftIOAnnotated . LBS.writeFile configurationFile $ A.encodePretty $ Object config
+  -- The node configuration, with the hashes of the genesis files just created
+  writeConfiguration (tmpAbsPath </> defaultConfigFile) sbe
 
   let allNodes = NEL.toList optSpoNodes ++ optRelayNodes
       numberedNodes = zip [1..] allNodes
@@ -299,10 +292,9 @@ cardanoTestnet
   -- should connect to. The tracer's lifetime is tied to the surrounding
   -- 'MonadResource' scope, and it is additionally interrupted on SIGINT
   -- alongside the nodes (see 'interruptNodesOnSigINT' below).
-  (nodeConfigFile', mTracer) <- case cardanoEnableTracer of
-    TraceDisabled -> pure (nodeConfigFile, Nothing)
+  mTracer <- case cardanoEnableTracer of
+    TraceDisabled -> pure Nothing
     TraceEnabled ip mport -> do
-      cfgFile' <- liftIOAnnotated $ enableTraceForwarding nodeConfigFile
       tracerRuntime <- startCardanoTracer $ CardanoTracerConf
         { tempAbsPath = tmpAbsPath
         , prometheusIP = ip
@@ -313,7 +305,7 @@ cardanoTestnet
       Ping.waitForSprocket 120 0.2 (tracerSprocket tracerRuntime) >>= \case
         Left err -> throwString $ "Sprocket of cardano-tracer did not come up after 120s: " <> show err
         Right _ -> pure ()
-      pure (cfgFile', Just tracerRuntime)
+      pure $ Just tracerRuntime
 
 
 
@@ -379,43 +371,18 @@ cardanoTestnet
         pure shelleyGenesis'
       else pure initialShelleyGenesis
 
+  -- Bring the genesis hashes in the node configuration in line with the genesis
+  -- files: the start times may just have been updated, and the files may have
+  -- been changed since the environment was created.
+  refreshConfigurationHashes nodeConfigFile
+
+  -- With a cardano-tracer, the nodes run on a copy of the configuration that
+  -- forwards their traces to it.
+  nodeConfigFile' <- case mTracer of
+    Nothing -> pure nodeConfigFile
+    Just _ -> liftIOAnnotated $ enableTraceForwarding nodeConfigFile
+
   let portNumbersMap = Map.fromList portNumbers
-      bLSKeyScope :: BLS.KeyScope
-      bLSKeyScope = "TESTNET"
-
-  perasSpoKeys <- forM (zip [1 :: Int ..] (NEL.toList cardanoSpoNodes)) $ \(i, _) -> do
-    let SpoNodeKeys{poolNodeKeysCold} = mkTestnetNodeKeyPaths i
-    poolId <- execCli' defaultExecConfig
-      [ "latest", "stake-pool", "id"
-      , "--cold-verification-key-file", verificationKeyFp poolNodeKeysCold
-      , "--output-hex"
-      ]
-    privateKeyContent <- liftIOAnnotated $ readFile (signingKeyFp poolNodeKeysCold)
-    privateKeyHex <- case decode (BSL8.pack privateKeyContent) of
-      (Just (Object keyMap)) -> case KeyMap.lookup "cborHex" keyMap of
-        Just (String privateKey) -> pure (Text.unpack $ Text.drop 4 privateKey)
-        _ -> throwString "Failed to parse PERAS_PRIVATE_KEY: missing cborHex field"
-      _ -> throwString "Failed to parse PERAS_PRIVATE_KEY: skey file is incorrect"
-    privateKeyBytes <- case B16.decode (BSC.pack privateKeyHex) of
-      Left err -> throwString $ "Failed to decode Peras BLS private key for pool " <> poolId <> ": " <> err
-      Right bytes -> pure bytes
-    privateKey <- case BLS.rawDeserialisePrivateKey bLSKeyScope privateKeyBytes of
-      Nothing -> throwString $ "Failed to parse Peras BLS private key for pool " <> poolId
-      Just sk -> pure sk
-    let publicKeyBytes = BLS.rawSerialisePublicKey (BLS.derivePublicKey privateKey)
-    pure (i, poolId, privateKeyHex, publicKeyBytes)
-
-  let perasOptionsByIndex :: Map.Map Int (String, String)
-      perasOptionsByIndex = Map.fromList
-        [ (i, (poolId, privateKeyHex)) | (i, poolId, privateKeyHex, _) <- perasSpoKeys ]
-
-      perasPublicKeysFile = tmpAbsPath </> "peras-public-keys.json"
-
-  liftIOAnnotated . LBS.writeFile perasPublicKeysFile . encode $
-    Map.fromList
-      [ (Text.pack poolId, Text.pack $ BSC.unpack publicKeyBytes)
-      | (_, poolId, _, publicKeyBytes) <- perasSpoKeys
-      ]
 
   rpcPortsMap <- case cardanoEnableRpc of
     RpcEnabledHttp RpcHttpOptions{rpcHttpListenPortBase = Just base}
@@ -483,10 +450,8 @@ cardanoTestnet
           , ["--grpc-enable", "--grpc-listen-address", show rpcHttpListenAddress, "--grpc-listen-port", show rpcPort]
           )
 
-    let perasOptions = Map.lookup i perasOptionsByIndex
-
     eRuntime <- runExceptT . retryOnAddressInUseError $
-      startNode (TmpAbsolutePath tmpAbsPath) nodeName testnetDefaultIpv4Address port testnetMagic (nodeBin nodeWithOptions) (perasPublicKeysFile, perasOptions) $
+      startNode (TmpAbsolutePath tmpAbsPath) nodeName testnetDefaultIpv4Address port testnetMagic (nodeBin nodeWithOptions) $
         [ "run"
         , "--config", nodeConfigFile'
         , "--topology", tmpAbsPath </> defaultNodeTopologyFile nodeName
@@ -531,16 +496,15 @@ cardanoTestnet
   -- process is interrupted
   liftIOAnnotated $ interruptNodesOnSigINT (maybe [] (pure . tracerHandle) mTracer) testnetNodes'
 
-
   -- Make sure that all nodes are healthy by waiting for a chain extension.
   -- The deadline covers the worst case in which the chain can still start: genesis start
   -- time lies at most 'startTimeOffsetSeconds' in the future, and the first block must
   -- appear within the forecast horizon after it (see 'chainForecastHorizon'), plus
   -- 'startupDetectionMarginSeconds'.
   let startupHorizon = chainForecastHorizon shelleyGenesis
-      _startupBlockTimeout =
+      startupBlockTimeout =
         startTimeOffsetSeconds + ceiling startupHorizon + startupDetectionMarginSeconds
---  mapConcurrently_ (waitForBlockThrow startupHorizon startupBlockTimeout (File nodeConfigFile')) testnetNodes'
+  mapConcurrently_ (waitForBlockThrow startupHorizon startupBlockTimeout (File nodeConfigFile')) testnetNodes'
 
   let runtime = TestnetRuntime
         { configurationFile = File nodeConfigFile'
@@ -598,14 +562,14 @@ cardanoTestnet
     mkTestnetNodeKeyPaths n = makePathsAbsolute $ Defaults.defaultSpoKeys n
 
     -- wait for new blocks or throw an exception if there are none in the timeout period
-    _waitForBlockThrow :: MonadUnliftIO m
+    waitForBlockThrow :: MonadUnliftIO m
                       => MonadCatch m
                       => DTC.NominalDiffTime -- ^ the chain's forecast horizon, for diagnostics
                       -> Int -- ^ timeout in seconds
                       -> NodeConfigFile 'In
                       -> TestnetNode
                       -> m ()
-    _waitForBlockThrow horizon timeoutSeconds nodeConfigFile node@TestnetNode{nodeName} = do
+    waitForBlockThrow horizon timeoutSeconds nodeConfigFile node@TestnetNode{nodeName} = do
       fs <- liftIO $ mkNodeConfigFs nodeConfigFile
       result <- timeout (timeoutSeconds * 1_000_000) $
         runExceptT . foldEpochState
@@ -615,9 +579,9 @@ cardanoTestnet
           QuickValidation
           (EpochNo maxBound)
           minBound
-          $ \_ slotNo blkNo -> do
+          $ \_ slotNo blockNo' -> do
             put slotNo
-            pure $ if blkNo >= 1
+            pure $ if blockNo' >= 1
                then ConditionMet -- we got one block
                else ConditionNotMet
 
@@ -640,17 +604,40 @@ cardanoTestnet
 -- | Copy and modify a node configuration file so that its @TraceOptions@
 -- enables the @Forwarder@ backend. This is required for nodes to actually
 -- forward their traces and metrics to cardano-tracer. Returns a path to the
--- modified config file.
+-- modified config file. Fails if the tracing settings are not an object in the
+-- file itself (for example a @HermodTracing@ file path), instead of dropping them.
 enableTraceForwarding :: FilePath -> IO FilePath
 enableTraceForwarding configFile = do
-  Yaml.decodeFileEither configFile >>= \case
-    Left err -> throwString $ "enableTraceForwarding: could not decode node configuration file " <> configFile <> ": " <> show err
-    Right (config :: KeyMap.KeyMap Yaml.Value) -> do
-      let config' = KeyMap.insertWith mergeTraceOptions "TraceOptions" Defaults.traceOptionsForwarding config
-      let configFile' = dropExtension configFile <> "-tracer.yaml"
-      Yaml.encodeFile configFile' config'
-      pure configFile'
+  (document, _warnings) <- readConfigurationDocument configFile
+  value' <-
+    either (\err -> throwString $ "enableTraceForwarding: " <> configFile <> ": " <> err) pure
+      . addForwarding
+      $ configurationDocumentValue document
+  (document', _warnings') <- configurationDocumentFromValue value'
+  let configFile' = dropExtension configFile <> "-tracer.yaml"
+  writeConfigurationDocument configFile' document'
+  pure configFile'
   where
+    -- The tracing settings are the @HermodTracing@ object of the @Configuration@
+    -- section. A missing one is created; any other shape is an error, because
+    -- replacing it would silently drop the tracing settings.
+    addForwarding :: Aeson.Value -> Either String Aeson.Value
+    addForwarding = \case
+      Object envelope -> case KeyMap.lookup "Configuration" envelope of
+        Just (Object configuration) -> do
+          tracing <- case KeyMap.lookup "HermodTracing" configuration of
+            Nothing -> Right mempty
+            Just (Object inline) -> Right inline
+            Just (String path) -> Left $
+              "Configuration.HermodTracing is a file path (" <> Text.unpack path
+                <> "), but the tracer needs the tracing settings inline"
+            Just _ -> Left "Configuration.HermodTracing must be an object or a file path"
+          let tracing' = KeyMap.insertWith mergeTraceOptions "TraceOptions" Defaults.traceOptionsForwarding tracing
+              configuration' = KeyMap.insert "HermodTracing" (Object tracing') configuration
+          Right . Object $ KeyMap.insert "Configuration" (Object configuration') envelope
+        _ -> Left "expected a Configuration object"
+      _ -> Left "expected a JSON or YAML object"
+
     mergeTraceOptions :: Yaml.Value -> Yaml.Value -> Yaml.Value
     mergeTraceOptions (Object forwarding) (Object existing) =
       Object $ KeyMap.unionWith mergeNamespace forwarding existing

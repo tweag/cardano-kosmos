@@ -35,6 +35,7 @@ import qualified Cardano.Network.PeerSelection.Governor.Types as Cardano
 import           Cardano.Network.PeerSelection.PeerTrustable (PeerTrustable (..))
 import           Cardano.Network.Tracing.PeerSelection ()
 import           Cardano.Network.Tracing.PeerSelectionCounters ()
+import           Cardano.Node.Configuration.CardanoConfigResolve (tracingConfigSource)
 import           Cardano.Node.Configuration.TopologyP2P ()
 import           Cardano.Node.Handlers.Shutdown (ShutdownTrace)
 import           Cardano.Node.Startup
@@ -70,6 +71,8 @@ import           Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert (Per
                    TracePerasCertDiffusionInbound, TracePerasCertDiffusionOutbound)
 import           Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote (PerasVoteDiffusion,
                    TracePerasVoteDiffusionInbound, TracePerasVoteDiffusionOutbound)
+import           Ouroboros.Consensus.Peras.Cert.Inclusion.Trace (TracePerasCertInclusionEvent)
+import           Ouroboros.Consensus.Peras.Voting.Trace (TracePerasVoteForgingEvent)
 import           Ouroboros.Consensus.Node.GSM (TraceGsmEvent)
 import qualified Ouroboros.Consensus.Node.Tracers as Consensus
 import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
@@ -187,6 +190,14 @@ runTraceDocumentationCmd
 runTraceDocumentationCmd TraceDocumentationCmd{..} = do
   docTracers tdcConfigFile tdcOutput tdMetricsHelp tdNamespaceList
 
+-- | Read the tracing configuration from a node configuration file. This command
+-- has no node, so there is no resolved configuration to use as there is at
+-- startup; 'tracingConfigSource' says how to present the file.
+resolveTracingConfig :: FilePath -> IO TraceConfig
+resolveTracingConfig fp = do
+    src <- tracingConfigSource fp
+    readConfigurationWithDefault src defaultCardanoConfig
+
 -- Have to repeat the construction of the tracers here,
 -- as the tracers are behind old tracer interface after construction in mkDispatchTracers.
 -- Can be changed, when old tracers have gone
@@ -213,7 +224,7 @@ docTracersFirstPhase :: forall blk peer remotePeer.
   -> IO (DocTracer, TraceConfig)
 docTracersFirstPhase condConfigFileName = do
     trConfig      <- case condConfigFileName of
-                        Just fn -> readConfigurationWithDefault (FromFile fn) defaultCardanoConfig
+                        Just fn -> resolveTracingConfig fn
                         Nothing -> pure defaultCardanoConfig
     let trBase    :: Logging.Trace IO FormattedMessage = docTracer (Stdout MachineFormat)
         trForward :: Logging.Trace IO FormattedMessage = docTracer Forwarder
@@ -512,6 +523,20 @@ docTracersFirstPhase condConfigFileName = do
     perasVoteDiffusionTrDoc <- documentTracer (perasVoteDiffusionTr ::
       Logging.Trace IO (BlockFetch.TraceLabelPeer peer
         (TraceSendRecv (PerasVoteDiffusion blk))))
+
+    perasCertInclusionTr <- mkCardanoTracer
+                trBase trForward mbTrEKG
+                ["Peras", "Cert", "Inclusion"]
+    configureTracers configReflection trConfig [perasCertInclusionTr]
+    perasCertInclusionTrDoc <- documentTracer (perasCertInclusionTr ::
+      Logging.Trace IO (TracePerasCertInclusionEvent blk))
+
+    perasVoteForgingTr <- mkCardanoTracer
+                trBase trForward mbTrEKG
+                ["Peras", "Vote", "Forging"]
+    configureTracers configReflection trConfig [perasVoteForgingTr]
+    perasVoteForgingTrDoc <- documentTracer (perasVoteForgingTr ::
+      Logging.Trace IO (TracePerasVoteForgingEvent blk))
 
 -- Node to client
 
@@ -835,6 +860,8 @@ docTracersFirstPhase condConfigFileName = do
             <> perasVoteOutboundTrDoc
             <> perasCertDiffusionTrDoc
             <> perasVoteDiffusionTrDoc
+            <> perasCertInclusionTrDoc
+            <> perasVoteForgingTrDoc
 -- NodeToClient
             <> keepAliveClientTrDoc
             <> chainSyncTrDoc

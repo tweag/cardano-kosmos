@@ -20,24 +20,31 @@ module Ouroboros.Consensus.Storage.LeiosDB.API
   , awaitAll
   , withWriter
   , allocateWriter
+  , storeForgedEb
   , CompletedEbs
   , TxOffset
   ) where
 
 import Cardano.Slotting.Slot (SlotNo)
 import Control.Concurrent.Class.MonadSTM.Strict (StrictTChan)
+import Control.Monad (void)
 import Control.ResourceRegistry (ResourceRegistry, allocate)
 import Data.ByteString (ByteString)
-import Data.Foldable (traverse_)
+import Data.Foldable (toList, traverse_)
 import GHC.Stack (HasCallStack)
 import NoThunks.Class (OnlyCheckWhnfNamed (..))
 import Ouroboros.Consensus.Leios.Types
   ( BytesSize
   , EndorserBlock
   , EndorserBlockHash
-  , LeiosPoint
+  , ForgedEndorserBlock
+  , LeiosPoint (..)
   , TxHash
   , TxOffset
+  , encodeEndorserBlockSize
+  , endorserBlockHash
+  , forgedEbBody
+  , forgedEbTxs
   )
 import Ouroboros.Consensus.Storage.LeiosDB.Trace (LeiosDbStats (..))
 import Ouroboros.Consensus.Util.IOLike (IOLike, MonadThrow, NoThunks (..), bracket)
@@ -56,7 +63,7 @@ data LeiosDbHandle m = LeiosDbHandle
   -- ^ New EBs and EB closures as they are stored, from the moment of
   -- subscription.
   -- TODO: make return type more descriptive (e.g. Subscription { getNext :: STM m LeiosEbNotification })
-  , leiosDbGarbageCollect :: HasCallStack => SlotNo -> m ()
+  , garbageCollect :: HasCallStack => SlotNo -> m ()
   -- ^ Trigger garbage collection of the LeiosDB.
   --
   --   This function does not do have to do the actual GC, but rather
@@ -78,6 +85,11 @@ data LeiosDbReader m = LeiosDbReader
   { closeReader :: m ()
   , lookupEbBody :: HasCallStack => EndorserBlockHash -> m [(TxHash, BytesSize)]
   -- ^ The EB "body": tx hashes and sizes in order, no tx bytes.
+  --
+  -- TODO FIXME Store and return the bytes the EB arrived in. An EB rebuilt
+  -- from these references has this node's preferred encoding, so one that
+  -- arrived in another encoding would no longer match the hash its ranking
+  -- block announced.
   , lookupEbClosure :: HasCallStack => EndorserBlockHash -> m (Maybe [(TxHash, ByteString)])
   -- ^ The EB "closure": tx hashes /and/ their bytes, or 'Nothing' if the EB is
   -- not complete.
@@ -108,6 +120,11 @@ data LeiosDbWriter m = LeiosDbWriter
   -- ^ Close writer and flush all remaining writes.
   , writeEbPoint :: HasCallStack => LeiosPoint -> BytesSize -> m (Promise m ())
   -- ^ Record an announced EB's point and expected size.
+  --
+  -- TODO When this 'LeiosPoint' is its election's focus and the DB already
+  -- holds the EB's body, send 'AcquiredEb' for it, and 'AcquiredEbTxs' too if
+  -- the DB holds every tx, as 'LeiosEbNotification' requires. Nothing in the
+  -- node calls 'writeEbPoint' yet.
   , writeEbBody :: HasCallStack => LeiosPoint -> EndorserBlock -> m (Promise m CompletedEbs)
   -- ^ Persist an EB body. Returns any EBs whose closure this completed.
   --
@@ -153,14 +170,22 @@ awaitAll = traverse_ await
 -- | EBs whose tx closure became complete as a result of a write.
 type CompletedEbs = [LeiosPoint]
 
+-- | What the DB tells its subscribers as it acquires EBs.
+--
+-- Each notification is sent at every 'LeiosPoint' of the EB that is its
+-- election's focus and whose slot is not older than the ImmutableDB tip's, even
+-- one that becomes the focus after the EB was acquired. An election's focus is
+-- the first announcement in it that the node accepts, until a verified
+-- certificate names another, so every point that a block certifies is a focus.
+-- So a subscriber hears of the EB's youngest focus.
 data LeiosEbNotification
-  = -- | An EB body was written.
+  = -- | The DB holds the EB's body.
     AcquiredEb
       -- | the EB's point
       LeiosPoint
       -- | its size in bytes
       BytesSize
-  | -- | Every tx of the EB is now in the DB.
+  | -- | The DB holds the EB's body and every tx it lists.
     AcquiredEbTxs
       -- | the EB's point
       LeiosPoint
@@ -176,3 +201,21 @@ allocateReader registry db = snd <$> allocate registry (\_ -> openReader db) clo
 
 allocateWriter :: IOLike m => ResourceRegistry m -> LeiosDbHandle m -> m (LeiosDbWriter m)
 allocateWriter registry db = snd <$> allocate registry (\_ -> openWriter db) closeWriter
+
+-- | Write an endorser block that this node forged to the LeiosDB.
+--
+-- The slot is the slot of the ranking block that announces the endorser block.
+-- That ranking block must announce the 'endorserBlockHash' and the
+-- 'encodeEndorserBlockSize' of the endorser block body.
+--
+-- This function does not await the writes. On SQLite, it blocks while the
+-- write queue is full, and if a write fails, the node stops. Peers can get the
+-- header before the endorser block is stored.
+storeForgedEb :: Monad m => LeiosDbWriter m -> SlotNo -> ForgedEndorserBlock -> m ()
+storeForgedEb writer slot forgedEb = do
+  _ <- writeEbPoint writer point (encodeEndorserBlockSize body)
+  _ <- writeEbBody writer point body
+  void $ writeTxs writer point (zip [0 ..] (toList (forgedEbTxs forgedEb)))
+ where
+  body = forgedEbBody forgedEb
+  point = MkLeiosPoint slot (endorserBlockHash body)

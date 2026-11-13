@@ -12,6 +12,7 @@ module Cardano.Testnet.Test.Gov.Transaction.HashMismatch
 import           Cardano.Api as Api
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -41,14 +42,16 @@ import qualified Hedgehog.Extras as H
 hprop_transaction_build_wrong_hash :: Property
 hprop_transaction_build_wrong_hash = integrationRetryWorkspace 2 "wrong-hash" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
 
-  conf@Conf { tempAbsPath } <- H.noteShowM $ mkConf tempAbsBasePath'
+  conf@Conf { tempAbsPath } <- H.noteShow $ mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
+  let era = testEra
+
+      ceo = convert era
+      sbe = convert era
       asbe = AnyShelleyBasedEra sbe
       eraName = eraToString sbe
       creationOptions = def

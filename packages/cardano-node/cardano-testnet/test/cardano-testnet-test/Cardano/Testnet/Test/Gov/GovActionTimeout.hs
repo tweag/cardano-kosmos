@@ -14,6 +14,7 @@ import           Cardano.Api as Api
 import           Cardano.Api.Ledger (EpochInterval (..))
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -42,15 +43,16 @@ hprop_check_gov_action_timeout :: Property
 hprop_check_gov_action_timeout = integrationRetryWorkspace 2 "gov-action-timeout" $ \tempAbsBasePath' ->
                                  H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   -- Create default testnet
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
+  let era = testEra
+      ceo = convert era
+      sbe = convert era
       eraName = eraToString sbe
       asbe = AnyShelleyBasedEra sbe
       creationOptions = def

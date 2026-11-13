@@ -69,7 +69,6 @@ import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory)
 import Ouroboros.Consensus.HeaderValidation (HeaderWithTime)
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsProtocol
-import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
 import Ouroboros.Consensus.Leios.Types
   ( EndorserBlock
   , LeiosPoint
@@ -85,6 +84,7 @@ import Ouroboros.Consensus.Leios.Types
   , encodeLeiosVote
   , maxTxsPerEndorserBlock
   )
+import Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface (MatchedBlock)
 import Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
   ( ChainSyncStateView (..)
@@ -267,7 +267,7 @@ data Handlers m addr blk = Handlers
       NodeToNodeVersion ->
       ControlMessageSTM m ->
       FetchedMetricsTracer m ->
-      BlockFetchClient (HeaderWithTime blk) blk blk m ()
+      BlockFetchClient (HeaderWithTime blk) blk (MatchedBlock blk) m ()
   , hBlockFetchServer ::
       ConnectionId addr ->
       NodeToNodeVersion ->
@@ -359,7 +359,6 @@ mkHandlers ::
   , BlockSupportsPeras blk
   , LedgerSupportsMempool blk
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , ConvertRawHash blk
   , HasHardForkHistory blk
   , Ord addrNTN
@@ -389,6 +388,7 @@ mkHandlers
     , getGsmState
     , getBlockchainTime
     , getLeiosAnnounceState
+    , getLeiosVoteState
     , getLeiosNotifyLog
     }
   txSubmissionLogicVersion =
@@ -497,11 +497,13 @@ mkHandlers
       , hKeepAliveServer = \_version _peer -> keepAliveServer
       , hPeerSharingClient = \_version controlMessageSTM _peer -> peerSharingClient controlMessageSTM
       , hPeerSharingServer = \_version _peer -> peerSharingServer getPeerSharingAPI
-      , hLeiosNotifyClient = \_version controlMessageSTM _peer ->
+      , hLeiosNotifyClient = \_version controlMessageSTM peer ->
           leiosNotifyClient
+            (contramap (TraceLabelPeer peer) (Node.leiosNotifyClientTracer tracers))
             getTopLevelConfig
             getChainDB
             getLeiosAnnounceState
+            getLeiosVoteState
             getBlockchainTime
             systemTime
             chainSyncFutureCheck
@@ -534,6 +536,9 @@ data Codecs blk addr e m bCS bSCS bBF bSBF bTX bPCD bPVD bKA bPS bLN bLF = Codec
   , cPeerSharingCodec :: Codec (PeerSharing addr) e m bPS
   , cLeiosNotifyCodec :: Codec (LeiosNotify LeiosPoint (Header blk) LeiosVote) e m bLN
   , cLeiosFetchCodec :: AnnotatedCodec (LeiosFetch LeiosPoint EndorserBlock LeiosTx) e m bLF
+  -- ^ Unlike the others, an 'AnnotatedCodec', because a received
+  -- 'EndorserBlock' keeps the bytes it arrived in. Its driver joins the chunks a
+  -- message arrives in, so 'mkApps' requires a 'Monoid' of @bLF@.
   }
 
 -- | Protocol codecs for the node-to-node protocols

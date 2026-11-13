@@ -344,6 +344,7 @@ instance BlockSupportsProtocol BlockA where
 
 instance LedgerSupportsProtocol BlockA where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
 
 -- NOTE: BlockA is only ever used wrapped in the hard fork combinator (which
@@ -589,6 +590,9 @@ instance NodeInitStorage BlockA where
 
 instance BlockSupportsMetrics BlockA where
   isSelfIssued = isSelfIssuedConstUnknown
+
+instance BlockSupportsLeios BlockA where
+  blockLeiosCert = defaultBlockLeiosCert
 
 deriving via
   SelectViewDiffusionPipelining BlockA

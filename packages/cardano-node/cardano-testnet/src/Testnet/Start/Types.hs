@@ -43,11 +43,11 @@ module Testnet.Start.Types
 
   , NodeLoggingFormat(..)
   , Conf(..)
-  , GenesisHashesPolicy (..)
   , NodeConfiguration
   , NodeConfigurationYaml
-  , mkConf
-  , mkConfigAbs
+  , mkConfig
+  , mkConfigAbsolute
+  , defaultTestnetDir
   ) where
 
 import           Cardano.Api hiding (cardanoEra)
@@ -69,16 +69,12 @@ import           Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Text as Text
 import           Data.Word
-import           GHC.Stack
 import qualified Network.HTTP.Simple as HTTP
 import           Network.Socket (PortNumber)
 import           System.Directory (createDirectory, doesDirectoryExist, makeAbsolute)
 import           System.FilePath (addTrailingPathSeparator)
 
 import           Testnet.Filepath
-
-import           Hedgehog (MonadTest)
-import qualified Hedgehog.Extras as H
 
 -- | The default value for the --testnet-magic option for `cardano-testnet`
 defaultTestnetMagic :: Int
@@ -96,7 +92,7 @@ data CardanoTestnetCliOptions
 -- is given: create a new environment and then start the testnet.
 data NoUserProvidedEnvOptions = NoUserProvidedEnvOptions
   { noEnvCreationOptions :: TestnetCreationOptions
-  , noEnvOutputDir :: Maybe FilePath -- ^ @--output-dir@, uses a temporary directory if absent
+  , noEnvOutputDir :: Maybe FilePath -- ^ @--output-dir@, uses @./testnet@ if absent
   , noEnvRuntimeOptions :: TestnetRuntimeOptions
   } deriving (Eq, Show)
 
@@ -213,7 +209,7 @@ data TestnetCreationOptions = TestnetCreationOptions
 instance Default TestnetCreationOptions where
   def = TestnetCreationOptions
     { creationNodes = cardanoDefaultTestnetNodesWithOptions
-    , creationEra = AnyShelleyBasedEra ShelleyBasedEraConway
+    , creationEra = AnyShelleyBasedEra ShelleyBasedEraDijkstra
     , creationMaxSupply = 100_000_020_000_000
     , creationNumDReps = 3
     , creationGenesisOptions = def
@@ -237,7 +233,7 @@ data TestnetRuntimeOptions = TestnetRuntimeOptions
 
 instance Default TestnetRuntimeOptions where
   def = TestnetRuntimeOptions
-    { runtimeEnableNewEpochStateLogging = False
+    { runtimeEnableNewEpochStateLogging = True
     , runtimeEnableRpc = RpcDisabled
     , runtimeEnableTracer = TraceDisabled
     , runtimeKESSource = def
@@ -341,36 +337,30 @@ data NodeConfiguration
 
 type NodeConfigurationYaml = File NodeConfiguration InOut
 
-data GenesisHashesPolicy = WithHashes | WithoutHashes
-  deriving (Eq, Show)
-
 data Conf = Conf
-  { genesisHashesPolicy :: GenesisHashesPolicy
-  , tempAbsPath :: TmpAbsolutePath
+  { tempAbsPath :: TmpAbsolutePath
   , updateTimestamps :: UpdateTimestamps
   } deriving (Eq, Show)
 
--- |  Same as mkConfig except that it renders the path
--- when failing in a property test.
-mkConf :: (HasCallStack, MonadTest m) => FilePath -> m Conf
-mkConf tempAbsPath' = withFrozenCallStack $ do
-  H.note_ tempAbsPath'
-  pure $ mkConfig tempAbsPath'
-
--- | Create a 'Conf' from a temporary absolute path, with Genesis Hashes enabled
--- and updating time stamps disabled.
+-- | Create a 'Conf' from a temporary absolute path, with updating time stamps
+-- disabled. This function is pure: the directory is
+-- neither created nor checked for existence.
 mkConfig :: FilePath -> Conf
 mkConfig tempAbsPath' =
   Conf
-    { genesisHashesPolicy = WithHashes
-    , tempAbsPath = TmpAbsolutePath (addTrailingPathSeparator tempAbsPath')
+    { tempAbsPath = TmpAbsolutePath (addTrailingPathSeparator tempAbsPath')
     , updateTimestamps = DontUpdateTimestamps
     }
 
--- | Create a 'Conf' from an absolute path, with Genesis Hashes enabled
--- and updating time stamps disabled.
-mkConfigAbs :: FilePath -> IO Conf
-mkConfigAbs userOutputDir = do
+-- | The directory of the testnet when none is given: the @cardano@ command
+-- creates it, and the @status@ command looks into it.
+defaultTestnetDir :: FilePath
+defaultTestnetDir = "./testnet"
+
+-- | Like 'mkConfig', except that the path is first made absolute, and the
+-- directory is created if it doesn't exist yet.
+mkConfigAbsolute :: FilePath -> IO Conf
+mkConfigAbsolute userOutputDir = do
   absUserOutputDir <-  makeAbsolute userOutputDir
   dirExists <- doesDirectoryExist absUserOutputDir
   let conf = mkConfig absUserOutputDir

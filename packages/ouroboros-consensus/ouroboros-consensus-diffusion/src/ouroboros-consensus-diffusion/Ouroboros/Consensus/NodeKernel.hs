@@ -5,7 +5,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 module Ouroboros.Consensus.NodeKernel
   ( -- * Node kernel
@@ -33,7 +32,6 @@ import Cardano.Network.PeerSelection.Bootstrap (UseBootstrapPeers)
 import Cardano.Network.PeerSelection.LocalRootPeers
   ( OutboundConnectionsState (..)
   )
-import Cardano.Slotting.Slot (WithOrigin (..))
 import qualified Control.Concurrent.Class.MonadSTM as LazySTM
 import qualified Control.Concurrent.Class.MonadSTM.Strict as StrictSTM
 import Control.DeepSeq (force)
@@ -60,6 +58,8 @@ import Data.Void (Void)
 import Data.Word (Word64)
 import Ouroboros.Consensus.Block hiding (blockMatchesHeader)
 import Ouroboros.Consensus.BlockchainTime
+import Ouroboros.Consensus.Committee.Crypto (PrivateKey)
+import Ouroboros.Consensus.Committee.Types (PoolId)
 import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.Genesis.Governor (gddWatcher)
 import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory)
@@ -76,6 +76,7 @@ import Ouroboros.Consensus.Leios.NotifyLog
   , newNotifyLog
   , notifyLogPruner
   )
+import Ouroboros.Consensus.Leios.VoteState (VoteState, newVoteState, votePruner)
 import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface as BlockFetchClientInterface
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
@@ -90,6 +91,9 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck
   ( ClockSkew
   , SomeHeaderInFutureCheck
+  )
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( LeiosAnnouncementAgeLimits
   )
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State
   ( LeiosNotifyPeerState
@@ -112,7 +116,6 @@ import Ouroboros.Consensus.Peras.Context
   , runQueryWithContextHandle
   )
 import Ouroboros.Consensus.Peras.Voting.Rules (PerasVotingRulesDecision (..))
-import Ouroboros.Consensus.Peras.Weight (weightBoostOfFragment)
 import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Storage.ChainDB.API
   ( ChainDB
@@ -120,7 +123,12 @@ import Ouroboros.Consensus.Storage.ChainDB.API
 import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
 import Ouroboros.Consensus.Storage.ChainDB.Init (InitChainDB)
 import qualified Ouroboros.Consensus.Storage.ChainDB.Init as InitChainDB
-import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
+import Ouroboros.Consensus.Storage.LeiosDB.API
+  ( LeiosDbHandle
+  , LeiosDbWriter (..)
+  , openWriter
+  , storeForgedEb
+  )
 import Ouroboros.Consensus.Util.AnchoredFragment
   ( preferAnchoredCandidate
   )
@@ -189,7 +197,13 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
   -- ^ The node's mempool
   , getTopLevelConfig :: TopLevelConfig blk
   -- ^ The node's top-level static configuration
-  , getFetchClientRegistry :: FetchClientRegistry (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+  , getFetchClientRegistry ::
+      FetchClientRegistry
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
   -- ^ The fetch client registry, used for the block fetch clients.
   , getKeepAliveRegistry :: KeepAliveRegistry (ConnectionId addrNTN) m
   -- ^ The keep alive registry, used for the block fetch clients.
@@ -229,6 +243,9 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
   -- 'leiosNotifyPruner' prunes.
   , getLeiosAnnounceState :: AnnounceState m blk
   -- ^ The announcements the node has accepted, from whichever peer.
+  , getLeiosVoteState :: VoteState m blk
+  -- ^ The votes the node has accepted from any peer, which decides which of
+  -- them it relays.
   , getLeiosNotifyLog :: NotifyLog m blk
   -- ^ What the node relays to its downstream peers over LeiosNotify.
   }
@@ -244,6 +261,8 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , chainDB :: ChainDB m blk
   , leiosDB :: LeiosDbHandle m
   -- ^ Whoever opened it closes it, once the node kernel's threads have stopped.
+  , leiosAnnouncementAgeLimits :: LeiosAnnouncementAgeLimits
+  -- ^ How old an announcement the node relays or accepts.
   , initChainDB :: StorageConfig blk -> InitChainDB m blk -> m ()
   , chainSyncFutureCheck :: SomeHeaderInFutureCheck m blk
   , maxClockSkew :: ClockSkew
@@ -268,38 +287,6 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , getDiffusionPipeliningSupport :: DiffusionPipeliningSupport
   }
 
-advertController ::
-  (IOLike m, StandardHash blk, HasHeader (Header blk)) =>
-  Tracer m TestnetTrace -> ChainDB m blk -> m b
-advertController tracer chainDB = forever $ do
-  certs <- atomically $ ChainDB.getPerasCertIds chainDB
-  votes <- atomically $ ChainDB.getPerasVoteIds chainDB
-  currChain <- atomically $ ChainDB.getCurrentChain chainDB
-  perasWeights0 <- atomically $ ChainDB.getPerasWeightSnapshot chainDB
-  point <- atomically $ ChainDB.getTipPoint chainDB
-  blockNum0 <- atomically $ ChainDB.getTipBlockNo chainDB
-  let chainLen = AF.length $ currChain
-      perasWeights = forgetFingerprint perasWeights0
-      boost = unPerasWeight (weightBoostOfFragment perasWeights currChain)
-      (slotNo, blockHashStr) =
-        case point of
-          GenesisPoint -> (0, "")
-          BlockPoint s h -> (unSlotNo s, show h)
-      blockNum =
-        case blockNum0 of
-          Origin -> 0
-          At bn -> unBlockNo bn
-  traceWith tracer $
-    AdvertLog
-      (Set.size certs)
-      (Set.size votes)
-      chainLen
-      boost
-      slotNo
-      blockHashStr
-      blockNum
-  SI.threadDelay 3
-
 initNodeKernel ::
   forall m addrNTN addrNTC blk.
   ( IOLike m
@@ -319,6 +306,7 @@ initNodeKernel
     , tracers
     , chainDB
     , leiosDB
+    , leiosAnnouncementAgeLimits
     , initChainDB
     , blockFetchConfiguration
     , btime
@@ -330,7 +318,6 @@ initNodeKernel
     , miniProtocolParameters
     , systemTime
     } = do
-
     -- using a lazy 'TVar', 'BlockForging' does not have a 'NoThunks' instance.
     blockForgingVar :: LazySTM.TMVar m [MkBlockForging m blk] <- LazySTM.newTMVarIO []
     initChainDB (configStorage cfg) (InitChainDB.fromFull chainDB)
@@ -459,10 +446,6 @@ initNodeKernel
       forkLinkedThread registry "NodeKernel.blockForging" $
         blockForgingController st (LazySTM.takeTMVar blockForgingVar)
 
-    void $
-      forkLinkedThread registry "NodeKernel.objDiffusionAdvert" $
-        advertController (testnetTracer tracers) chainDB
-
     -- Run the block fetch logic in the background. This will call
     -- 'addFetchedBlock' whenever a new block is downloaded.
     void $
@@ -476,11 +459,15 @@ initNodeKernel
           blockFetchConfiguration
 
     leiosNotifyLog <- newNotifyLog
-    leiosAnnounceState <- newAnnounceState leiosNotifyLog
+    leiosAnnounceState <- newAnnounceState leiosAnnouncementAgeLimits leiosNotifyLog
+    leiosVoteState <- newVoteState (leiosVoteStateTracer tracers) leiosAnnounceState leiosNotifyLog
     leiosNotifyClientStates <- newTVarIO Map.empty
     void $
       forkLinkedThread registry "NodeKernel.leiosNotifyPruner" $
         leiosNotifyPruner chainDB leiosAnnounceState leiosNotifyClientStates
+    void $
+      forkLinkedThread registry "NodeKernel.leiosVotePruner" $
+        votePruner leiosVoteState systemTime
     void $
       forkLinkedThread registry "NodeKernel.notifyLogPruner" $
         notifyLogPruner systemTime leiosNotifyLog
@@ -505,6 +492,9 @@ initNodeKernel
                   (perasVoteForgingTracer tracers)
                   chainDB
                   systemTime
+                  -- There is no source of Peras voting credentials yet, so
+                  -- this node does not vote.
+                  Nothing
                   roundInfo
 
     return
@@ -532,6 +522,7 @@ initNodeKernel
         , getTxDecisionPolicy = txDecisionPolicy miniProtocolParameters
         , getLeiosNotifyClientStates = leiosNotifyClientStates
         , getLeiosAnnounceState = leiosAnnounceState
+        , getLeiosVoteState = leiosVoteState
         , getLeiosNotifyLog = leiosNotifyLog
         }
    where
@@ -571,9 +562,21 @@ data InternalState m addrNTN addrNTC blk = IS
   , registry :: ResourceRegistry m
   , btime :: BlockchainTime m
   , chainDB :: ChainDB m blk
+  , leiosDB :: LeiosDbHandle m
   , blockFetchInterface ::
-      BlockFetchConsensusInterface (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
-  , fetchClientRegistry :: FetchClientRegistry (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+      BlockFetchConsensusInterface
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
+  , fetchClientRegistry ::
+      FetchClientRegistry
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
   , keepAliveRegistry :: KeepAliveRegistry (ConnectionId addrNTN) m
   , varChainSyncHandles :: ChainSyncClientHandleCollection (ConnectionId addrNTN) m blk
   , varGsmState :: StrictTVar m GSM.GsmState
@@ -596,6 +599,7 @@ initInternalState
   NodeKernelArgs
     { tracers
     , chainDB
+    , leiosDB
     , registry
     , cfg
     , blockFetchSize
@@ -638,7 +642,12 @@ initInternalState
             getUseBootstrapPeers
             (GSM.gsmStateToLedgerJudgement <$> readTVar varGsmState)
         blockFetchInterface ::
-          BlockFetchConsensusInterface (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+          BlockFetchConsensusInterface
+            (ConnectionId addrNTN)
+            (HeaderWithTime blk)
+            blk
+            (BlockFetchClientInterface.MatchedBlock blk)
+            m
         blockFetchInterface =
           BlockFetchClientInterface.mkBlockFetchConsensusInterface
             (dbfTracer tracers)
@@ -668,9 +677,9 @@ forkBlockForging IS{..} (MkBlockForging blockForgingM) =
   forkLinkedWatcherAllocate
     registry
     label
-    blockForgingMLabel
-    finalize
-    ( \bf -> knownSlotWatcher btime $
+    allocateForging
+    finalizeForging
+    ( \(bf, leiosDbWriter) -> knownSlotWatcher btime $
         \currentSlot ->
           withEarlyExit_ $
             forge
@@ -681,17 +690,23 @@ forkBlockForging IS{..} (MkBlockForging blockForgingM) =
               mempool
               bf
               includePerasCert
-              (\_ _ -> pure ())
+              (storeForgedEb leiosDbWriter . blockSlot)
               currentSlot
     )
  where
   label :: String
   label = "NodeKernel.blockForging"
 
-  blockForgingMLabel = do
+  allocateForging = do
     bf <- blockForgingM
     labelThisThread $ Text.unpack $ forgeLabel bf
-    pure bf
+    leiosDbWriter <- openWriter leiosDB
+    pure (bf, leiosDbWriter)
+
+  -- 'finalize' erases the KES key, so it runs first: 'closeWriter' waits for
+  -- the LeiosDB write queue.
+  finalizeForging (bf, leiosDbWriter) =
+    finalize bf `finally` closeWriter leiosDbWriter
 
   -- Decide if we need to include a Peras certificate in the block we are about
   -- to forge. This is a no-op unless the Peras feature flag is enabled.
@@ -933,27 +948,18 @@ perasVoteForgingController ::
   Tracer m (TracePerasVoteForgingEvent blk) ->
   ChainDB m blk ->
   SystemTime m ->
+  -- | Our pool ID and Peras private key, if we have them
+  Maybe (PoolId, PrivateKey (PerasCrypto blk)) ->
   (PerasRoundNo, Word64) ->
   WithEarlyExit m ()
 perasVoteForgingController
   perasVoteForgingTracer
   chainDB
   systemTime
+  mbCredentials
   (roundNo, slotInRound) = do
-    -- Get crypto data from environment variables
-    -- TODO: move the code outside of the vote forging controller once
-    -- they are properly obtained from the ledger/context.
-    poolId <- case readPerasPoolIdFromEnv (Proxy @blk) of
-      Left err -> do
-        lift $ traceWith perasVoteForgingTracer $ TracePerasVotingCantReadEnv err
-        exitEarly
-      Right poolId -> pure poolId
-
-    privateKey <- case readPerasPrivateKeyFromEnv (Proxy @blk) of
-      Left err -> do
-        lift $ traceWith perasVoteForgingTracer $ TracePerasVotingCantReadEnv err
-        exitEarly
-      Right privateKey -> pure privateKey
+    -- Without voting credentials, we cannot vote.
+    (poolId, privateKey) <- maybe exitEarly pure mbCredentials
 
     -- We run all 3 STM computations in a WriterT monad so that we can have proper logging,
     -- while keeping everything in the same transaction. We also use MaybeT because there is

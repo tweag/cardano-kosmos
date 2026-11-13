@@ -1,5 +1,88 @@
 # Changelog for cardano-api
 
+## 11.12.0.0 -- 2026-11-05
+
+- Require ouroboros-consensus 5.4, cardano-ledger-core 1.23 and cardano-ledger-alonzo 1.18. `AlonzoEraOnwardsConstraints` and `EraCommonConstraints` now include `Inject (AlonzoContextError era) (ContextError era)`.
+  (breaking)
+  [PR 1408](https://github.com/intersectmbo/cardano-api/pull/1408)
+
+- Experimental `readAnyScriptBytes` and `readFileAnyScript` read JSON simple scripts, including guards, in the Dijkstra era instead of crashing.
+  (bugfix)
+  [PR 1404](https://github.com/intersectmbo/cardano-api/pull/1404)
+
+- Extend `IntroducedInDijkstraPParams` with minimum pool margin, maximum pledge leverage, all six Peras parameters, and reference-input costs per multi-asset policy and datum byte, preserving these updates in ledger conversion and CBOR serialisation. Re-export `MaxPledgeLeverage(..)` and `SlotInterval(..)` from `Cardano.Api.Ledger`. Callers constructing the record must supply all ten new fields; use `SNothing` for unchanged parameters and `SJust (MaxPledgeLeverage SNothing)` to remove the pledge leverage limit.
+  (breaking)
+  [PR 1388](https://github.com/intersectmbo/cardano-api/pull/1388)
+
+- `calcMinFeeRecursive` in `Cardano.Api.Experimental` no longer fails with `FeeCalculationDidNotConverge` when the change output's lovelace amount sits near a CBOR integer width boundary, such as 2^32 lovelace. It now returns a balanced transaction in that case. The returned fee can be above the minimum fee by up to `4 * txFeePerByte` lovelace (176 lovelace with mainnet parameters). A supplied fee above that range is still reset to the minimum fee. The signature and exports are unchanged.
+  (bugfix)
+  [PR 1120](https://github.com/intersectmbo/cardano-api/pull/1120)
+
+## 11.11.0.0 -- 2026-10-22
+
+- Add ScriptGuardWitness for native and Plutus V4 guards in experimental Dijkstra transactions and sub-transactions, with balancing and fee estimation accounting for guard scripts. The guard fields and getters (bcGuards, txGuards, subTxGuards), setTxGuards, and the TxBodyContent and SubTxBodyContent pattern constructors now use opaque, insertion-ordered TxGuards era instead of OSet (Credential Guard). Migrate existing credentials by passing ordered (credential, Nothing) pairs to mkTxGuards, or supply Just (NativeGuardWitness witness) or Just (PlutusGuardWitness witness) for script guards. Handle its Either TxGuardsError (TxGuards era) result for duplicate credentials, script witnesses supplied for key credentials, and mismatching inline script hashes. Use emptyTxGuards for no guards and GHC.Exts.toList to inspect ordered credential/witness pairs via the derived IsList instance; fromList constructs guards without mkTxGuards validation. Update exhaustive pattern matches for the new AnyPlutusGuardingScriptWitness, WitGuard, GuardItem, and ScriptWitnessIndexGuarding constructors; ScriptWitnessIndexGuarding is also exported through the stable Cardano.Api module.
+  (breaking)
+  [PR 1381](https://github.com/intersectmbo/cardano-api/pull/1381)
+
+## 11.10.0.0 -- 2026-10-21
+
+- `readNodeConfig` and `initialLedgerState` now read node configurations with cardano-config. They accept both the old flat format and the new cardano-config format.
+  `readNodeConfig` now also reads the genesis files, and genesis hashes are now required.
+  A configuration is also rejected if it sets `ExperimentalHardForksEnabled` without a `DijkstraGenesisFile`, or if its tracing section cannot be read.
+  With `ExperimentalHardForksEnabled`, the Dijkstra genesis that is used is the one that the configuration specifies, instead of the example one.
+  Without `ExperimentalHardForksEnabled`, `TestDijkstraHardForkAtEpoch` is now ignored, as in the node.
+  `readNodeConfig` now fails with a `NodeConfigError` instead of `Text`; it carries cardano-config's errors.
+  `readNodeConfig` now also returns cardano-config's warnings, such as unknown keys.
+  `NodeConfig` is now a newtype around cardano-config's `NodeConfiguration` (`ncConfiguration`); its old fields are now functions with the same names.
+  `NodeConfig` no longer has a `FromJSON` instance: use `readNodeConfig`.
+  `PBftSignatureThreshold` and `LastKnownBlockVersion-Major`/`-Minor`/`-Alt` are no longer read, so `ncPBftSignatureThreshold` is always `Nothing` (the consensus default) and `ncByronProtocolVersion` is always 1.0.0; both are deprecated. `cardano-api` does not use these two values when reading or applying blocks.
+  `readByronGenesisConfig`, `readShelleyGenesisConfig`, `readAlonzoGenesisConfig` and `readConwayGenesisConfig` are now plain functions of `NodeConfig`.
+  `ncByronGenesisHash`, `ncShelleyGenesisHash`, `ncAlonzoGenesisHash` and `ncConwayGenesisHash` now return the hash, not a `Maybe`.
+  `GenesisConfigError` keeps only `NECardanoConfig`.
+  (breaking)
+  [PR 1379](https://github.com/intersectmbo/cardano-api/pull/1379)
+
+- The PlutusV4 cost model in `dijkstraGenesisDefaults` now has `costModelInitParamCount PlutusV4` parameters instead of all of them.
+  (bugfix)
+  [PR 1378](https://github.com/intersectmbo/cardano-api/pull/1378)
+
+## 11.9.0.0 -- 2026-10-13
+
+- Converting a simple script that contains a guard to a script for any era before Dijkstra (Shelley to Conway) now fails cleanly instead of crashing, and the script is reported as unsupported in that era, for example when it is used as a reference script. Parsing a simple script from JSON now reports the error of the script type that was given, where before any malformed script was reported as a missing `guard` script. An unknown script type now produces an error that names it and lists the valid types. Fee estimation in the experimental API now counts the signatures required by key-hash guards in the transaction body in the Dijkstra era, where before the fee was too low by one signature per such key and the ledger rejected the transaction. A key that is both a guard and an extra required signer is counted once.
+  (bugfix)
+  [PR 1376](https://github.com/intersectmbo/cardano-api/pull/1376)
+
+- Add a `RequireGuard` constructor to `SimpleScript` carrying a ledger `Credential Guard`, so simple scripts can express the Dijkstra native script guard case. Adds `toDijkstraNativeScript` and `fromDijkstraNativeScript`, a `"guard"` JSON tag delegating to the ledger `Credential` encoding, and guard-aware key witness estimation. Pre-Dijkstra conversion via `toAllegraTimelock` errors on a guard.
+  (breaking, feature)
+  [PR 1374](https://github.com/intersectmbo/cardano-api/pull/1374)
+
+- `estimateBalancedTxBody` (in both `Cardano.Api` and `Cardano.Api.Experimental`) now accounts for native assets in the declared total UTxO value: the change output keeps the tokens that are not sent to other outputs, so `cardano-cli transaction build-estimate` with a multi-asset `--total-utxo-value` balances correctly; tokens present in outputs but missing from the declared total now fail with a negative balance error instead of being silently ignored or aborting with an "Illegal Value in TxOut" exception; the same exception no longer escapes when the balance has zero ADA with a negative token quantity, or when deposits exceed the declared ADA in the legacy `estimateBalancedTxBody`.
+  (bugfix)
+  [PR 1366](https://github.com/intersectmbo/cardano-api/pull/1366)
+
+- Plutus scripts in a language the era does not support are now rejected when decoded, with an error naming the language and the era.
+  Before, such a script was silently dropped from the witness set while its redeemer was kept, so the transaction failed on submission.
+  `PlutusScriptInEra` carries the ledger's `EraPlutusTxInfo` evidence in its constructor, so it can only be built for a pairing the ledger supports and converts to the ledger script without a partial step.
+  `deserialisePlutusScriptInEra` and `deserialiseAnyPlutusScriptOfLanguage` require `EraPlutusTxInfo lang era` and no longer take the language singleton.
+  New `PlutusLangInEra`, `plutusLangInEra` and `plutusLangInShelleyBasedEra` give that proof at runtime.
+  `decodeAnyPlutusScript` and `deserialiseAnyPlutusScriptFromTextEnvelope` now require `IsShelleyBasedEra` for the api era that matches the ledger era.
+  (breaking, bugfix)
+  [PR 1363](https://github.com/intersectmbo/cardano-api/pull/1363)
+
+- `createTransactionBody` now fails with `TxOutputReferenceScriptLanguageNotSupportedInEra` when a transaction output or the return collateral carries a reference script in a language the era does not support.
+  Before, the output was built without the script and no error was reported.
+  (breaking, bugfix)
+  [PR 1363](https://github.com/intersectmbo/cardano-api/pull/1363)
+
+- `scriptLanguageSupportedInEra` and `toScriptInEra` now accept Plutus V4 in the Dijkstra era.
+  Plutus V4 scripts can be used as reference scripts in transaction outputs and as auxiliary scripts.
+  (feature, compatible)
+  [PR 1359](https://github.com/intersectmbo/cardano-api/pull/1359)
+
+- Add plutus spending script support to createCompatibleTx. Breaking: it now takes all transaction content as a single CompatibleTxBodyContent record and fails with the new CompatibleTxError. Export mkSpendingScriptDatum. Fix certificate, proposal and vote script witnesses missing from the witness set, and proposal reference inputs being overwritten.
+  (feature, breaking, bugfix)
+  [PR 1282](https://github.com/intersectmbo/cardano-api/pull/1282)
+
 ## 11.8.0.0 -- 2026-10-06
 
 - `estimateBalancedTxBody` (in both `Cardano.Api` and `Cardano.Api.Experimental`) now balances a transaction that has no outputs by producing a single change output, instead of failing with "The transaction balance is negative"; this also fixes `cardano-cli transaction build-estimate` when no `--tx-out` is given (IntersectMBO/cardano-cli#1199, https://github.com/IntersectMBO/cardano-cli/issues/1199).

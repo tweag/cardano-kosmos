@@ -48,7 +48,7 @@ import           Cardano.Node.Protocol (ProtocolInstantiationError (..), mkConse
 import           Cardano.Node.Protocol.Byron (ByronProtocolInstantiationError (CredentialsError))
 import           Cardano.Node.Protocol.Cardano (CardanoProtocolInstantiationError (..))
 import           Cardano.Node.Protocol.Shelley (PraosLeaderCredentialsError (..),
-                   ShelleyProtocolInstantiationError (PraosLeaderCredentialsError), readGenesis)
+                   ShelleyProtocolInstantiationError (PraosLeaderCredentialsError))
 import           Cardano.Node.Protocol.Types
 import           Cardano.Node.Queries
 import           Cardano.Rpc.Server
@@ -69,6 +69,7 @@ import           Cardano.Slotting.Slot (WithOrigin (..))
 import           Cardano.Logging.Types (LogFormatting, TraceConfig)
 import           Cardano.Logging.Utils (showT)
 
+import           Ouroboros.Consensus.Block.Forging (MkBlockForging)
 import qualified Ouroboros.Consensus.Config as Consensus
 import           Ouroboros.Consensus.Config.SupportsNode (ConfigSupportsNode (..))
 import           Ouroboros.Consensus.Node (SnapshotPolicyArgs (..),
@@ -174,10 +175,6 @@ import           System.Win32.File
 #endif
 import           Ouroboros.Consensus.Mempool (MempoolTimeoutConfig(..))
 import           GHC.Stack
-import Ouroboros.Consensus.Block (MkBlockForging(mkBlockForging))
-
-import Data.IORef (newIORef)
-import Cardano.Base.FeatureFlags (CardanoFeatureFlag (..))
 
 {- HLINT ignore "Fuse concatMap/map" -}
 {- HLINT ignore "Redundant <$>" -}
@@ -210,7 +207,7 @@ runNode cmdPc = do
   forM_ mShelleyVrfFile $
     runThrowExceptT . checkVRFFilePermissions earlyTracer . File
 
-  (consensusProtocol, _shelleyGenesisHash) <-
+  (consensusProtocol, shelleyGenesisHash) <-
     runThrowExceptT $
       mkConsensusProtocol
        ncProtocolConfig
@@ -218,7 +215,7 @@ runNode cmdPc = do
        -- don't need these.
        (Just ncProtocolFiles)
 
-  handleNodeWithTracers cmdPc nc rncTraceConfig consensusProtocol
+  handleNodeWithTracers cmdPc nc rncTraceConfig consensusProtocol shelleyGenesisHash
 
 runThrowExceptT :: Exception e => ExceptT e IO a -> IO a
 runThrowExceptT act = runExceptT act >>= either Exception.throwIO pure
@@ -230,9 +227,10 @@ handleNodeWithTracers
      -- ^ The tracing configuration, when the configuration parser resolved it
      -- too; 'Nothing' leaves it to trace-dispatcher to read the file.
   -> SomeConsensusProtocol
+  -> Api.GenesisHashShelley
   -> IO ()
-handleNodeWithTracers cmdPc nc mTrConfig (SomeConsensusProtocol blockType runP) = do
-  (ProtocolInfo{pInfoConfig}, mkBlockForging) <- Api.protocolInfo @IO runP
+handleNodeWithTracers cmdPc nc mTrConfig (SomeConsensusProtocol blockType runP) shelleyGenesisHash = do
+  (pInfo@ProtocolInfo{pInfoConfig}, mkBlockForging) <- Api.protocolInfo @IO runP
   let networkMagic :: Api.NetworkMagic = getNetworkMagic $ Consensus.configBlock pInfoConfig
   -- This IORef contains node kernel structure which holds node kernel.
   -- Used for ledger queries and peer connection status.
@@ -267,7 +265,7 @@ handleNodeWithTracers cmdPc nc mTrConfig (SomeConsensusProtocol blockType runP) 
                                   then DisabledBlockForging
                                   else EnabledBlockForging))
 
-  handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic
+  handleSimpleNode blockType shelleyGenesisHash pInfo mkBlockForging tracers forgingStateVar nc cmdPc networkMagic
     (\nk -> do
         setNodeKernel nodeKernelData nk
         traceWith (nodeStateTracer tracers) NodeKernelOnline)
@@ -304,7 +302,9 @@ handleSimpleNode
     ( Api.Protocol IO blk
     )
   => Api.BlockType blk
-  -> Api.ProtocolInfoArgs IO blk
+  -> Api.GenesisHashShelley
+  -> ProtocolInfo blk
+  -> (Tracer IO KESAgentClientTrace -> IO [MkBlockForging IO blk])
   -> Tracers RemoteAddress LocalAddress blk IO
   -> ForgingStateVar
   -> NodeConfiguration
@@ -317,7 +317,7 @@ handleSimpleNode
   -- layer is initialised.  This implies this function must not block,
   -- otherwise the node won't actually start.
   -> IO ()
-handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic onKernel = do
+handleSimpleNode blockType shelleyGenesisHash pInfo mkBlockForging tracers forgingStateVar nc cmdPc networkMagic onKernel = do
   logStartupWarnings
 
   logDeprecatedLedgerDBOptions
@@ -328,8 +328,6 @@ handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic on
   when (ncValidateDB nc) $
     traceWith (startupTracer tracers)
       StartupDBValidation
-
-  (pInfo, mkBlockForging) <- Api.protocolInfo @IO runP
 
   (publicIPv4SocketOrAddr, publicIPv6SocketOrAddr, localSocketOrPath) <- do
     result <- runExceptT (gatherConfiguredSockets $ ncSocketConfig nc)
@@ -430,7 +428,7 @@ handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic on
           , rnGetUseBootstrapPeers = readTVar useBootstrapVar
           , rnTxSubmissionLogicVersion = ncTxSubmissionLogicVersion nc
           , rnTxSubmissionInitDelay = ncTxSubmissionInitDelay nc
-          , rnFeatureFlags = Set.singleton PerasFlag
+          , rnFeatureFlags = mempty -- TODO(10.7) forward this to CLI options?
           }
 #ifdef UNIX
     -- initial `SIGHUP` handler, which rereads the topology file and the RPC config from the main configuration file
@@ -502,20 +500,8 @@ handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic on
                                      blockType nc cmdPc networkMagic nodeKernel localRootsVar publicRootsVar useLedgerVar
                                      useBootstrapVar ledgerPeerSnapshotPathVar ledgerPeerSnapshotVar
                                      rpcConfigVar
-                -- populate node kernel access for RPC server
-                (shelleyGenesisHash, shelleyGenesisFile) <- case ncProtocolConfig nc of
-                  NodeProtocolConfigurationCardano _ shelleyCfg _ _ _ _ _ ->
-                    runExceptT (readGenesis (npcShelleyGenesisFile shelleyCfg) (npcShelleyGenesisFileHash shelleyCfg)) >>=
-                      either
-                        (Exception.throwIO . FatalError . showT)
-                        ( pure .
-                          (\h ->
-                            ( Api.GenesisHashShelley . (\(GenesisHash g) -> g) $ h
-                            , File (unGenesisFile (npcShelleyGenesisFile shelleyCfg))
-                            )
-                          ) . snd
-                        )
                 rnNodeKernelHook nodeArgs registry nodeKernel
+                -- populate node kernel access for RPC server
                 mkNodeKernelAccess
                   (rpcTracer tracers)
                   shelleyGenesisHash
@@ -539,8 +525,15 @@ handleSimpleNode blockType runP tracers forgingStateVar nc cmdPc networkMagic on
             , srnSnapshotPolicyArgs           = snapshotPolicyArgs
             , srnQueryBatchSize               = queryBatchSize
             , srnLedgerDbBackendArgs          = selectorToArgs ldbBackend (nonImmutableDbPath dbPath)
+            , srnLeiosAnnouncementAgeLimits   = Nothing
             }
  where
+  shelleyGenesisFile :: Api.ShelleyGenesisFile In
+  shelleyGenesisFile =
+    case ncProtocolConfig nc of
+      NodeProtocolConfigurationCardano _ shelleyConfig _ _ _ _ _ ->
+        File . unGenesisFile $ npcShelleyGenesisFile shelleyConfig
+
   customizeChainSyncTimeout :: ChainSyncIdleTimeout
   customizeChainSyncTimeout = case ncChainSyncIdleTimeout nc of
     NoTimeoutOverride -> Configuration.defaultChainSyncIdleTimeout

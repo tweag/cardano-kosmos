@@ -17,6 +17,7 @@ module Trace.Forward.Forwarding
 
 import           Cardano.Logging.Types
 import           Cardano.Logging.Utils (runInLoop)
+import           Ouroboros.Network.ConnectionManager.Types (DataFlow (..))
 import           Ouroboros.Network.Driver.Limits (ProtocolTimeLimits)
 import           Ouroboros.Network.IOManager (IOManager)
 import           Ouroboros.Network.Magic (NetworkMagic)
@@ -277,6 +278,7 @@ doConnectToAcceptor magic snocket makeBearer configureSocket address timeLimits
                              ]
        )
     )
+    (const Unidirectional)
     Nothing
     address
   case done of
@@ -352,6 +354,7 @@ doListenToAcceptor magic snocket makeBearer configureSocket address timeLimits
                       ]
        )
     )
+    (const Unidirectional)
     $ \_ serverAsync ->
       wait serverAsync -- Block until async exception.
  where

@@ -102,6 +102,7 @@ library
     Ouroboros.Consensus.Block.NestedContent
     Ouroboros.Consensus.Block.RealPoint
     Ouroboros.Consensus.Block.SupportsDiffusionPipelining
+    Ouroboros.Consensus.Block.SupportsLeios
     Ouroboros.Consensus.Block.SupportsMetrics
     Ouroboros.Consensus.Block.SupportsPeras
     Ouroboros.Consensus.Block.SupportsProtocol
@@ -201,9 +202,11 @@ library
     Ouroboros.Consensus.Ledger.Tables.MapKind
     Ouroboros.Consensus.Ledger.Tables.Utils
     Ouroboros.Consensus.Leios.AnnounceState
+    Ouroboros.Consensus.Leios.Cert
     Ouroboros.Consensus.Leios.NotifyLog
     Ouroboros.Consensus.Leios.Protocol
     Ouroboros.Consensus.Leios.Types
+    Ouroboros.Consensus.Leios.VoteState
     Ouroboros.Consensus.Mempool
     Ouroboros.Consensus.Mempool.API
     Ouroboros.Consensus.Mempool.Capacity
@@ -229,6 +232,7 @@ library
     Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
     Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State
     Ouroboros.Consensus.MiniProtocol.LeiosNotify.Server
+    Ouroboros.Consensus.MiniProtocol.LeiosNotify.Trace
     Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type
     Ouroboros.Consensus.MiniProtocol.LocalStateQuery.Server
     Ouroboros.Consensus.MiniProtocol.LocalTxMonitor.Server
@@ -254,7 +258,6 @@ library
     Ouroboros.Consensus.Peras.Cert.V1
     Ouroboros.Consensus.Peras.Context
     Ouroboros.Consensus.Peras.Crypto.BLS
-    Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
     Ouroboros.Consensus.Peras.Crypto.Mock
     Ouroboros.Consensus.Peras.Error.Mock
     Ouroboros.Consensus.Peras.Error.V1
@@ -293,6 +296,7 @@ library
     Ouroboros.Consensus.Storage.ChainDB.Impl.ChainSel
     Ouroboros.Consensus.Storage.ChainDB.Impl.Follower
     Ouroboros.Consensus.Storage.ChainDB.Impl.Iterator
+    Ouroboros.Consensus.Storage.ChainDB.Impl.Leios
     Ouroboros.Consensus.Storage.ChainDB.Impl.Paths
     Ouroboros.Consensus.Storage.ChainDB.Impl.Query
     Ouroboros.Consensus.Storage.ChainDB.Impl.Types
@@ -428,7 +432,7 @@ library
     multiset ^>=0.3,
     nonempty-containers,
     nothunks ^>=0.2 || ^>=0.3,
-    ouroboros-network:{api, api-tests-lib, protocols} ^>=1.3,
+    ouroboros-network:{api, api-tests-lib, protocols} ^>=2.0,
     primitive,
     psqueues ^>=0.2.3,
     quiet ^>=0.2,
@@ -1163,6 +1167,7 @@ benchmark LeiosDB-bench
     cardano-slotting,
     containers,
     contra-tracer,
+    deepseq,
     io-classes:si-timers,
     ouroboros-consensus,
     resource-registry,
@@ -1351,6 +1356,7 @@ library diffusion
     cardano-base,
     cardano-diffusion:{api, cardano-diffusion, protocols},
     cardano-slotting,
+    cardano-strict-containers,
     cborg,
     containers,
     contra-tracer,
@@ -1361,7 +1367,7 @@ library diffusion
     io-classes:{io-classes, si-timers, strict-stm},
     measures,
     mtl,
-    network-mux ^>=0.12,
+    network-mux ^>=1.0,
     ouroboros-consensus:{ouroboros-consensus, protocol},
     ouroboros-network:{api, framework, ouroboros-network, protocols},
     random ^>=1.3,
@@ -1398,6 +1404,7 @@ library unstable-diffusion-testlib
     bytestring,
     cardano-diffusion:cardano-diffusion,
     cardano-ledger-core,
+    cardano-strict-containers,
     cborg,
     containers,
     contra-tracer,
@@ -1510,8 +1517,11 @@ test-suite consensus-diffusion-test
     Test.Consensus.HardFork.Combinator
     Test.Consensus.HardFork.Combinator.A
     Test.Consensus.HardFork.Combinator.B
+    Test.Consensus.Leios.Cert
     Test.Consensus.Leios.ChainDB
+    Test.Consensus.Leios.Committee
     Test.Consensus.Leios.Environment
+    Test.Consensus.Leios.Forge
     Test.Consensus.Leios.LeiosFetch
     Test.Consensus.Leios.LeiosFetch.Codec
     Test.Consensus.Leios.LeiosFetch.Node
@@ -1522,6 +1532,8 @@ test-suite consensus-diffusion-test
     Test.Consensus.Leios.NodeUnderTest
     Test.Consensus.Leios.Relay
     Test.Consensus.Leios.TestBlock
+    Test.Consensus.Leios.ValidClaims
+    Test.Consensus.Leios.VoteState
     Test.Consensus.Network.AnchoredFragment.Extras
     Test.Consensus.PeerSimulator.BlockFetch
     Test.Consensus.PeerSimulator.ChainSync
@@ -1558,7 +1570,7 @@ test-suite consensus-diffusion-test
     bytestring,
     cardano-binary,
     cardano-crypto-class:cardano-crypto-class,
-    cardano-crypto-leios,
+    cardano-crypto-leios:{cardano-crypto-leios, testlib},
     cardano-diffusion:{api, cardano-diffusion},
     cardano-ledger-binary,
     cardano-ledger-core,
@@ -1682,6 +1694,7 @@ library cardano
     cardano-binary,
     cardano-crypto,
     cardano-crypto-class:cardano-crypto-class,
+    cardano-crypto-leios,
     cardano-crypto-wrapper,
     cardano-ledger-allegra ^>=1.10,
     cardano-ledger-alonzo ^>=1.18,
@@ -1888,7 +1901,6 @@ test-suite shelley-test
     Test.Consensus.Shelley.Golden
     Test.Consensus.Shelley.Integrity
     Test.Consensus.Shelley.LedgerTables
-    Test.Consensus.Shelley.Peras
     Test.Consensus.Shelley.Serialisation
     Test.Consensus.Shelley.SupportedNetworkProtocolVersion
     Test.ThreadNet.Shelley
@@ -1901,7 +1913,6 @@ test-suite shelley-test
     cardano-ledger-alonzo:{cardano-ledger-alonzo, testlib},
     cardano-ledger-api,
     cardano-ledger-babbage:testlib,
-    cardano-ledger-binary,
     cardano-ledger-conway:testlib,
     cardano-ledger-core,
     cardano-ledger-dijkstra:{cardano-ledger-dijkstra, testlib},

@@ -22,11 +22,12 @@ import           Cardano.Rpc.Server.Internal.UtxoRpc.Predicate (exactAddressPred
 import           Cardano.Rpc.Server.Internal.UtxoRpc.Type (txoRefUtxoRpcToTxIn,
                    utxoRpcBigIntToInteger, utxoRpcPParamsToProtocolParams)
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
 import           Control.Exception (catch, throwIO, try)
-import           Control.Monad (replicateM, unless, void, (>=>))
+import           Control.Monad (replicateM, void, (>=>))
 import qualified Data.ByteString as BS
 import           Data.Default.Class
 import           Data.IORef (newIORef, readIORef, writeIORef)
@@ -45,9 +46,9 @@ import qualified Hedgehog.Extras as H
 -- @TASTY_PATTERN='/RPC FollowTip/' cabal test cardano-testnet-test@
 hprop_rpc_follow_tip :: H.Property
 hprop_rpc_follow_tip = integrationRetryWorkspace 2 "rpc-follow-tip" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
-  let era = Exp.ConwayEra
+  let era = testEra
       sbe = convert era
       creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
       runtimeOptions = def{runtimeEnableRpc = RpcEnabledUnixSocket}
@@ -68,16 +69,22 @@ hprop_rpc_follow_tip = integrationRetryWorkspace 2 "rpc-follow-tip" $ \tempAbsBa
         -> (IO (NextElem (Rpc.Proto U5c.FollowTipResponse)) -> IO a)
         -> H.Integration a
       withFollowTip intersectRefs body = do
-        result <- H.evalIO $ do
+        (result, cancelled) <- H.evalIO $ do
           resultRef <- newIORef Nothing
           let stream =
                 Rpc.withConnection def rpcServer $ \conn ->
                   Rpc.serverStreaming conn (Rpc.rpc @(Rpc.Protobuf U5c.SyncService "followTip")) (def & U5c.intersect .~ intersectRefs) $
                     body >=> (writeIORef resultRef . Just)
-          stream `catch` \e@GrpcException{grpcError} ->
-            unless (grpcError == GrpcCancelled) $ throwIO e
-          readIORef resultRef
-        H.nothingFail result
+          cancelled <- (False <$ stream) `catch` \e@GrpcException{grpcError} ->
+            if grpcError == GrpcCancelled then pure True else throwIO e
+          r <- readIORef resultRef
+          pure (r, cancelled)
+        -- A cancel after the body finished is the client closing the
+        -- connection; only one that cut the body short is a failure.
+        case result of
+          Nothing | cancelled ->
+            H.failMessage callStack "FollowTip stream was cancelled before the body finished"
+          _ -> H.nothingFail result
 
       -- Open a fresh FollowTip stream intersecting at the given references,
       -- read exactly the requested number of messages, then let the
@@ -157,12 +164,8 @@ hprop_rpc_follow_tip = integrationRetryWorkspace 2 "rpc-follow-tip" $ \tempAbsBa
     resetRef ^. U5c.slot H.=== 0
     H.assertWith (resetRef ^. U5c.hash) BS.null
 
-    -- There's a race here; if the node has received a block before it receives
-    -- this reset message, it will include a tip. But this is not guaranteed!
-    -- So we check the tip invariant only if we receive one.
-    case resetMsg ^. U5c.maybe'tip of
-      Nothing -> H.note_ "Origin reset carried no tip: chain still at origin, as expected"
-      Just tipAfterReset -> H.assertWith (tipAfterReset ^. U5c.hash) $ (== 32) . BS.length
+    tipAfterReset <- H.nothingFail (resetMsg ^. U5c.maybe'tip)
+    H.assertWith (tipAfterReset ^. U5c.hash) $ (== 32) . BS.length
 
     H.note_ "Subsequent messages are apply actions carrying non-empty native bytes and a populated header"
     _block1 <- assertAppliedBlock apply1

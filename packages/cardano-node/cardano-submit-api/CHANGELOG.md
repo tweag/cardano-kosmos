@@ -1,4 +1,17 @@
-# Changelog for Cardano-submit-api
+# Changelog for cardano-submit-api
+
+## 11.2.1 -- 2026-11-06
+
+- Bumped `cardano-api` to 11.12 and `cardano-cli` to 11.7.
+  (compatible)
+  [PR 6767](https://github.com/IntersectMBO/cardano-node/pull/6767)
+
+## 11.2.0 -- 2026-10-27
+
+- Fixed `cardano-submit-api` rejecting Dijkstra era transactions with a `TxCmdTxReadError` decoding error.
+  Transactions from every Shelley-based era, including Dijkstra, are now decoded and submitted to the node.
+  (bugfix)
+  [PR 6725](https://github.com/IntersectMBO/cardano-node/pull/6725)
 
 ## 11.1.1 -- 2026-08-31
 

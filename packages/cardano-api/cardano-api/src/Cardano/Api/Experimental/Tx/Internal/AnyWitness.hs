@@ -73,6 +73,10 @@ instance Eq (AnyWitness era) where
     case langTypeEquality s1 s2 of
       Just Refl -> s1 == s2
       Nothing -> False
+  AnyPlutusScriptWitness (AnyPlutusGuardingScriptWitness s1) == AnyPlutusScriptWitness (AnyPlutusGuardingScriptWitness s2) =
+    case langTypeEquality s1 s2 of
+      Just Refl -> s1 == s2
+      Nothing -> False
   _ == _ = False
 
 getAnyWitnessPlutusLanguage :: AnyWitness era -> Maybe L.Language
@@ -90,8 +94,7 @@ getAnyWitnessSimpleScript (AnySimpleScriptWitness simpleScriptOrRefInput) =
 getAnyWitnessSimpleScript (AnyPlutusScriptWitness _) = Nothing
 
 getAnyWitnessPlutusScript
-  :: L.AlonzoEraScript era
-  => AnyWitness era
+  :: AnyWitness era
   -> Maybe (L.Script era)
 getAnyWitnessPlutusScript AnyKeyWitnessPlaceholder = Nothing
 getAnyWitnessPlutusScript (AnySimpleScriptWitness _) = Nothing
@@ -115,7 +118,7 @@ getAnyWitnessScriptData AnySimpleScriptWitness{} = mempty
 getAnyWitnessScriptData (AnyPlutusScriptWitness s) = getAnyPlutusScriptData s
 
 getAnyWitnessScript
-  :: L.AlonzoEraScript era => AnyWitness era -> Maybe (L.Script era)
+  :: AnyWitness era -> Maybe (L.Script era)
 getAnyWitnessScript AnyKeyWitnessPlaceholder = Nothing
 getAnyWitnessScript ss@(AnySimpleScriptWitness{}) = getAnyWitnessSimpleScript ss
 getAnyWitnessScript ps@(AnyPlutusScriptWitness{}) = getAnyWitnessPlutusScript ps

@@ -5,13 +5,12 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeApplications #-}
 
--- | One real node, the node under test (NUT), and a mocked environment around
--- it. The @nut@ prefix of names here abbreviates it.
+-- | One real node, the node under test, and a mocked environment around it.
 --
 -- The node is built by the node's own 'initNodeKernel' over a ChainDB on a
 -- mocked filesystem, so the code under test is the node's, not a
--- reimplementation of it. Its block is 'LeiosTestBlock'. It does not forge,
--- since the test gives it no block forging.
+-- reimplementation of it. Its block is 'LeiosTestBlock'. It forges only if the
+-- test calls 'setBlockForging'.
 --
 -- The node's node-to-node applications and the versions it offers them at are
 -- built by the node's own 'mkNodeToNodeApps' and
@@ -26,18 +25,24 @@ module Test.Consensus.Leios.NodeUnderTest
   , NodeVersions
   , PeerAddr (..)
   , Seeds (..)
+  , addBlocks
+  , addBlocksAfter
   , decodePeerAddr
   , encodePeerAddr
   , nodeVersionData
   , defaultNodeUnderTestConfig
   , maxEbBodySize
   , withNode
+  , withNodeAgeLimits
+  , withNodeCommittee
   , withNodeForecastingOnly
+  , withNodeOver
+  , withNodeOverDBs
   , withNodeUnderTest
   ) where
 
-import Cardano.Ledger.BaseTypes (Milliseconds32 (..), knownNonZeroBounded)
-import Cardano.Ledger.State (emptyLeiosCommittee)
+import Cardano.Crypto.Leios (LeiosCommittee)
+import Cardano.Ledger.BaseTypes (Milliseconds32 (..), UnitInterval, knownNonZeroBounded)
 import Cardano.Network.Diffusion.Configuration
   ( defaultChainSyncIdleTimeout
   , defaultTxSubmissionLogicVersion
@@ -60,9 +65,10 @@ import Control.ResourceRegistry (ResourceRegistry, withRegistry)
 import Control.Tracer (nullTracer)
 import Data.ByteString.Lazy (ByteString)
 import Data.Hashable (Hashable)
+import Data.Maybe.Strict (StrictMaybe (SJust))
 import Data.Proxy (Proxy (..))
 import qualified Network.Mux as Mux
-import Ouroboros.Consensus.Block (SlotNo)
+import Ouroboros.Consensus.Block (SlotNo, WithOrigin (..), blockSlot)
 import Ouroboros.Consensus.BlockchainTime
   ( BackoffDelay (..)
   , BlockchainTime
@@ -85,6 +91,10 @@ import Ouroboros.Consensus.Leios.Protocol (LeiosLedgerView (..))
 import Ouroboros.Consensus.Leios.Types (BytesSize)
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( LeiosAnnouncementAgeLimits
+  , defaultLeiosAnnouncementAgeLimits
+  )
 import qualified Ouroboros.Consensus.Network.NodeToNode as NTN
 import Ouroboros.Consensus.Node
   ( mkNodeKernelArgs
@@ -104,7 +114,7 @@ import Ouroboros.Consensus.Node.NetworkProtocolVersion
   ( BlockNodeToNodeVersion
   , supportedNodeToNodeVersions
   )
-import Ouroboros.Consensus.Node.Tracers (nullTracers)
+import Ouroboros.Consensus.Node.Tracers (Tracers, nullTracers)
 import Ouroboros.Consensus.NodeKernel
   ( NodeKernel
   , NodeKernelArgs (..)
@@ -112,9 +122,10 @@ import Ouroboros.Consensus.NodeKernel
   )
 import Ouroboros.Consensus.Storage.ChainDB.API (ChainDB)
 import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
+import Ouroboros.Consensus.Storage.ChainDB.API.Types.InvalidBlockPunishment (noPunishment)
 import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Args as ChainDB
 import Ouroboros.Consensus.Storage.LedgerDB.V2.InMemory (mkInMemoryArgs)
-import Ouroboros.Consensus.Storage.LeiosDB (newLeiosDBInMemory)
+import Ouroboros.Consensus.Storage.LeiosDB (LeiosDbHandle, newLeiosDBInMemory)
 import Ouroboros.Consensus.Util.IOLike
 import Ouroboros.Network.ConnectionId (ConnectionId)
 import qualified Ouroboros.Network.Diffusion.Policies as Diffusion
@@ -132,6 +143,7 @@ import System.FS.API.Types (mkFsPath)
 import System.FS.Sim.MockFS (MockFS)
 import System.FS.Sim.STM (simHasFS)
 import System.Random (StdGen, mkStdGen, random, splitGen)
+import Test.Consensus.Leios.Committee (testCommittee, testQuorumStakeThreshold)
 import Test.Consensus.Leios.TestBlock
 import Test.Util.ChainDB (NodeDBs (..), emptyNodeDBs)
 import Test.Util.FS.Subdirectory (subdirectoryHasFS)
@@ -141,18 +153,20 @@ type Blk = LeiosTestBlock
 
 -- | What a test can vary about the node.
 data NodeUnderTestConfig = NodeUnderTestConfig
-  { nutcSecurityParam :: SecurityParam
-  , nutcLedgerConfig :: LeiosTestLedgerConfig
-  , nutcRandomness :: StdGen
+  { nodeConfigSecurityParam :: SecurityParam
+  , nodeConfigLedger :: LeiosTestLedgerConfig
+  , nodeConfigRandomness :: StdGen
   -- ^ The root of all the test's randomness; see 'Seeds'.
+  , nodeConfigAnnouncementAgeLimits :: LeiosAnnouncementAgeLimits
   }
 
 defaultNodeUnderTestConfig :: SecurityParam -> LeiosTestLedgerConfig -> NodeUnderTestConfig
-defaultNodeUnderTestConfig nutcSecurityParam nutcLedgerConfig =
+defaultNodeUnderTestConfig nodeConfigSecurityParam nodeConfigLedger =
   NodeUnderTestConfig
-    { nutcSecurityParam
-    , nutcLedgerConfig
-    , nutcRandomness = mkStdGen 0
+    { nodeConfigSecurityParam
+    , nodeConfigLedger
+    , nodeConfigRandomness = mkStdGen 0
+    , nodeConfigAnnouncementAgeLimits = defaultLeiosAnnouncementAgeLimits
     }
 
 -- | All the randomness of a Leios node-vs-environment test.
@@ -174,8 +188,8 @@ data Seeds a = Seeds
 splitSeeds :: StdGen -> Seeds StdGen
 splitSeeds = evalState (mapM (\() -> state splitGen) (Seeds () () () () () ()))
 
-nodeSeeds :: NodeUnderTestConfig -> Seeds StdGen
-nodeSeeds = splitSeeds . nutcRandomness
+configSeeds :: NodeUnderTestConfig -> Seeds StdGen
+configSeeds = splitSeeds . nodeConfigRandomness
 
 -- | The peer address these tests use: a peer is just a number.
 newtype PeerAddr = PeerAddr Int
@@ -185,13 +199,33 @@ newtype PeerAddr = PeerAddr Int
 -- | A running node, and the handles a test needs on it for its gray-box
 -- predicates.
 data NodeUnderTest m = NodeUnderTest
-  { nutChainDB :: ChainDB m Blk
-  , nutTopLevelConfig :: TopLevelConfig Blk
-  , nutKernel :: NodeKernel m PeerAddr (ConnectionId ()) Blk
-  , nutApps :: BlockNodeToNodeVersion Blk -> NodeApps m
-  , nutVersions :: NodeVersions m
-  , nutSeeds :: Seeds StdGen
+  { nodeChainDB :: ChainDB m Blk
+  , nodeTopLevelConfig :: TopLevelConfig Blk
+  , nodeKernel :: NodeKernel m PeerAddr (ConnectionId ()) Blk
+  , nodeApps :: BlockNodeToNodeVersion Blk -> NodeApps m
+  , nodeVersions :: NodeVersions m
+  , nodeSeeds :: Seeds StdGen
   }
+
+-- | Add a chain to the node's ChainDB, oldest first, starting at genesis
+addBlocks :: IOLike m => NodeUnderTest m -> [Blk] -> m ()
+addBlocks node = addBlocksAfter node Origin
+
+-- | Add a chain to the node's ChainDB, oldest first, given the slot of its
+-- first block's predecessor
+--
+-- A 'LeiosTestBlock''s ledger view is the same at every slot.
+addBlocksAfter :: IOLike m => NodeUnderTest m -> WithOrigin SlotNo -> [Blk] -> m ()
+addBlocksAfter node predecessorSlot blks =
+  sequence_ $
+    zipWith
+      ( \predSlot ->
+          ChainDB.addBlock_ (nodeChainDB node) noPunishment predSlot leiosView
+      )
+      (predecessorSlot : map (NotOrigin . blockSlot) blks)
+      blks
+ where
+  leiosView = SJust (ltlcLeios (configLedger (nodeTopLevelConfig node)))
 
 -- | The node's node-to-node applications, at every mini-protocol's bytes.
 type NodeApps m =
@@ -233,25 +267,26 @@ type NodeVersions m =
 -- subdirectory. The ledger and GSM file systems go unused.
 withNodeUnderTest ::
   NodeUnderTestConfig ->
+  Tracers (IOSim s) (ConnectionId PeerAddr) (ConnectionId ()) Blk ->
   NodeDBs (StrictTMVar (IOSim s) MockFS) ->
+  LeiosDbHandle (IOSim s) ->
   (NodeUnderTest (IOSim s) -> IOSim s a) ->
   IOSim s a
-withNodeUnderTest cfg nodeDBs body = do
+withNodeUnderTest cfg tracers nodeDBs leiosDB body = do
   -- What a node with Genesis disabled, the default, runs with.
   (genesisArgs, updateChainDbArgs) <- mkGenesisNodeKernelArgs disableGenesisConfig
-  let seeds = nodeSeeds cfg
+  let seeds = configSeeds cfg
   -- The ChainDB and the node each get their own resource registry. The node's
   -- registry is nested inside the ChainDB's, and the body runs inside both. So
   -- on the way out, the body finishes first, then the node's threads stop, and
   -- only then does the ChainDB close.
   withRegistry $ \dbRegistry -> do
-    leiosDB <- newLeiosDBInMemory
     bracket
       ( fst
           <$> openChainDB
             dbRegistry
             (topLevelConfigOf cfg)
-            (leiosTestInitExtLedger (nutcLedgerConfig cfg))
+            (leiosTestInitExtLedger (nodeConfigLedger cfg))
             (mountedIn (nodeDBsImm nodeDBs))
             (mountedIn (nodeDBsVol nodeDBs))
             (seedSnapshotDelay seeds)
@@ -266,6 +301,7 @@ withNodeUnderTest cfg nodeDBs body = do
         publicPeerSelectionStateVar <- makePublicPeerSelectionStateVar
         kernelArgs <-
           nodeKernelArgsEnforceInvariants
+            . (\args -> args{leiosAnnouncementAgeLimits = nodeConfigAnnouncementAgeLimits cfg})
             <$> mkNodeKernelArgs
               kernelRegistry
               (mkUnsafeSalt (fst (random (seedBlockFetchSalt seeds))))
@@ -273,7 +309,7 @@ withNodeUnderTest cfg nodeDBs body = do
               (seedKeepAliveAndPeerSharing seeds)
               (topLevelConfigOf cfg)
               mempty
-              nullTracers
+              tracers
               btime
               nodeSystemTime
               InFutureCheck.defaultClockSkew
@@ -316,18 +352,18 @@ withNodeUnderTest cfg nodeDBs body = do
                 (const decodePeerAddr)
         body
           NodeUnderTest
-            { nutChainDB = chainDB
-            , nutTopLevelConfig = topLevelConfigOf cfg
-            , nutKernel = kernel
-            , nutApps = apps
-            , nutVersions =
+            { nodeChainDB = chainDB
+            , nodeTopLevelConfig = topLevelConfigOf cfg
+            , nodeKernel = kernel
+            , nodeApps = apps
+            , nodeVersions =
                 mkNodeToNodeInitiatorResponderVersions
                   (featureFlags kernelArgs)
                   (miniProtocolParameters kernelArgs)
                   nodeVersionData
                   (supportedNodeToNodeVersions (Proxy @Blk))
                   apps
-            , nutSeeds = seeds
+            , nodeSeeds = seeds
             }
 
 -- | A node whose ledger view forecasts further ahead than any test runs.
@@ -338,30 +374,83 @@ withNode = withNodeForecastingOnly 100000
 withNodeForecastingOnly :: SlotNo -> (NodeUnderTest (IOSim s) -> IOSim s a) -> IOSim s a
 withNodeForecastingOnly range body = do
   nodeDBs <- emptyNodeDBs
-  withNodeUnderTest cfg nodeDBs body
+  leiosDB <- newLeiosDBInMemory
+  withNodeUnderTest
+    (forecastingOnly testCommittee testQuorumStakeThreshold range)
+    nullTracers
+    nodeDBs
+    leiosDB
+    body
+
+-- | 'withNode', but with these announcement age limits.
+withNodeAgeLimits ::
+  LeiosAnnouncementAgeLimits -> (NodeUnderTest (IOSim s) -> IOSim s a) -> IOSim s a
+withNodeAgeLimits limits body = do
+  nodeDBs <- emptyNodeDBs
+  leiosDB <- newLeiosDBInMemory
+  withNodeUnderTest
+    (forecastingOnly testCommittee testQuorumStakeThreshold 100000)
+      { nodeConfigAnnouncementAgeLimits = limits
+      }
+    nullTracers
+    nodeDBs
+    leiosDB
+    body
+
+-- | 'withNodeForecastingOnly', but with this committee in the node's ledger
+-- view, and the largest quorum stake threshold.
+withNodeCommittee ::
+  LeiosCommittee -> SlotNo -> (NodeUnderTest (IOSim s) -> IOSim s a) -> IOSim s a
+withNodeCommittee committee range body = do
+  nodeDBs <- emptyNodeDBs
+  leiosDB <- newLeiosDBInMemory
+  withNodeUnderTest (forecastingOnly committee maxBound range) nullTracers nodeDBs leiosDB body
+
+-- | 'withNode' over the given LeiosDB, which a test can fill before the node
+-- starts.
+withNodeOver :: LeiosDbHandle (IOSim s) -> (NodeUnderTest (IOSim s) -> IOSim s a) -> IOSim s a
+withNodeOver leiosDB body = do
+  nodeDBs <- emptyNodeDBs
+  withNodeOverDBs nodeDBs leiosDB body
+
+-- | 'withNode' over the given databases, which a test can fill before the node
+-- starts, or reuse to restart it.
+withNodeOverDBs ::
+  NodeDBs (StrictTMVar (IOSim s) MockFS) ->
+  LeiosDbHandle (IOSim s) ->
+  (NodeUnderTest (IOSim s) -> IOSim s a) ->
+  IOSim s a
+withNodeOverDBs =
+  withNodeUnderTest
+    (forecastingOnly testCommittee testQuorumStakeThreshold 100000)
+    nullTracers
+
+-- | The configuration of a node whose ledger view has this committee and quorum
+-- stake threshold and forecasts this many slots past its immutable tip.
+forecastingOnly :: LeiosCommittee -> UnitInterval -> SlotNo -> NodeUnderTestConfig
+forecastingOnly committee quorumStakeThreshold range =
+  defaultNodeUnderTestConfig
+    k
+    LeiosTestLedgerConfig
+      { ltlcHardForkParams =
+          HardFork.defaultEraParams k (slotLengthFromSec 1) HardFork.NoPerasEnabled
+      , ltlcForecastRange = range
+      , ltlcLeios =
+          MkLeiosLedgerView
+            { llvCommittee = committee
+            , llvQuorumStakeThreshold = quorumStakeThreshold
+            , llvAnnouncementPeriod = Milliseconds32 1000
+            , llvVotePeriod = Milliseconds32 4000
+            , llvDiffusionPeriod = Milliseconds32 1000
+            , llvMaxEbBodySize = maxEbBodySize
+            , llvMaxEbTxsSize = maxEbBodySize
+            }
+      }
  where
   k = SecurityParam $ knownNonZeroBounded @10
-  cfg =
-    defaultNodeUnderTestConfig
-      k
-      LeiosTestLedgerConfig
-        { ltlcHardForkParams =
-            HardFork.defaultEraParams k (slotLengthFromSec 1) HardFork.NoPerasEnabled
-        , ltlcForecastRange = range
-        , ltlcLeios =
-            MkLeiosLedgerView
-              { llvCommittee = emptyLeiosCommittee
-              , llvQuorumStakeThreshold = maxBound
-              , llvAnnouncementPeriod = Milliseconds32 1000
-              , llvVotePeriod = Milliseconds32 4000
-              , llvDiffusionPeriod = Milliseconds32 1000
-              , llvMaxEbBodySize = maxEbBodySize
-              , llvMaxEbTxsSize = maxEbBodySize
-              }
-        }
 
 -- | The largest endorser block, and total size of the transactions it
--- references, that the NUT's ledger admits.
+-- references, that the node's ledger admits.
 maxEbBodySize :: BytesSize
 maxEbBodySize = 5000
 
@@ -400,8 +489,8 @@ mkBlockchainTime cfg registry chainDB =
       }
 
 topLevelConfigOf :: NodeUnderTestConfig -> TopLevelConfig Blk
-topLevelConfigOf NodeUnderTestConfig{nutcSecurityParam, nutcLedgerConfig} =
-  singleNodeLeiosTestConfig nutcLedgerConfig nutcSecurityParam
+topLevelConfigOf NodeUnderTestConfig{nodeConfigSecurityParam, nodeConfigLedger} =
+  singleNodeLeiosTestConfig nodeConfigLedger nodeConfigSecurityParam
 
 -- | A node's database directory, mounting each database in its own
 -- subdirectory as 'stdMkChainDbHasFS' does, but on a mock file system.

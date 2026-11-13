@@ -12,6 +12,7 @@ import           Cardano.Api as Api
 
 import           Cardano.CLI.Type.Key (SomeSigningKey (AStakeSigningKey))
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -43,14 +44,16 @@ import qualified Hedgehog.Extras as H
 hprop_tx_register_deregister_stake_address :: Property
 hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "register-deregister-stake-addr" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
+  let era = testEra
+
+      ceo = convert era
+      sbe = convert era
       eraName = eraToString sbe
       creationOptions = def
         { creationEra = AnyShelleyBasedEra sbe

@@ -12,6 +12,8 @@ import Cardano.Api.Experimental.Tx qualified as Exp
 import Cardano.Ledger.Core qualified as L
 
 import Data.Aeson (eitherDecode, encode)
+import Data.Aeson qualified as Aeson
+import Data.List (isInfixOf)
 
 import Test.Gen.Cardano.Api (genAlonzoGenesis)
 import Test.Gen.Cardano.Api.Typed
@@ -21,13 +23,50 @@ import Test.Cardano.Api.Orphans ()
 import Hedgehog (Property, forAll, tripping, (===))
 import Hedgehog qualified as H
 import Hedgehog.Gen qualified as Gen
+import Hedgehog.Gen.QuickCheck qualified as Q
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.Hedgehog (testProperty)
+
+-- | Pin the public JSON representation and rendered text of a guard index.
+unit_guarding_script_witness_index :: Property
+unit_guarding_script_witness_index = H.withTests 1 $ H.property $ do
+  let index = ScriptWitnessIndexGuarding 3
+  toJSON index
+    === Aeson.object
+      [ "kind" Aeson..= Aeson.String "ScriptWitnessIndexGuarding"
+      , "value" Aeson..= Aeson.Number 3
+      ]
+  renderScriptWitnessIndex index === "guard 3 (in the ordered guard set)"
 
 prop_json_roundtrip_alonzo_genesis :: Property
 prop_json_roundtrip_alonzo_genesis = H.property $ do
   genesis <- forAll genAlonzoGenesis
   tripping genesis encode eitherDecode
+
+prop_json_simple_script_atleast_error :: Property
+prop_json_simple_script_atleast_error = H.property $ do
+  case eitherDecode "{\"type\":\"atLeast\",\"required\":5,\"scripts\":[]}" :: Either String SimpleScript of
+    Left err -> do
+      H.assert $ "Required number of script signatures exceeds" `isInfixOf` err
+      H.assert $ not ("guard" `isInfixOf` err)
+    Right s -> H.annotateShow s >> H.failure
+
+prop_json_simple_script_unknown_type :: Property
+prop_json_simple_script_unknown_type = H.property $ do
+  case eitherDecode "{\"type\":\"bogus\"}" :: Either String SimpleScript of
+    Left err -> do
+      H.assert $ "Unknown simple script type \"bogus\"" `isInfixOf` err
+      H.assert $ "atLeast" `isInfixOf` err
+    Right s -> H.annotateShow s >> H.failure
+
+prop_json_simple_script_nested_atleast_error :: Property
+prop_json_simple_script_nested_atleast_error = H.property $ do
+  case eitherDecode "{\"type\":\"all\",\"scripts\":[{\"type\":\"atLeast\",\"required\":2,\"scripts\":[]}]}"
+         :: Either String SimpleScript of
+    Left err -> do
+      H.assert $ "Required number of script signatures exceeds" `isInfixOf` err
+      H.assert $ not ("Unknown simple script type" `isInfixOf` err)
+    Right s -> H.annotateShow s >> H.failure
 
 prop_json_roundtrip_utxo :: Property
 prop_json_roundtrip_utxo = H.property $ do
@@ -137,14 +176,40 @@ goRoundtrip sbe = do
       newTxOut = Exp.TxOut ledgerTxOut
   tripping newTxOut encode eitherDecode
 
+-- | Verify that the new experimental 'TxOut' 'FromJSON' instance reads the
+-- JSON that the legacy API writes for Dijkstra outputs. 'genTxOutUTxOContext'
+-- always adds a reference script and its simple scripts never have guards,
+-- so the reference script is also set to none or to a script with a guard.
+prop_new_txout_json_reads_legacy_dijkstra :: Property
+prop_new_txout_json_reads_legacy_dijkstra = H.property $ do
+  let sbe = ShelleyBasedEraDijkstra
+  TxOut address value datum generatedRefScript <- forAll $ genTxOutUTxOContext sbe
+  simpleScript <- forAll genSimpleScript
+  guardCredential <- forAll Q.arbitrary
+  let guardRefScript =
+        ReferenceScript BabbageEraOnwardsDijkstra $
+          ScriptInAnyLang SimpleScriptLanguage $
+            SimpleScript (RequireAllOf [simpleScript, RequireGuard guardCredential])
+  refScript <- forAll $ Gen.element [ReferenceScriptNone, generatedRefScript, guardRefScript]
+  let oldTxOut = TxOut address value datum refScript
+  eitherDecode (encode oldTxOut) === Right (Exp.TxOut (toShelleyTxOut sbe oldTxOut))
+
 tests :: TestTree
 tests =
   testGroup
     "Test.Cardano.Api.Json"
     [ testProperty "json roundtrip alonzo genesis" prop_json_roundtrip_alonzo_genesis
+    , testProperty "guarding script witness index JSON and rendering" unit_guarding_script_witness_index
     , testProperty "json roundtrip utxo" prop_json_roundtrip_utxo
     , testProperty "json roundtrip reference scripts" prop_json_roundtrip_reference_scripts
     , testProperty "json roundtrip txoutvalue" prop_json_roundtrip_txoutvalue
+    , testProperty
+        "json simple script atLeast reports its own error"
+        prop_json_simple_script_atleast_error
+    , testProperty "json simple script unknown type" prop_json_simple_script_unknown_type
+    , testProperty
+        "json simple script nested atLeast reports its own error"
+        prop_json_simple_script_nested_atleast_error
     , testProperty "json roundtrip txout tx context" prop_json_roundtrip_txout_tx_context
     , testProperty "json roundtrip txout utxo context" prop_json_roundtrip_txout_utxo_context
     , testProperty
@@ -154,4 +219,7 @@ tests =
     , testProperty "json roundtrip praos nonce" prop_roundtrip_praos_nonce_JSON
     , testProperty "new TxOut ToJSON matches legacy" prop_new_txout_json_matches_legacy
     , testProperty "new TxOut JSON roundtrip" prop_new_txout_json_roundtrip
+    , testProperty
+        "new TxOut FromJSON reads legacy Dijkstra JSON"
+        prop_new_txout_json_reads_legacy_dijkstra
     ]

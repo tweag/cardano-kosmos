@@ -69,7 +69,6 @@ import Cardano.Crypto qualified as CC
 import Cardano.Crypto.Hash qualified as Crypto
 import Cardano.Crypto.Signing qualified as Byron
 import Cardano.Ledger.BaseTypes (unNonZero)
-import Cardano.Ledger.Shelley qualified as L (ShelleyEra)
 import Cardano.Ledger.Shelley.Genesis (InjectionData (..), ShelleyExtraConfig (..))
 import Cardano.Protocol.Crypto qualified as C
 

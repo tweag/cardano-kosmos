@@ -12,23 +12,33 @@
 module Test.Cardano.Rpc.WatchMempoolStream where
 
 import Cardano.Api
+import Cardano.Rpc.Proto.Api.UtxoRpc.Query qualified as Query
 import Cardano.Rpc.Proto.Api.UtxoRpc.Submit qualified as U5c
+import Cardano.Rpc.Server.Internal.FieldMask
 import Cardano.Rpc.Server.Internal.UtxoRpc.Mempool (watchMempoolStream)
-import Cardano.Rpc.Server.Internal.UtxoRpc.Type.Mempool (txInModeToTxInMempool)
+import Cardano.Rpc.Server.Internal.UtxoRpc.Type.Mempool
+  ( TxInMempoolFields (..)
+  , txInModeToTxInMempool
+  , txInModeToTxInMempoolFields
+  , watchMempoolFill
+  )
 import Cardano.Rpc.Server.NodeKernelAccess (MempoolWatchSnapshot (..))
 
 import Ouroboros.Consensus.Mempool.API qualified as Consensus (TicketNo)
 
 import RIO
 
+import Data.ByteString qualified as BS
 import Data.ProtoLens (defMessage)
 import GHC.Stack (withFrozenCallStack)
-import Network.GRPC.Spec (NextElem (..), Proto (..))
+import Network.GRPC.Spec (NextElem (..), Proto (..), getProto)
 
 import Test.Gen.Cardano.Api.Typed (genTx)
 
 import Hedgehog as H
 import Hedgehog.Extras qualified as H
+
+import Proto.Google.Protobuf.FieldMask_Fields qualified as FieldMask (paths)
 
 -- | An empty predicate matches everything ('matchesTxPredicate's default),
 -- so every mempool entry newer than the last one seen is streamed, oldest
@@ -39,10 +49,10 @@ hprop_watch_mempool_stream_emits_new_entries_in_order = H.property $ do
   tx1 <- txInModeFixture
   tx2 <- txInModeFixture
   let script =
-        [ mkSnapshot [(tx1, ticket 1)] (SlotNo 100)
-        , mkSnapshot [(tx1, ticket 1), (tx2, ticket 2)] (SlotNo 100)
+        [ mkSnapshot [(tx1, ticket 1)]
+        , mkSnapshot [(tx1, ticket 1), (tx2, ticket 2)]
         ]
-  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage []
 
   expected1 <- expectedResponse tx1
   expected2 <- expectedResponse tx2
@@ -57,36 +67,111 @@ hprop_watch_mempool_stream_predicate_filters_all_entries = H.property $ do
   tx1 <- txInModeFixture
   tx2 <- txInModeFixture
   let script =
-        [ mkSnapshot [(tx1, ticket 1)] (SlotNo 100)
-        , mkSnapshot [(tx1, ticket 1), (tx2, ticket 2)] (SlotNo 100)
+        [ mkSnapshot [(tx1, ticket 1)]
+        , mkSnapshot [(tx1, ticket 1), (tx2, ticket 2)]
         ]
       matchesNothing = defMessage & U5c.not .~ [defMessage]
-  sent <- expectScriptExhausted =<< runWatchMempoolStream script matchesNothing
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script matchesNothing []
 
   H.note_ "Nothing is ever sent: the predicate rejects every entry"
   sent === []
 
--- | A removal-only transition (the ticket list shrinks, nothing new appears
--- after the last seen ticket) and a slot-only transition (the ticket list
--- is unchanged, only 'mempoolWatchSlotNo' differs) both count as "changed"
--- for 'nextMempoolWatchSnapshot' to unblock on, but neither produces a
--- message: the proto has no representation for removal, and nothing newer
--- than the last seen ticket exists in either case. This also proves no
--- entry is re-sent across the transitions - the loop only ever sees tx1
--- once, from the initial snapshot.
-hprop_watch_mempool_stream_no_duplicates_across_removal_and_slot_only_changes :: Property
-hprop_watch_mempool_stream_no_duplicates_across_removal_and_slot_only_changes = H.property $ do
+-- | A mask of just @tx.native_bytes@ prunes every other field of the sent
+-- response back to its default.
+hprop_watch_mempool_stream_prunes_by_field_mask :: Property
+hprop_watch_mempool_stream_prunes_by_field_mask = H.property $ do
   tx1 <- txInModeFixture
-  -- snapshot 2 is removal only: the ticket list [ticket 1] -> [] changes,
-  -- but nothing is newer than 'ticket 1'. snapshot 3 is slot only: the
-  -- ticket list is unchanged ([] -> []), only the slot number differs.
+  let script = [mkSnapshot [(tx1, ticket 1)]]
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage ["tx.native_bytes"]
+
+  full <- expectedResponse tx1
+  let expected = defMessage & U5c.tx . U5c.nativeBytes .~ getProto full ^. U5c.tx . U5c.nativeBytes
+  sent === [NextElem expected]
+
+-- | A path below @tx.cardano@ keeps only that part of the converted transaction.
+hprop_watch_mempool_stream_trims_nested_cardano_path :: Property
+hprop_watch_mempool_stream_trims_nested_cardano_path = H.property $ do
+  tx1 <- txInModeFixture
+  let script = [mkSnapshot [(tx1, ticket 1)]]
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage ["tx.cardano.fee"]
+
+  full <- expectedResponse tx1
+  let expected =
+        defMessage
+          & U5c.tx . U5c.cardano . Query.fee .~ full ^. U5c.tx . U5c.cardano . Query.fee
+  sent === [NextElem expected]
+
+-- | A mask that selects only the ref never evaluates the serialisation or the conversion.
+hprop_field_mask_watch_mempool_ref_only_forces_nothing_else :: Property
+hprop_field_mask_watch_mempool_ref_only_forces_nothing_else = H.propertyOnce $ do
+  let fields = TxInMempoolFields (BS.pack [1, 2, 3]) (error "forced") (error "forced")
+  response <- H.evalNF . runFillPure (resolve ["tx.ref"]) $ fillFrom fields watchMempoolFill
+  response === (defMessage & U5c.tx . U5c.ref .~ BS.pack [1, 2, 3])
+
+-- | A mask that selects only the native bytes never evaluates the conversion.
+hprop_field_mask_watch_mempool_native_bytes_only_forces_no_conversion :: Property
+hprop_field_mask_watch_mempool_native_bytes_only_forces_no_conversion = H.propertyOnce $ do
+  let fields = TxInMempoolFields (error "forced") (BS.pack [4, 5]) (error "forced")
+  response <- H.evalNF . runFillPure (resolve ["tx.native_bytes"]) $ fillFrom fields watchMempoolFill
+  response === (defMessage & U5c.tx . U5c.nativeBytes .~ BS.pack [4, 5])
+
+-- | Each field path alone sets its own field and no other.
+hprop_field_mask_watch_mempool_gated_paths_set_their_field :: Property
+hprop_field_mask_watch_mempool_gated_paths_set_their_field = H.property $ do
+  tx1 <- txInModeFixture
+  fields <- H.nothingFail $ txInModeToTxInMempoolFields tx1
+  let build path = runFillPure (resolve [path]) $ fillFrom fields watchMempoolFill
+  build "tx.ref" === (defMessage & U5c.tx . U5c.ref .~ txInMempoolFieldsRef fields)
+  build "tx.native_bytes"
+    === (defMessage & U5c.tx . U5c.nativeBytes .~ txInMempoolFieldsNativeBytes fields)
+  build "tx.stage" === (defMessage & U5c.tx . U5c.stage .~ U5c.STAGE_MEMPOOL)
+  build "tx.cardano" === (defMessage & U5c.tx . U5c.cardano .~ txInMempoolFieldsCardano fields)
+
+-- | An absent mask sets every field.
+hprop_field_mask_watch_mempool_select_all_sets_every_field :: Property
+hprop_field_mask_watch_mempool_select_all_sets_every_field = H.property $ do
+  tx1 <- txInModeFixture
+  fields <- H.nothingFail $ txInModeToTxInMempoolFields tx1
+  let response = runFillPure (resolve []) $ fillFrom fields watchMempoolFill
+  response ^. U5c.tx . U5c.ref === txInMempoolFieldsRef fields
+  response ^. U5c.tx . U5c.nativeBytes === txInMempoolFieldsNativeBytes fields
+  response ^. U5c.tx . U5c.stage === U5c.STAGE_MEMPOOL
+  response ^. U5c.tx . U5c.cardano === txInMempoolFieldsCardano fields
+
+-- | The predicate sees the unmasked transaction: a mask of just @tx.ref@ still
+-- drops the entry the predicate rejects, and trims the one it accepts.
+hprop_watch_mempool_stream_predicate_runs_before_mask :: Property
+hprop_watch_mempool_stream_predicate_runs_before_mask = H.property $ do
+  tx1 <- txInModeFixture
+  tx2 <- txInModeFixture
+  fields1 <- H.nothingFail $ txInModeToTxInMempoolFields tx1
+  fields2 <- H.nothingFail $ txInModeToTxInMempoolFields tx2
+  let addressesOf = map (view Query.address) . view Query.outputs . txInMempoolFieldsCardano
+  address <- case addressesOf fields1 of
+    a : _ | a `notElem` addressesOf fields2 -> pure a
+    _ -> H.discard
+  let producesAddress = defMessage & Query.address . Query.exactAddress .~ address
+      predicate =
+        defMessage
+          & U5c.match . U5c.cardano . Query.produces .~ producesAddress
+      script = [mkSnapshot [(tx1, ticket 1), (tx2, ticket 2)]]
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script predicate ["tx.ref"]
+
+  sent === [NextElem $ defMessage & U5c.tx . U5c.ref .~ txInMempoolFieldsRef fields1]
+
+-- | A removal (nothing newer than the last seen ticket) produces no message,
+-- and no entry is re-sent across it: the loop only ever sees tx1 once, from
+-- the initial snapshot.
+hprop_watch_mempool_stream_no_duplicates_across_removal :: Property
+hprop_watch_mempool_stream_no_duplicates_across_removal = H.property $ do
+  tx1 <- txInModeFixture
   let script =
-        [ mkSnapshot [(tx1, ticket 1)] (SlotNo 100)
-        , mkSnapshot [] (SlotNo 100)
-        , mkSnapshot [] (SlotNo 101)
+        [ mkSnapshot [(tx1, ticket 1)]
+        , mkSnapshot []
+        , mkSnapshot []
         ]
 
-  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage
+  sent <- expectScriptExhausted =<< runWatchMempoolStream script defMessage []
 
   expected1 <- expectedResponse tx1
   H.note_ "tx1 exactly once, from the initial snapshot - the later transitions send nothing"
@@ -110,17 +195,13 @@ expectedResponse txInMode = do
   txInMempool <- H.nothingFail $ txInModeToTxInMempool txInMode
   pure $ defMessage & U5c.tx .~ txInMempool
 
--- | Build a scripted snapshot: 'mempoolWatchTicketNumbers' is the entries'
--- own tickets, and 'mempoolWatchTxsAfter' filters the same list - exactly
--- what a real mempool snapshot's 'Ouroboros.Consensus.Mempool.API.snapshotTxs'
--- \/ 'snapshotTxsAfter' pair would give after conversion, per
--- 'Cardano.Rpc.Server.NodeKernelAccess.toMempoolWatchSnapshot'.
-mkSnapshot :: [(TxInMode, Consensus.TicketNo)] -> SlotNo -> MempoolWatchSnapshot
-mkSnapshot entries slotNo =
+-- | Build a scripted snapshot whose 'mempoolWatchTxsAfter' filters the given
+-- entries, like a real 'Ouroboros.Consensus.Mempool.API.snapshotTxsAfter'
+-- after conversion.
+mkSnapshot :: [(TxInMode, Consensus.TicketNo)] -> MempoolWatchSnapshot
+mkSnapshot entries =
   MempoolWatchSnapshot
-    { mempoolWatchTicketNumbers = map snd entries
-    , mempoolWatchSlotNo = slotNo
-    , mempoolWatchTxsAfter = \lastSeenTicket -> filter ((> lastSeenTicket) . snd) entries
+    { mempoolWatchTxsAfter = \lastSeenTicket -> filter ((> lastSeenTicket) . snd) entries
     }
 
 -- | A ticket number built via the 'Enum' instance derived from 'Word64' -
@@ -137,20 +218,26 @@ runWatchMempoolStream
   -- ^ Script: the first snapshot is the initial read, each subsequent one
   -- is what the next blocking wait returns, in order
   -> Proto U5c.TxPredicate
+  -- ^ Predicate filtering which new entries are sent
+  -> [FieldPath]
+  -- ^ Field mask paths, rooted at the response
   -> m (Either SomeException (), [NextElem (Proto U5c.WatchMempoolResponse)])
-runWatchMempoolStream script predicate = liftIO $ do
+runWatchMempoolStream script predicate fieldMaskPaths = liftIO $ do
   scriptRef <- newIORef script
   let pop =
         readIORef scriptRef >>= \case
           [] -> throwIO ScriptExhausted
           snapshot : rest -> writeIORef scriptRef rest $> snapshot
   sentRef <- newIORef []
+  let request :: Proto U5c.WatchMempoolRequest
+      request = defMessage & U5c.fieldMask . FieldMask.paths .~ fieldMaskPaths
   outcome <-
     try @IO @SomeException $
       watchMempoolStream
         pop
         (const pop)
         predicate
+        (resolve $ getProto request ^. U5c.fieldMask . FieldMask.paths)
         (\nextElem -> modifyIORef' sentRef (nextElem :))
   sent <- reverse <$> readIORef sentRef
   pure (outcome, sent)

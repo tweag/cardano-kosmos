@@ -2,7 +2,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -16,7 +15,9 @@ import Cardano.Api.Experimental qualified as Exp
 
 import Cardano.CLI.Environment (EnvCli (..))
 import Cardano.CLI.EraBased.Common.Option
+import Cardano.CLI.EraBased.Script.Guard.Option
 import Cardano.CLI.EraBased.Transaction.Command
+import Cardano.CLI.EraBased.Transaction.SubTransaction.Option
 import Cardano.CLI.Option.Flag
 import Cardano.CLI.Parser
 import Cardano.CLI.Read
@@ -25,7 +26,6 @@ import Cardano.CLI.Type.Common
 import Control.Monad
 import Data.Foldable
 import Data.Function ((&))
-import Data.Functor
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Universe (Some)
 import Options.Applicative hiding (help, str)
@@ -145,25 +145,30 @@ pSignWitnessBackwardCompatible =
   Opt.subparser $
     Opt.command "sign-witness" assembleInfo <> Opt.internal
 
-pScriptValidity :: Parser ScriptValidity
-pScriptValidity =
-  asum
-    [ Opt.flag' ScriptValid $
-        mconcat
-          [ Opt.long "script-valid"
-          , Opt.help "Assertion that the script is valid. (default)"
-          ]
-    , Opt.flag' ScriptInvalid $
-        mconcat
-          [ Opt.long "script-invalid"
-          , Opt.help $
-              mconcat
-                [ "Assertion that the script is invalid.  "
-                , "If a transaction is submitted with such a script, "
-                , "the script will fail and the collateral will be taken."
-                ]
-          ]
-    ]
+pScriptValidity :: Exp.Era era -> Parser (Maybe ScriptValidity)
+pScriptValidity era' = case era' of
+  -- CIP-0167 removes the author-supplied validity flag from standalone transactions:
+  -- https://github.com/cardano-foundation/CIPs/tree/master/CIP-0167
+  Exp.DijkstraEra -> pure Nothing
+  Exp.ConwayEra ->
+    optional $
+      asum
+        [ Opt.flag' ScriptValid $
+            mconcat
+              [ Opt.long "script-valid"
+              , Opt.help "Assertion that the script is valid. (default)"
+              ]
+        , Opt.flag' ScriptInvalid $
+            mconcat
+              [ Opt.long "script-invalid"
+              , Opt.help $
+                  mconcat
+                    [ "Assertion that the script is invalid.  "
+                    , "If a transaction is submitted with such a script, "
+                    , "the script will fail and the collateral will be taken."
+                    ]
+              ]
+        ]
 
 pTransactionBuildCmd
   :: forall era. Exp.IsEra era => EnvCli -> Maybe (Parser (TransactionCmds era))
@@ -196,11 +201,11 @@ pTransactionBuildCmd envCli = do
                 <*> pNetworkId envCli
                 <*> pSocketPath envCli
             )
-        <*> optional pScriptValidity
+        <*> pScriptValidity (Exp.useEra @era)
         <*> optional pWitnessOverride
-        <*> some (pTxIn AutoBalance)
+        <*> some (pTxInForEra (Exp.useEra @era) AutoBalance)
         <*> many pReadOnlyReferenceTxIn
-        <*> many pRequiredSigner
+        <*> pTxGuardArguments (Exp.useEra @era) AutoBalance
         <*> many pTxInCollateral
         <*> optional pReturnCollateral
         <*> optional pTotalCollateral
@@ -209,8 +214,11 @@ pTransactionBuildCmd envCli = do
         <*> (fmap join . optional $ pMintMultiAsset @era AutoBalance)
         <*> optional pInvalidBefore
         <*> pInvalidHereafter era'
-        <*> many (pCertificateFile AutoBalance)
-        <*> many (pWithdrawal AutoBalance)
+        <*> many (pCertificateFileForEra (Exp.useEra @era) AutoBalance)
+        <*> many (pWithdrawalForEra (Exp.useEra @era) AutoBalance)
+        <*> pDirectDeposits (Exp.useEra @era)
+        <*> pAccountBalanceIntervals (Exp.useEra @era)
+        <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
         <*> pTxMetadataJsonSchema
         <*> many
           ( pScriptFor
@@ -219,8 +227,8 @@ pTransactionBuildCmd envCli = do
               "Filepath of auxiliary script(s)"
           )
         <*> many pMetadataFile
-        <*> pVoteFiles AutoBalance
-        <*> pProposalFiles AutoBalance
+        <*> pVoteFilesForEra (Exp.useEra @era) AutoBalance
+        <*> pProposalFilesForEra (Exp.useEra @era) AutoBalance
         <*> pIncludeCurrentTreasuryValue
         <*> pTreasuryDonation
         <*> pIsCborOutCanonical
@@ -256,14 +264,14 @@ pTransactionBuildEstimateCmd _envCli = do
   pCmd = do
     fmap TransactionBuildEstimateCmd $
       TransactionBuildEstimateCmdArgs Exp.useEra
-        <$> optional pScriptValidity
+        <$> pScriptValidity (Exp.useEra @era)
         <*> pNumberOfShelleyKeyWitnesses
         <*> optional pNumberOfByronKeyWitnesses
         <*> pProtocolParamsFile
         <*> pTotalUTxOValue
-        <*> some (pTxIn ManualBalance)
+        <*> some (pTxInForEra (Exp.useEra @era) ManualBalance)
         <*> many pReadOnlyReferenceTxIn
-        <*> many pRequiredSigner
+        <*> pTxGuardArguments (Exp.useEra @era) ManualBalance
         <*> many pTxInCollateral
         <*> optional pReturnCollateral
         <*> many pTxOut
@@ -271,8 +279,11 @@ pTransactionBuildEstimateCmd _envCli = do
         <*> (fmap join . optional $ pMintMultiAsset @era ManualBalance)
         <*> optional pInvalidBefore
         <*> pInvalidHereafter Exp.useEra
-        <*> many (pCertificateFile ManualBalance)
-        <*> many (pWithdrawal ManualBalance)
+        <*> many (pCertificateFileForEra (Exp.useEra @era) ManualBalance)
+        <*> many (pWithdrawalForEra (Exp.useEra @era) ManualBalance)
+        <*> pDirectDeposits (Exp.useEra @era)
+        <*> pAccountBalanceIntervals (Exp.useEra @era)
+        <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
         <*> optional pTotalCollateral
         <*> optional pReferenceScriptSize
         <*> pTxMetadataJsonSchema
@@ -283,8 +294,8 @@ pTransactionBuildEstimateCmd _envCli = do
               "Filepath of auxiliary script(s)"
           )
         <*> many pMetadataFile
-        <*> pVoteFiles ManualBalance
-        <*> pProposalFiles ManualBalance
+        <*> pVoteFilesForEra (Exp.useEra @era) ManualBalance
+        <*> pProposalFilesForEra (Exp.useEra @era) ManualBalance
         <*> pCurrentTreasuryValue
         <*> pTreasuryDonation
         <*> pIsCborOutCanonical
@@ -304,28 +315,32 @@ pTransactionBuildRaw :: forall era. Exp.IsEra era => Parser (TransactionCmds era
 pTransactionBuildRaw =
   fmap TransactionBuildRawCmd $
     TransactionBuildRawCmdArgs Exp.useEra
-      <$> optional pScriptValidity
-      <*> some (pTxIn ManualBalance)
+      <$> pScriptValidity (Exp.useEra @era)
+      <*> some (pTxInForEra (Exp.useEra @era) ManualBalance)
       <*> many pReadOnlyReferenceTxIn
       <*> many pTxInCollateral
       <*> optional pReturnCollateral
       <*> optional pTotalCollateral
-      <*> many pRequiredSigner
+      <*> pTxGuardArguments (Exp.useEra @era) ManualBalance
       <*> many pTxOut
       <*> (fmap join . optional $ pMintMultiAsset @era ManualBalance)
       <*> optional pInvalidBefore
       <*> pInvalidHereafter Exp.useEra
       <*> pTxFee
-      <*> many (pCertificateFile ManualBalance)
-      <*> many (pWithdrawal ManualBalance)
+      <*> many (pCertificateFileForEra (Exp.useEra @era) ManualBalance)
+      <*> many (pWithdrawalForEra (Exp.useEra @era) ManualBalance)
+      <*> pDirectDeposits (Exp.useEra @era)
+      <*> pAccountBalanceIntervals (Exp.useEra @era)
+      <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
       <*> pTxMetadataJsonSchema
       <*> many (pScriptFor "auxiliary-script-file" Nothing "Filepath of auxiliary script(s)")
       <*> many pMetadataFile
       <*> optional pProtocolParamsFile
-      <*> pVoteFiles ManualBalance
-      <*> pProposalFiles ManualBalance
+      <*> pVoteFilesForEra (Exp.useEra @era) ManualBalance
+      <*> pProposalFilesForEra (Exp.useEra @era) ManualBalance
       <*> pCurrentTreasuryValue
       <*> pTreasuryDonation
+      <*> pSubTransactionFiles @era
       <*> pIsCborOutCanonical
       <*> pTxBodyFileOut
 
@@ -427,7 +442,10 @@ pTransactionCalculatePlutusScriptCost envCli =
           )
 
   pTxInputFile :: Parser FilePath
-  pTxInputFile = parseFilePath "tx-file" "Filepath of the transaction whose Plutus scripts to calculate the cost."
+  pTxInputFile =
+    parseFilePath
+      "tx-file"
+      "Filepath of the transaction whose Plutus scripts to calculate the cost. Use `-` to read from standard input."
 
 pLocalContext :: Parser (NodeContextInfoSource era)
 pLocalContext =
@@ -549,16 +567,3 @@ pTransactionId =
         , flagFormatText
         , flagFormatYaml
         ]
-
-pIsCborOutCanonical :: Parser TxCborFormat
-pIsCborOutCanonical =
-  ( Opt.switch $
-      mconcat
-        [ Opt.long "out-canonical-cbor"
-        , Opt.help
-            "Produce transaction in canonical CBOR according to RFC7049. Only this part of CIP-21 is implemented."
-        ]
-  )
-    <&> \case
-      True -> TxCborCanonical
-      False -> TxCborNotCanonical

@@ -85,7 +85,7 @@ pRuntimeOptions = TestnetRuntimeOptions
 pScratchOutputDir :: Parser (Maybe FilePath)
 pScratchOutputDir = optional $ OA.strOption
   (   OA.long "output-dir"
-  <>  OA.help "Directory where to store files, sockets, and so on. It is created if it doesn't exist. If unset, a temporary directory is used."
+  <>  OA.help "Directory where to store files, sockets, and so on. It is created if it doesn't exist. It must not already contain a testnet. If unset, ./testnet is used."
   <>  OA.metavar "DIRECTORY"
   )
 
@@ -288,7 +288,7 @@ pOnChainParams = fmap (fromMaybe DefaultParams) <$> optional $
 
 pCustomParamsFile :: Parser TestnetOnChainParams
 pCustomParamsFile = OnChainParamsFile <$> OA.strOption
-  (  OA.long "params-file"
+  (  OA.long "params-blockfrost-file"
   <> OA.help "File containing custom on-chain parameters in Blockfrost format:\nhttps://docs.blockfrost.io/#tag/cardano--epochs/GET/epochs/latest/parameters"
   <> OA.metavar "FILEPATH"
   )

@@ -16,6 +16,7 @@ import           Cardano.Api as Api
 import           Cardano.CLI.Type.Output
 import           Cardano.Testnet
 import           Cardano.Testnet.Test.Misc
+import           Cardano.Testnet.Test.Utils (testEra)
 import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint (..))
 
 import           Prelude
@@ -23,7 +24,6 @@ import           Prelude
 import           Control.Monad
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson as J
-import qualified Data.Aeson.Encode.Pretty as Aeson
 import           Data.Default.Class
 import           Data.Function
 import qualified Data.IP as IP
@@ -42,7 +42,6 @@ import           Testnet.Process.Cli.SPO
 import           Testnet.Process.Run (execCli, execCli', mkExecConfig)
 import           Testnet.Property.Util (decodeEraUTxO, integrationRetryWorkspace)
 import           Testnet.Runtime
-import           Testnet.Start.Cardano (liftToIntegration)
 import           Testnet.Types
 
 import           Hedgehog (Property)
@@ -61,13 +60,13 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 hprop_kes_period_info :: Property
 hprop_kes_period_info = integrationRetryWorkspace 2 "kes-period-info" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf { tempAbsPath=tempAbsPath@(TmpAbsolutePath work) }
-    -- TODO: Move yaml filepath specification into individual node options
-    <- mkConf tempAbsBasePath'
+  -- TODO: Move yaml filepath specification into individual node options
+  let conf@Conf { tempAbsPath=tempAbsPath@(TmpAbsolutePath work) } = mkConfig tempAbsBasePath'
 
   let tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
-      ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
+      era = testEra
+      ceo = convert era
+      sbe = convert era
       asbe = AnyShelleyBasedEra sbe
       eraString = eraToString sbe
       cTestnetOptions = def { creationEra = asbe }
@@ -100,7 +99,7 @@ hprop_kes_period_info = integrationRetryWorkspace 2 "kes-period-info" $ \tempAbs
   epochStateView <- getEpochStateView configurationFile node1SocketPath
   keyDeposit <- getKeyDeposit epochStateView ceo
   (stakePoolId, KeyPair{signingKey=File stakePoolColdSigningKey, verificationKey=File stakePoolColdVKey}, _)
-    <- registerSingleSpo asbe 1 tempAbsPath
+    <- registerSingleSpo era 1 tempAbsPath
          configurationFile
          node1SocketPath
          termEpoch
@@ -259,11 +258,10 @@ hprop_kes_period_info = integrationRetryWorkspace 2 "kes-period-info" $ \tempAbs
       , "--out-file", testSpoOperationalCertFp
       ]
 
-  jsonBS <- liftToIntegration $ Aeson.encodePretty . Aeson.Object <$> createConfigJson tempAbsPath sbe
-  H.lbsWriteFile (unFile configurationFile) jsonBS
+  writeConfiguration (unFile configurationFile) sbe
   newNodePortNumber <- H.randomPort testnetDefaultIpv4Address
   eRuntime <- runExceptT . retryOnAddressInUseError $
-    startNode tempAbsPath "test-spo" testnetDefaultIpv4Address newNodePortNumber testnetMagic Nothing ("", Nothing)
+    startNode tempAbsPath "test-spo" testnetDefaultIpv4Address newNodePortNumber testnetMagic Nothing
         [ "run"
         , "--config", unFile configurationFile
         , "--topology", topologyFile

@@ -44,6 +44,7 @@ import Cardano.Api.Experimental.Simple.Script
 import Cardano.Api.Experimental.Tx.Internal.AnyWitness
 import Cardano.Api.Experimental.Tx.Internal.BodyContent
 import Cardano.Api.Experimental.Tx.Internal.Certificate qualified as Exp
+import Cardano.Api.Experimental.Tx.Internal.Guard
 import Cardano.Api.Experimental.Tx.Internal.Type
 import Cardano.Api.Key.Internal qualified as Api
 import Cardano.Api.Ledger.Internal.Reexport qualified as L
@@ -229,9 +230,6 @@ estimateBalancedTxBody
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ A map of all deposits for DRep credentials that are being
-  --   unregistered in this transaction.
   -> Map (Ledger.PlutusPurpose Ledger.AsIx (LedgerEra era)) ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -249,7 +247,7 @@ estimateBalancedTxBody
   -> AddressInEra era
   -- ^ Change address.
   -> L.Value (LedgerEra era)
-  -- ^ Total value of UTXOs being spent.
+  -- ^ Total value of the UTxOs being spent, including native assets.
   -> Either (TxFeeEstimationError era) (TxBodyContent (LedgerEra era))
 estimateBalancedTxBody
   w
@@ -257,7 +255,6 @@ estimateBalancedTxBody
   pparams
   poolids
   stakeDelegDeposits
-  drepDelegDeposits
   exUnitsMap =
     obtainCommonConstraints w $
       estimateBalancedTxBody'
@@ -265,7 +262,6 @@ estimateBalancedTxBody
         pparams
         poolids
         stakeDelegDeposits
-        drepDelegDeposits
         (Map.mapKeys (toScriptIndex (convert w)) exUnitsMap)
 
 data TxFeeEstimationError era
@@ -293,9 +289,6 @@ estimateBalancedTxBody'
   -> Map StakeCredential L.Coin
   -- ^ A map of all deposits for stake credentials that are being
   --   unregistered in this transaction.
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ A map of all deposits for DRep credentials that are being
-  --   unregistered in this transaction.
   -> Map ScriptWitnessIndex ExecutionUnits
   -- ^ Plutus script execution units.
   -> Coin
@@ -313,14 +306,13 @@ estimateBalancedTxBody'
   -> AddressInEra era
   -- ^ Change address.
   -> L.MaryValue
-  -- ^ Total value of UTXOs being spent.
+  -- ^ Total value of the UTxOs being spent, including native assets.
   -> Either (TxFeeEstimationError era) (TxBodyContent (LedgerEra era))
 estimateBalancedTxBody'
   txbodycontent
   pparams
   poolids
   stakeDelegDeposits
-  drepDelegDeposits
   exUnitsMap
   totalPotentialCollateral
   intendedKeyWits
@@ -381,6 +373,15 @@ estimateBalancedTxBody'
     let
       partialChange =
         calculatePartialChangeValue availableUTxOValue txbodycontent1
+
+    -- Check the asset balance before building the change output: the ledger compacts
+    -- outputs eagerly and errors on negative quantities.
+    let L.MaryValue partialCoin partialMultiAsset = partialChange
+    unless (L.pointwise (>=) (L.MaryValue (L.Coin 0) partialMultiAsset) mempty) $
+      Left . TxFeeEstimationBalanceError $
+        TxBodyErrorBalanceNegative partialCoin partialMultiAsset
+
+    let
       maxLovelaceChange = L.Coin (2 ^ (64 :: Integer)) - 1
       changeWithMaxLovelace = L.modifyCoin (const maxLovelaceChange) partialChange
       changeTxOut :: L.TxOut (LedgerEra era)
@@ -439,10 +440,9 @@ estimateBalancedTxBody'
             }
 
     let fakeUTxO =
-          createFakeUTxO (toShelleyAddr changeaddr) txbodycontent1 $
-            L.coin availableUTxOValue
+          createFakeUTxO (toShelleyAddr changeaddr) txbodycontent1 availableUTxOValue
         balance :: Ledger.Value (LedgerEra era) =
-          evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits fakeUTxO txbody2
+          evaluateTransactionBalance pparams poolids stakeDelegDeposits fakeUTxO txbody2
 
         coinBalance :: L.Coin
         coinBalance = L.coin balance
@@ -499,6 +499,9 @@ checkNonNegative bpparams txout@(TxOut balance) = do
       isPositiveValue = L.pointwise (>) outValue mempty
   if
     | L.isZero outValue -> pure Empty -- empty TxOut - ok, it's removed at the end
+    -- Negative asset quantities must be rejected before calculateMinimumUTxO compacts the value.
+    | not (L.pointwise (>=) (L.MaryValue (L.Coin 0) multiAsset) mempty) ->
+        Left $ TxBodyErrorBalanceNegative coin multiAsset
     | L.isZero coin ->
         -- no ADA, just non-ADA assets: positive lovelace is required in such case
         Left $
@@ -579,14 +582,12 @@ evaluateTransaction
   -- ^ Registered stake pools
   -> Map StakeCredential L.Coin
   -- ^ Stake delegation deposits
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ DRep delegation deposits
   -> L.UTxO (LedgerEra era)
   -- ^ UTxO set for the transaction inputs
   -> L.Tx L.TopTx (LedgerEra era)
   -- ^ Signed transaction to evaluate
   -> TxEvaluationResult (LedgerEra era)
-evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDeposits _drepDelegDeposits utxo tx =
+evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDeposits utxo tx =
   obtainCommonConstraints (useEra @era) $ do
     let txEvalExecutionUnits =
           evaluateTransactionExecutionUnits systemStart epochInfo protocolParams utxo tx
@@ -634,21 +635,16 @@ evaluateTransaction systemStart epochInfo protocolParams poolIds stakeDelegDepos
 --
 -- Finding the (non-zero) balance of a partially constructed transaction is
 -- useful for adjusting a transaction to be fully balanced.
--- Note: the DRep deposit map is no longer consulted. The ledger dropped that
--- lookup from 'evalBalanceTxBody' ("we do not need to look into DRep state in
--- order to figure out the refund"); the parameter is kept so callers do not
--- have to change.
 evaluateTransactionBalance
   :: forall era
    . IsEra era
   => Ledger.PParams (LedgerEra era)
   -> Set PoolId
   -> Map StakeCredential L.Coin
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
   -> L.UTxO (LedgerEra era)
   -> UnsignedTx (LedgerEra era)
   -> L.Value (LedgerEra era)
-evaluateTransactionBalance pp poolids stakeDelegDeposits _drepDelegDeposits utxo (UnsignedTx unsignedTx) =
+evaluateTransactionBalance pp poolids stakeDelegDeposits utxo (UnsignedTx unsignedTx) =
   let txbody = unsignedTx ^. L.bodyTxL
    in obtainCommonConstraints (useEra @era) $
         L.evalBalanceTxBody
@@ -666,29 +662,20 @@ evaluateTransactionBalance pp poolids stakeDelegDeposits _drepDelegDeposits utxo
   lookupDelegDeposit stakeCred =
     Map.lookup (fromShelleyStakeCredential stakeCred) stakeDelegDeposits
 
--- | Build a single-entry UTxO for the first input holding the declared total ADA, so the balance
--- can be evaluated without the real UTxO set. The first output is the template, or a plain
--- output at the change address when there are no outputs. Native assets outside the first
--- output are not represented.
--- TODO: Include multiassets
+-- | Build a single-entry UTxO for the first input holding the declared available value at the
+-- change address, so the balance can be evaluated without the real UTxO set.
 createFakeUTxO
   :: L.EraTxOut era
   => L.Addr
-  -- ^ The change address used when there are no outputs.
+  -- ^ The change address, used as the address of the fake entry.
   -> TxBodyContent era
   -- ^ The transaction body content.
-  -> Coin
-  -- ^ The total ADA declared by the caller.
+  -> L.Value era
+  -- ^ The value available at the inputs, as declared by the caller.
   -> L.UTxO era
-createFakeUTxO changeAddress txbodycontent totalAdaInUTxO = do
-  let singleTxIn = maybe [] (return . toShelleyTxIn . fst) $ List.uncons [txin | (txin, _) <- txIns txbodycontent]
-      singleTxOut =
-        maybe
-          [L.mkBasicTxOut changeAddress (L.inject totalAdaInUTxO)]
-          (\(TxOut firstOut, _rest) -> return $ firstOut & L.coinTxOutL .~ totalAdaInUTxO)
-          . List.uncons
-          $ txOuts txbodycontent
-  L.UTxO . fromList $ zip singleTxIn singleTxOut
+createFakeUTxO changeAddress txbodycontent availableValue = do
+  let fakeTxOut = L.mkBasicTxOut changeAddress availableValue
+  L.UTxO $ Map.fromList [(toShelleyTxIn txin, fakeTxOut) | (txin, _) <- take 1 $ txIns txbodycontent]
 
 -- | Whether the transaction contains any Plutus script witness. The ledger
 -- requires collateral only for transactions that run Plutus scripts.
@@ -896,8 +883,14 @@ instance Error FeeCalculationError where
 -- * __Case 3 – Fee has not converged__: The fee field is set to the newly
 --   computed minimum fee and the function recurses.
 --
+-- The fee has converged when it lies between the minimum fee and the minimum
+-- fee plus @4 * txFeePerByte@; a fee outside that range is reset to the
+-- minimum (Case 3). The slack stops the minimum fee from alternating when the
+-- change output crosses a CBOR integer width boundary (for example 2^32
+-- lovelace).
+--
 -- A maximum iteration limit (currently 50) guards against non-termination.
--- In practice convergence occurs within 2–3 iterations.
+-- If the limit is reached, 'FeeCalculationDidNotConverge' is returned.
 calcMinFeeRecursive
   :: forall era
    . HasCallStack
@@ -916,13 +909,10 @@ calcMinFeeRecursive
   -> Map StakeCredential L.Coin
   -- ^ Deposits for stake credentials being deregistered in this
   -- transaction. These are counted as refunds on the consumed side.
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ Deposits for DRep credentials being deregistered in this
-  -- transaction. These are counted as refunds on the consumed side.
   -> Int
   -- ^ Number of extra key hashes for native scripts
   -> Either FeeCalculationError (UnsignedTx (LedgerEra era))
-calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposits drepDelegDeposits nExtraWitnesses
+calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposits nExtraWitnesses
   -- If multi-assets are non-negative initially, they stay non-negative across
   -- iterations (only ADA and fee change), so check once upfront.
   | multiAssetIsNegative =
@@ -930,7 +920,7 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
   | otherwise =
       go maxIterations unsignedTx
  where
-  initialBalance = evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits utxo unsignedTx
+  initialBalance = evaluateTransactionBalance pparams poolids stakeDelegDeposits utxo unsignedTx
   multiAssets =
     obtainCommonConstraints (useEra @era) $
       let L.MaryValue _ ma = initialBalance
@@ -942,6 +932,14 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
       not (L.pointwise (>=) (L.MaryValue (L.Coin 0) multiAssets) mempty)
   maxIterations :: Int
   maxIterations = 50
+  feePerByte :: L.Coin
+  feePerByte =
+    obtainCommonConstraints (useEra @era) $
+      L.fromCompact . L.unCoinPerByte $
+        pparams ^. L.ppTxFeePerByteL
+  -- The change coin's CBOR encoding shrinks by at most 4 bytes (9 to 5 at 2^32).
+  feeTolerance :: L.Coin
+  feeTolerance = 4 * feePerByte
 
   go
     :: Int
@@ -949,12 +947,12 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
     -> Either FeeCalculationError (UnsignedTx (LedgerEra era))
   go 0 _ = Left FeeCalculationDidNotConverge
   go n unSignTx@(UnsignedTx ledgerTx)
-    | minFee == txBodyFee && L.isZero txBalanceValue = do
+    | isFeeAccepted && L.isZero txBalanceValue = do
         -- Case 1
         let outs = toList $ ledgerTx ^. L.bodyTxL . L.outputsTxBodyL
         mapM_ (checkOutputMinUTxO pparams) outs
         return unSignTx
-    | minFee == txBodyFee = do
+    | isFeeAccepted = do
         -- Case 2
         balancedOuts <- balanceTxOuts @era changeAddr txBalanceValue unSignTx
         let updatedTx = UnsignedTx (ledgerTx & L.bodyTxL . L.outputsTxBodyL .~ balancedOuts)
@@ -966,8 +964,9 @@ calcMinFeeRecursive changeAddr unsignedTx utxo pparams poolids stakeDelegDeposit
    where
     minFee = obtainCommonConstraints (useEra @era) $ L.calcMinFeeTx utxo pparams ledgerTx nExtraWitnesses
     txBodyFee = ledgerTx ^. L.bodyTxL . L.feeTxBodyL
+    isFeeAccepted = txBodyFee >= minFee && txBodyFee <= minFee + feeTolerance
     txBalanceValue =
-      evaluateTransactionBalance pparams poolids stakeDelegDeposits drepDelegDeposits utxo unSignTx
+      evaluateTransactionBalance pparams poolids stakeDelegDeposits utxo unSignTx
 
 checkOutputMinUTxO
   :: forall era
@@ -1081,6 +1080,9 @@ substituteExecutionUnits
     mappedTxCertificates <- mapScriptWitnessesCertificates txCertificates
     mappedVotes <- mapScriptWitnessesVotes txVotingProcedures
     mappedProposals <- mapScriptWitnessesProposals txProposalProcedures
+    -- Extra required signers are appended after explicit guards and have no
+    -- script budgets, so the explicit collection retains its ledger indices.
+    mappedGuards <- traverseTxGuardsExecutionUnits substituteGuardUnits (txGuards txbodycontent)
 
     Right $
       txbodycontent
@@ -1090,7 +1092,13 @@ substituteExecutionUnits
         & setTxMintValue mappedMintedVals
         & setTxVotingProcedures mappedVotes
         & setTxProposalProcedures mappedProposals
+        & setTxGuards mappedGuards
    where
+    substituteGuardUnits index _ = do
+      let idx = ScriptWitnessIndexGuarding index
+      maybe (Left $ TxBodyErrorScriptWitnessIndexMissingFromExecUnitsMap idx exUnitsMap) Right $
+        Map.lookup idx exUnitsMap
+
     substituteExecUnitsTxMint
       :: ScriptWitnessIndex
       -> AnyScriptWitness (LedgerEra era)
@@ -1239,7 +1247,7 @@ collectTxBodyScriptWitnesses
   => TxBodyContent (LedgerEra era)
   -> [(ScriptWitnessIndex, Exp.AnyScriptWitness (LedgerEra era))]
 collectTxBodyScriptWitnesses
-  TxBodyContent
+  body@TxBodyContent
     { txIns
     , txWithdrawals
     , txCertificates
@@ -1254,6 +1262,7 @@ collectTxBodyScriptWitnesses
       , scriptWitnessesMinting txMintValue
       , maybe [] scriptWitnessesVoting txVotingProcedures
       , maybe [] scriptWitnessesProposing txProposalProcedures
+      , scriptWitnessesGuarding (bodyGuardEntries body)
       ]
    where
     scriptWitnessesTxIns
@@ -1315,6 +1324,15 @@ collectTxBodyScriptWitnesses
         | (_, (ix, Just wit@AnyScriptWitnessPlutus{})) <-
             (fmap . fmap) toAnyScriptWitness <$> indexWitnessedTxProposalProcedures txp
         ]
+
+    scriptWitnessesGuarding
+      :: [(L.Credential L.Guard, Maybe (ScriptGuardWitness (LedgerEra era)))]
+      -> [(ScriptWitnessIndex, Exp.AnyScriptWitness (LedgerEra era))]
+    scriptWitnessesGuarding guards =
+      [ (ScriptWitnessIndexGuarding index, witness)
+      | (index, (_, Just guardWitness)) <- zip [0 ..] guards
+      , Just witness <- [toAnyScriptWitness (scriptGuardWitnessToAnyWitness guardWitness)]
+      ]
 
 toAnyScriptWitness :: AnyWitness era -> Maybe (Exp.AnyScriptWitness era)
 toAnyScriptWitness AnyKeyWitnessPlaceholder = Nothing
@@ -1528,9 +1546,6 @@ makeTransactionBodyAutoBalance
   -> Map StakeCredential L.Coin
   -- ^ The map of all deposits for stake credentials that are being
   --   unregistered in this transaction
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ The map of all deposits for DRep credentials that are being
-  --   unregistered in this transaction
   -> L.UTxO (LedgerEra era)
   -- ^ The transaction inputs (including reference and collateral ones), not the entire 'UTxO'.
   -> TxBodyContent (LedgerEra era)
@@ -1547,7 +1562,6 @@ makeTransactionBodyAutoBalance
   pp
   poolids
   stakeDelegDeposits
-  drepDelegDeposits
   utxo
   txbodycontent
   changeaddr
@@ -1575,7 +1589,7 @@ makeTransactionBodyAutoBalance
     -- Check the balance before constructing the TxOut. L.mkBasicTxOut calls toCompact, which throws an irrecoverable
     -- error on negative Coin values, so checkNonNegative would never get to return Left for the negative case.
     initialChangeTxOutValue :: Ledger.Value (LedgerEra era) <- do
-      let val = evaluateTransactionBalance pp poolids stakeDelegDeposits drepDelegDeposits utxo txbodyForChange
+      let val = evaluateTransactionBalance pp poolids stakeDelegDeposits utxo txbodyForChange
           L.MaryValue initialCoin initialMultiAsset = obtainCommonConstraints (useEra @era) val
       val
         <$ unless
@@ -1690,7 +1704,7 @@ makeTransactionBodyAutoBalance
             }
 
     obtainCommonConstraints (useEra @era) $ do
-      let balance :: L.MaryValue = evaluateTransactionBalance pp poolids stakeDelegDeposits drepDelegDeposits utxo txbody2
+      let balance :: L.MaryValue = evaluateTransactionBalance pp poolids stakeDelegDeposits utxo txbody2
           adaBalance = getAda (useEra @era) balance
       when (adaBalance < 0) $
         Left $
@@ -1783,7 +1797,7 @@ handleExUnitsErrors ScriptInvalid failuresMap exUnitsMap
 -- estimate can be refined by distinguishing between Shelley and Byron-style witnesses.
 estimateTransactionKeyWitnessCount :: forall era. IsEra era => TxBodyContent (LedgerEra era) -> Word
 estimateTransactionKeyWitnessCount
-  TxBodyContent
+  body@TxBodyContent
     { txIns
     , txInsCollateral
     , txExtraKeyWits
@@ -1794,8 +1808,12 @@ estimateTransactionKeyWitnessCount
     } =
     fromIntegral $
       Set.size knowableKeyHashes
-        + sum (map estimateTxInWitnesses txIns)
+        + sum (map (estimateWitness . snd) txIns)
         + length txInsCollateral
+        + sum
+          [ estimateWitness (scriptGuardWitnessToAnyWitness witness)
+          | (_, Just witness@NativeGuardWitness{}) <- bodyGuardEntries body
+          ]
         + case txProposalProcedures of
           Just (TxProposalProcedures m) ->
             OMap.size m
@@ -1805,7 +1823,11 @@ estimateTransactionKeyWitnessCount
     -- 'Cardano.Ledger.Conway.UTxO.getConwayWitsVKeyNeeded' unions them.
     knowableKeyHashes :: Set (L.KeyHash L.Witness)
     knowableKeyHashes =
-      extraKeyHashes <> withdrawalKeyHashes <> certificateKeyHashes <> voteKeyHashes
+      extraKeyHashes <> guardKeyHashes <> withdrawalKeyHashes <> certificateKeyHashes <> voteKeyHashes
+
+    -- Dijkstra requires a VKey witness for every key-hash credential in the body guards.
+    guardKeyHashes :: Set (L.KeyHash L.Witness)
+    guardKeyHashes = Set.fromList $ mapMaybe credKeyHashWitness $ toList (bodyGuardCredentials body)
 
     extraKeyHashes :: Set (L.KeyHash L.Witness)
     extraKeyHashes = case txExtraKeyWits of
@@ -1846,14 +1868,15 @@ estimateTransactionKeyWitnessCount
           mempty
           (L.unVotingProcedures procedures)
 
-    estimateTxInWitnesses :: (TxIn, AnyWitness (LedgerEra era)) -> Int
-    estimateTxInWitnesses (_, AnyKeyWitnessPlaceholder) = 1
-    estimateTxInWitnesses (_, AnySimpleScriptWitness (SScript (SimpleScript simpleScript))) =
+    estimateWitness :: AnyWitness (LedgerEra era) -> Int
+    estimateWitness AnyKeyWitnessPlaceholder = 1
+    estimateWitness (AnySimpleScriptWitness (SScript (SimpleScript simpleScript))) =
       maxWitnessesInSimpleScript $
-        obtainCommonConstraints (useEra @era) $
-          Old.fromAllegraTimelock simpleScript
-    estimateTxInWitnesses (_, AnySimpleScriptWitness (SReferenceScript _)) = 0
-    estimateTxInWitnesses (_, AnyPlutusScriptWitness{}) = 0
+        case useEra @era of
+          ConwayEra -> Old.fromAllegraTimelock simpleScript
+          DijkstraEra -> Old.fromDijkstraNativeScript simpleScript
+    estimateWitness (AnySimpleScriptWitness (SReferenceScript _)) = 0
+    estimateWitness AnyPlutusScriptWitness{} = 0
     -- This is a rough conservative estimate of the maximum number of witnesses
     -- needed for a simple script to be satisfied. It is conservative because it
     -- assumes that each key hash only appears once, and it assumes the worst
@@ -1868,6 +1891,9 @@ estimateTransactionKeyWitnessCount
     maxWitnessesInSimpleScript (Old.RequireAllOf simpleScripts) = sum $ map maxWitnessesInSimpleScript simpleScripts
     maxWitnessesInSimpleScript (Old.RequireAnyOf simpleScripts) = maximum $ map maxWitnessesInSimpleScript simpleScripts
     maxWitnessesInSimpleScript (Old.RequireMOf n simpleScripts) = sum $ take n $ sortBy (comparing Down) (map maxWitnessesInSimpleScript simpleScripts)
+    -- Count the key witness directly identified by the guard credential.
+    -- Any signer requirements inside a referenced script are not inferred here.
+    maxWitnessesInSimpleScript (Old.RequireGuard cred) = maybe 0 (const 1) (credKeyHashWitness cred)
 
     -- Mirrors ledger's 'Cardano.Ledger.Conway.UTxO.voterWitnesses': a committee or
     -- DRep voter needs a VKey witness only when its credential is key-based.

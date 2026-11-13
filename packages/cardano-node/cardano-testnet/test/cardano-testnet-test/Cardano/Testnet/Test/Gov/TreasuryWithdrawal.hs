@@ -22,6 +22,7 @@ import qualified Cardano.Ledger.Coin as L
 import qualified Cardano.Ledger.Conway.Governance as L
 import qualified Cardano.Ledger.Shelley.LedgerState as L
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -57,15 +58,16 @@ import qualified Hedgehog.Extras as H
 
 hprop_ledger_events_treasury_withdrawal:: Property
 hprop_ledger_events_treasury_withdrawal = integrationRetryWorkspace 2  "treasury-withdrawal" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf@Conf { tempAbsPath } <- H.noteShowM $ mkConf tempAbsBasePath'
+  conf@Conf { tempAbsPath } <- H.noteShow $ mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
-      era = toCardanoEra sbe
+  let era = testEra
+
+      ceo = convert era
+      sbe = convert era
       eraName = eraToString era
 
       creationOptions = def

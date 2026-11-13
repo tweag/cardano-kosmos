@@ -754,6 +754,7 @@ instance ValidateEnvelope TestBlock where
 
 instance LedgerSupportsProtocol TestBlock where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
 
 instance HasHardForkHistory TestBlock where
@@ -929,6 +930,9 @@ deriving via
   SelectViewDiffusionPipelining TestBlock
   instance
     BlockSupportsDiffusionPipelining TestBlock
+
+instance BlockSupportsLeios TestBlock where
+  blockLeiosCert = defaultBlockLeiosCert
 
 {-------------------------------------------------------------------------------
   Corruption

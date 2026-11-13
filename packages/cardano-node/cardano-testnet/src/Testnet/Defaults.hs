@@ -93,6 +93,7 @@ import           Cardano.Network.NodeToNode (DiffusionMode (..))
 import           Cardano.Network.PeerSelection.Bootstrap (UseBootstrapPeers (..))
 import           Cardano.Network.PeerSelection.PeerTrustable (PeerTrustable (..))
 import           Cardano.Node.Testnet.Paths
+import           Cardano.Node.Tracing.DefaultTraceConfig (defaultCardanoConfig)
 import           Ouroboros.Network.ConnectionManager.Types (Provenance (..))
 import           Ouroboros.Network.Diffusion.Topology (LocalRootPeersGroup (..),
                    LocalRootPeersGroups (..), LocalRoots (..), NetworkTopology (..),
@@ -221,8 +222,8 @@ defaultDijkstraGenesis =
 -- | The only era supported by cardano-testnet for the moment.
 -- It's important to keep the era parameterization everywhere, for ease of development
 -- when new eras roll out.
-defaultEra :: ShelleyBasedEra Api.ConwayEra
-defaultEra = ShelleyBasedEraConway
+defaultEra :: ShelleyBasedEra Api.DijkstraEra
+defaultEra = ShelleyBasedEraDijkstra
 
 -- | A @TraceOptions@ that enables the @Forwarder@ backend; allowing nodes to
 -- forward their traces and metrics to cardano-tracer.
@@ -245,7 +246,6 @@ traceOptionsForwarding =
 defaultYamlHardforkViaConfig :: ShelleyBasedEra era -> Aeson.KeyMap Aeson.Value
 defaultYamlHardforkViaConfig sbe =
   defaultYamlConfig
-    <> [("TraceOptions", traceOptions)]
     <> protocolVersions sbe
     <> hardforkViaConfig sbe
  where
@@ -275,6 +275,10 @@ defaultYamlHardforkViaConfig sbe =
   hardforkViaConfig sbe' =
     Aeson.fromList $
       ("ExperimentalProtocolsEnabled", Aeson.Bool True)
+      -- Dijkstra is still experimental. Without this flag the node declares PV11 as its
+      -- maximum protocol version, so it cannot forge once the ledger is at PV12 (its own
+      -- blocks are rejected with ObsoleteNode), and it ignores the Dijkstra genesis file.
+      : ("ExperimentalHardForksEnabled", Aeson.Bool True)
       : (case sbe' of
             ShelleyBasedEraShelley ->
                 [ ("TestShelleyHardForkAtEpoch", Aeson.Number 0) ]
@@ -319,8 +323,6 @@ defaultYamlHardforkViaConfig sbe =
                 ]
                 )
 
-  traceOptions = Aeson.Object mempty
-
 defaultYamlConfig :: Aeson.KeyMap Aeson.Value
 defaultYamlConfig =
   Aeson.fromList
@@ -349,13 +351,32 @@ defaultYamlConfig =
     , ("RequiresNetworkMagic", "RequiresMagic")
 
     , ("PeerSharing", Aeson.Bool False)
-
-    -- New tracing system: empty map = use all defaults.
-    -- Mandatory: trace-dispatcher's FromJSON parses "TraceOptions" at the root.
-    , ("TraceOptions", Aeson.object mempty)
     ]
+    <> defaultTraceConfig
   where
     genesisPath era = Aeson.String $ Text.pack $ defaultGenesisFilepath era
+
+-- | The tracing configuration the node uses by default ('defaultCardanoConfig'),
+-- as the tracing keys of a configuration file: @TraceOptions@ and
+-- @TraceOptionMetricsPrefix@.
+--
+-- They are written out because the node fills them in only for a configuration
+-- in the flat format. Given an empty @TraceOptions@ in the @cardano-config@
+-- format, it uses @trace-dispatcher@'s fallback instead: every namespace at
+-- @Notice@, and no metrics prefix.
+--
+-- @trace-dispatcher@ renders a configuration with the keys of its newer format
+-- (@Options@, @MetricsPrefix@); they are renamed to the keys a configuration
+-- file uses.
+defaultTraceConfig :: Aeson.KeyMap Aeson.Value
+defaultTraceConfig =
+  Aeson.fromList
+    [ (fileKey, value)
+    | Aeson.Object rendered <- [toJSON defaultCardanoConfig]
+    , (renderedKey, fileKey) <- [("Options", "TraceOptions"), ("MetricsPrefix", "TraceOptionMetricsPrefix")]
+    , Just value <- [Aeson.lookup renderedKey rendered]
+    , value /= Aeson.Null
+    ]
 
 -- | We need a Byron genesis in order to be able to hardfork to the later Shelley based eras.
 -- The values here don't matter as the testnet conditions are ultimately determined

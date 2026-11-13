@@ -17,6 +17,7 @@ import           Cardano.Api.Experimental (Some (Some))
 import           Cardano.Api.Ledger (EpochInterval (..))
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -57,12 +58,12 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 hprop_ref_plutus_cost_calculation :: Property
 hprop_ref_plutus_cost_calculation = integrationRetryWorkspace 2 "ref-plutus-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let conf@Conf{tempAbsPath} = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
-    sbe = ShelleyBasedEraConway
+    sbe = convert testEra
     era = toCardanoEra sbe
     cEra = AnyCardanoEra era
     eraName = eraToString era
@@ -213,12 +214,12 @@ hprop_ref_plutus_cost_calculation = integrationRetryWorkspace 2 "ref-plutus-scri
 hprop_included_plutus_cost_calculation :: Property
 hprop_included_plutus_cost_calculation = integrationRetryWorkspace 2 "included-plutus-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let conf@Conf{tempAbsPath} = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
-    sbe = ShelleyBasedEraConway
+    sbe = convert testEra
     era = toCardanoEra sbe
     cEra = AnyCardanoEra era
     eraName = eraToString era
@@ -325,12 +326,12 @@ hprop_included_plutus_cost_calculation = integrationRetryWorkspace 2 "included-p
 hprop_included_simple_script_cost_calculation :: Property
 hprop_included_simple_script_cost_calculation = integrationRetryWorkspace 2 "included-simple-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let conf@Conf{tempAbsPath} = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
-    sbe = ShelleyBasedEraConway
+    sbe = convert testEra
     era = toCardanoEra sbe
     cEra = AnyCardanoEra era
     eraName = eraToString era

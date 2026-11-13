@@ -1263,6 +1263,12 @@ createTransactionBody
   -> Either TxBodyError (TxBody era)
 createTransactionBody sbe bc =
   shelleyBasedEraConstraints sbe $ do
+    -- Checked up front so a reference script with an unsupported language is
+    -- never silently dropped by the ledger 'TxOut' conversion further down.
+    first TxBodyOutputError $
+      validateTxOutsReferenceScripts sbe $
+        txOuts bc
+          <> [txout | TxReturnCollateral _ txout <- [txReturnCollateral bc]]
     (sData, mScriptIntegrityHash, scripts) <-
       forEraInEon
         (convert sbe)
@@ -1333,7 +1339,7 @@ createTransactionBody sbe bc =
 
     setReqSignerHashes <-
       let keyWits = convExtraKeyWitnesses apiExtraKeyWitnesses
-       in monoidForEraInEonA era $ \w -> case w of
+       in monoidForEraInEonA era $ \case
             -- Dijkstra replaced required signer hashes with guards, and a key-hash
             -- guard makes the ledger demand that key's signature: translate, appending
             -- so any other guards stay intact.
@@ -2104,6 +2110,8 @@ data ScriptWitnessIndex
     ScriptWitnessIndexVoting !Word32
   | -- | The n'th proposal, in the order of the proposals.
     ScriptWitnessIndexProposing !Word32
+  | -- | The guard position in the complete ordered guard set (Dijkstra onwards).
+    ScriptWitnessIndexGuarding !Word32
   deriving (Eq, Ord, Show)
 
 instance ToJSON ScriptWitnessIndex where
@@ -2133,6 +2141,8 @@ instance ToJSON ScriptWitnessIndex where
         [ "kind" .= Aeson.String "ScriptWitnessIndexVoting"
         , "value" .= n
         ]
+    ScriptWitnessIndexGuarding n ->
+      object ["kind" .= Aeson.String "ScriptWitnessIndexGuarding", "value" .= n]
     ScriptWitnessIndexProposing n ->
       object
         [ "kind" .= Aeson.String "ScriptWitnessIndexProposing"
@@ -2152,6 +2162,8 @@ renderScriptWitnessIndex (ScriptWitnessIndexVoting index) =
   "vote " <> show index <> " (in ascending order of the votes)"
 renderScriptWitnessIndex (ScriptWitnessIndexProposing index) =
   "proposal " <> show index <> " (in ascending order of the proposals)"
+renderScriptWitnessIndex (ScriptWitnessIndexGuarding index) =
+  "guard " <> show index <> " (in the ordered guard set)"
 
 fromScriptWitnessIndex
   :: AlonzoEraOnwards era
@@ -2194,6 +2206,7 @@ fromScriptWitnessIndexConway i =
     ScriptWitnessIndexWithdrawal n -> Just $ L.ConwayWithdrawing (L.AsIx n)
     ScriptWitnessIndexVoting n -> Just $ L.ConwayVoting (L.AsIx n)
     ScriptWitnessIndexProposing n -> Just $ L.ConwayProposing (L.AsIx n)
+    ScriptWitnessIndexGuarding _ -> Nothing
 
 fromScriptWitnessIndexDijkstra
   :: ScriptWitnessIndex -> Maybe (L.PlutusPurpose L.AsIx (ShelleyLedgerEra DijkstraEra))
@@ -2205,6 +2218,7 @@ fromScriptWitnessIndexDijkstra i =
     ScriptWitnessIndexWithdrawal n -> Just $ L.DijkstraWithdrawing (L.AsIx n)
     ScriptWitnessIndexVoting n -> Just $ L.DijkstraVoting (L.AsIx n)
     ScriptWitnessIndexProposing n -> Just $ L.DijkstraProposing (L.AsIx n)
+    ScriptWitnessIndexGuarding n -> Just $ L.DijkstraGuarding (L.AsIx n)
 
 toScriptIndex
   :: AlonzoEraOnwards era
@@ -2250,7 +2264,7 @@ toScriptIndexDijkstra scriptPurposeIndex =
     L.DijkstraWithdrawing (L.AsIx i) -> ScriptWitnessIndexWithdrawal i
     L.DijkstraVoting (L.AsIx i) -> ScriptWitnessIndexVoting i
     L.DijkstraProposing (L.AsIx i) -> ScriptWitnessIndexProposing i
-    L.DijkstraGuarding (L.AsIx i) -> error $ "toScriptIndexDijkstra: unexpected DijkstraGuarding at index " <> show i
+    L.DijkstraGuarding (L.AsIx i) -> ScriptWitnessIndexGuarding i
 
 collectTxBodyScriptWitnesses
   :: forall era
@@ -2596,6 +2610,8 @@ toAuxiliaryData sbe txMetadata txAuxScripts =
         ShelleyBasedEraConway ->
           guard (not (Map.null ms && null ss)) $> L.mkAlonzoTxAuxData ms ss
         ShelleyBasedEraDijkstra ->
+          -- TODO: cardano-ledger-dijkstra 0.4.0.0 reads auxiliary scripts up to eraMaxLanguage
+          -- (still PlutusV3), so PlutusV4 is dropped on read-back; fixed by ledger PR 6109.
           guard (not (Map.null ms && null ss)) $> L.mkAlonzoTxAuxData ms ss
 
 -- ----------------------------------------------------------------------------

@@ -48,7 +48,6 @@ import Cardano.Binary qualified as CBOR
 import Cardano.Ledger.Alonzo.Scripts qualified as L
 import Cardano.Ledger.BaseTypes (Version)
 import Cardano.Ledger.Core qualified as L
-import Cardano.Ledger.Dijkstra.Scripts qualified as Dijkstra
 import Cardano.Ledger.Mary.Value qualified as L
 import Cardano.Ledger.Plutus.Language qualified as L
 
@@ -80,6 +79,7 @@ type family ToPlutusScriptPurpose witnessable = (purpose :: PlutusScriptPurpose)
   ToPlutusScriptPurpose WithdrawalItem = WithdrawingScript
   ToPlutusScriptPurpose VoterItem = VotingScript
   ToPlutusScriptPurpose ProposalItem = ProposingScript
+  ToPlutusScriptPurpose GuardItem = GuardingScript
 
 convertToNewScriptWitness
   :: AlonzoEraOnwards era
@@ -88,13 +88,14 @@ convertToNewScriptWitness
   -> Either
        CBOR.DecoderError
        (Witnessable thing (ShelleyLedgerEra era), AnyWitness (ShelleyLedgerEra era))
-convertToNewScriptWitness eon (Old.PlutusScriptWitness _ v scriptOrRefInput datum scriptRedeemer execUnits) witnessable = do
+convertToNewScriptWitness eon (Old.PlutusScriptWitness langInEra v scriptOrRefInput datum scriptRedeemer execUnits) witnessable = do
   let d = createPlutusScriptDatum witnessable v datum
   newScriptWitness <-
     obtainConstraints v $
       toNewPlutusScriptWitness
         eon
         witnessable
+        langInEra
         v
         scriptOrRefInput
         scriptRedeemer
@@ -115,7 +116,7 @@ convertTotimelock eon s = alonzoEraOnwardsConstraints eon $ case eon of
   AlonzoEraOnwardsAlonzo -> Old.toAllegraTimelock s
   AlonzoEraOnwardsBabbage -> Old.toAllegraTimelock s
   AlonzoEraOnwardsConway -> Old.toAllegraTimelock s
-  AlonzoEraOnwardsDijkstra -> Dijkstra.upgradeTimelock (Old.toAllegraTimelock s)
+  AlonzoEraOnwardsDijkstra -> Old.toDijkstraNativeScript s
 
 createPlutusScriptDatum
   :: Witnessable thing era
@@ -131,6 +132,7 @@ createPlutusScriptDatum missingContext plutusVersion oldDatum =
     (WitProposal{}, _) -> NoScriptDatum
     (WitVote{}, _) -> NoScriptDatum
     (WitTxCert{}, _) -> NoScriptDatum
+    (WitGuard{}, _) -> NoScriptDatum
 
 toPlutusScriptDatum
   :: Witnessable TxInItem era
@@ -159,6 +161,7 @@ toNewPlutusScriptWitness
    . L.PlutusLanguage (Old.ToLedgerPlutusLanguage lang)
   => AlonzoEraOnwards era
   -> Witnessable thing (ShelleyLedgerEra era)
+  -> Old.ScriptLanguageInEra lang era
   -> Old.PlutusScriptVersion lang
   -> Old.PlutusScriptOrReferenceInput lang
   -> ScriptRedeemer
@@ -169,29 +172,37 @@ toNewPlutusScriptWitness
        ( AnyWitness
            (ShelleyLedgerEra era)
        )
-toNewPlutusScriptWitness eon w l (Old.PScript (Old.PlutusScriptSerialised scriptShortBs)) scriptRedeemer execUnits datum = do
+toNewPlutusScriptWitness eon w langInEra l (Old.PScript (Old.PlutusScriptSerialised scriptShortBs)) scriptRedeemer execUnits datum = do
   let protocolVersion = getVersion eon
       plutusScript = L.Plutus $ L.PlutusBinary scriptShortBs
-
-  -- 'decodePlutusRunnable' is total now; the decode result it used to return
-  -- is a lazy field of 'PlutusRunnable', so forcing it keeps this check.
-  let plutusScriptRunnable =
+      plutusScriptRunnable =
         L.decodePlutusRunnable @(Old.ToLedgerPlutusLanguage lang) protocolVersion plutusScript
+
   case L.plutusRunnableResult plutusScriptRunnable of
     Left e ->
       Left $
-        CBOR.DecoderErrorCustom "PlutusLedgerApi.Common.ScriptDecodeError" (Text.pack . show $ pretty e)
-    Right{} ->
-      return $
-        mkPlutusScriptWitness
-          eon
-          w
-          (toPlutusSLanguage l)
-          plutusScriptRunnable
-          datum
-          scriptRedeemer
-          execUnits
-toNewPlutusScriptWitness _ w l (Old.PReferenceScript refInput) scriptRedeemer execUnits datum =
+        CBOR.DecoderErrorCustom "PlutusLedgerApi.Common.ScriptDecodeError" (Text.show $ pretty e)
+    Right{} -> do
+      let slang = toPlutusSLanguage l
+          -- The legacy proof rules this failure out, but one runtime lookup path
+          -- keeps the shim simple.
+          notSupported :: CBOR.DecoderError
+          notSupported =
+            alonzoEraOnwardsConstraints eon $
+              plutusLanguageNotSupportedInEraError @(ShelleyLedgerEra era) slang
+      case plutusLangInShelleyBasedEra (Old.eraOfScriptLanguageInEra langInEra) slang of
+        Nothing -> Left notSupported
+        Just (PlutusLangInEra _) ->
+          return $
+            mkPlutusScriptWitness
+              eon
+              w
+              slang
+              (PlutusScriptInEra plutusScriptRunnable)
+              datum
+              scriptRedeemer
+              execUnits
+toNewPlutusScriptWitness _ w _ l (Old.PReferenceScript refInput) scriptRedeemer execUnits datum =
   return $
     mkReferencePlutusScriptWitness w (toPlutusSLanguage l) refInput datum scriptRedeemer execUnits
 
@@ -202,6 +213,7 @@ type family PlutusScriptFor thing where
   PlutusScriptFor WithdrawalItem = WithdrawingScript
   PlutusScriptFor VoterItem = VotingScript
   PlutusScriptFor ProposalItem = ProposingScript
+  PlutusScriptFor GuardItem = GuardingScript
 
 mkPlutusScriptWitness
   :: forall era thing plutuslang
@@ -209,14 +221,14 @@ mkPlutusScriptWitness
   => AlonzoEraOnwards era
   -> Witnessable thing (ShelleyLedgerEra era)
   -> L.SLanguage plutuslang
-  -> L.PlutusRunnable plutuslang
+  -> PlutusScriptInEra plutuslang (ShelleyLedgerEra era)
   -> PlutusScriptDatum plutuslang (PlutusScriptFor thing)
   -> ScriptRedeemer
   -> ExecutionUnits
   -> AnyWitness (ShelleyLedgerEra era)
-mkPlutusScriptWitness eon w l plutusScriptRunnable d r e =
+mkPlutusScriptWitness eon w l script d r e =
   let script' :: PlutusScriptOrReferenceInput plutuslang (ShelleyLedgerEra era)
-      script' = (PScript $ PlutusScriptInEra plutusScriptRunnable)
+      script' = PScript script
    in case w of
         WitTxIn{} ->
           let
@@ -262,7 +274,7 @@ mkPlutusScriptWitness eon w l plutusScriptRunnable d r e =
             AnyPlutusWithdrawingScriptWitness
               ( PlutusScriptWitness
                   l
-                  (PScript $ PlutusScriptInEra plutusScriptRunnable)
+                  script'
                   d
                   r
                   e
@@ -272,17 +284,18 @@ mkPlutusScriptWitness eon w l plutusScriptRunnable d r e =
             AnyPlutusVotingScriptWitness
               ( PlutusScriptWitness
                   l
-                  (PScript $ PlutusScriptInEra plutusScriptRunnable)
+                  script'
                   d
                   r
                   e
               )
+        WitGuard{} -> AnyPlutusScriptWitness $ AnyPlutusGuardingScriptWitness (PlutusScriptWitness l script' d r e)
         WitProposal{} ->
           AnyPlutusScriptWitness $
             AnyPlutusProposingScriptWitness
               ( PlutusScriptWitness
                   l
-                  (PScript $ PlutusScriptInEra plutusScriptRunnable)
+                  script'
                   d
                   r
                   e
@@ -300,6 +313,9 @@ mkReferencePlutusScriptWitness
   -> AnyWitness (ShelleyLedgerEra era)
 mkReferencePlutusScriptWitness w l txIn d r e =
   case w of
+    WitGuard{} ->
+      AnyPlutusScriptWitness $
+        AnyPlutusGuardingScriptWitness (PlutusScriptWitness l (PReferenceScript txIn) d r e)
     WitTxIn{} ->
       let s
             :: L.SLanguage plutuslang

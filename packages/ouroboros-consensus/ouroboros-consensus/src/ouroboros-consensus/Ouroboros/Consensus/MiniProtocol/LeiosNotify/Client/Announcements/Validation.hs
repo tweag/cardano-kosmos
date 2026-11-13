@@ -24,9 +24,14 @@ module Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validat
   , AnnouncingHeader (ancAnnouncement, ancElectionId, ancHeader)
   , ValidAnnouncement (..)
   , announcementValidity
+  , announcingRbHash
+  , InvalidLeiosAnnouncementAgeLimits (..)
+  , LeiosAnnouncementAgeLimits
+  , defaultLeiosAnnouncementAgeLimits
   , maxAnnouncementAgeRecv
   , maxAnnouncementAgeSend
   , mkAnnouncingHeader
+  , mkLeiosAnnouncementAgeLimits
   , validateAnnouncementHeader
   ) where
 
@@ -63,7 +68,7 @@ import Ouroboros.Consensus.Ledger.SupportsProtocol
   , ledgerViewForecastAt
   )
 import Ouroboros.Consensus.Leios.Protocol
-import Ouroboros.Consensus.Leios.Types (ElectionId (..))
+import Ouroboros.Consensus.Leios.Types (ElectionId (..), RankingBlockHash, toRankingBlockHash)
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
 import qualified Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements as Announcements
 import Ouroboros.Consensus.Protocol.Abstract (ValidationErr)
@@ -85,11 +90,16 @@ deriving anyclass instance NoThunks (Header blk) => NoThunks (AnnouncingHeader b
 instance HasHeader (Header blk) => Eq (AnnouncingHeader blk) where
   a == b = headerHash (ancHeader a) == headerHash (ancHeader b)
 
+-- | The hash of the announcing block, which votes name.
+announcingRbHash ::
+  forall blk. (ConvertRawHash blk, GetHeader blk) => AnnouncingHeader blk -> RankingBlockHash
+announcingRbHash anc = toRankingBlockHash (Proxy @blk) (headerHash (ancHeader anc))
+
 -- | Interpret a header as a relayed announcement, or 'Nothing' if it carries
 -- none (so it should not have been relayed as one).
 mkAnnouncingHeader ::
   forall blk.
-  (BlockSupportsProtocol blk, LeiosProtocol (BlockProtocol blk)) =>
+  BlockSupportsProtocol blk =>
   TopLevelConfig blk ->
   Header blk ->
   Maybe (AnnouncingHeader blk)
@@ -122,11 +132,11 @@ data AnnouncementInvalidity blk
     -- precondition. For a caught-up node a slot so stale is as bogus as one in
     -- the far-future.
     --
-    -- The 'Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.ErrTooOld' bound rejects any
-    -- announcement older than 'maxAnnouncementAgeRecv' (minutes), which is
-    -- always far younger than the immutable tip (hours), so this case should
-    -- never actually fire. It is kept as a distinct error to throw in case that
-    -- branch is somehow reached, eg on an oddly-configured testnet.
+    -- An honest peer relays only announcements younger than its
+    -- 'maxAnnouncementAgeSend', which the configuration keeps below every
+    -- downstream peer's immutable tip's age, by a margin (see
+    -- 'LeiosAnnouncementAgeLimits'). So this fires only for a dishonest peer
+    -- or a misconfigured network.
     SlotBeforeImmutableTip
   | -- | The header failed the relaxed, out-of-context protocol-level validation
     -- (election proof and signature). See 'validateLeiosAnnouncement'
@@ -224,9 +234,7 @@ deriving stock instance
 -- Returns the OCIN staleness.
 validateAnnouncementHeader ::
   forall blk.
-  ( LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
-  ) =>
+  LedgerSupportsProtocol blk =>
   TopLevelConfig blk ->
   ExtLedgerState blk EmptyMK ->
   AnnouncingHeader blk ->
@@ -279,8 +287,8 @@ validateAnnouncementHeader cfg extLedger ancHdr = do
 announcementValidity ::
   ( IOLike m
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   ) =>
+  LeiosAnnouncementAgeLimits ->
   SystemTime m ->
   InFutureCheck.SomeHeaderInFutureCheck m blk ->
   TopLevelConfig blk ->
@@ -289,7 +297,7 @@ announcementValidity ::
   ExtLedgerState blk EmptyMK ->
   AnnouncingHeader blk ->
   ExceptT (Announcements.Error (AnnouncementInvalidity blk)) m (ValidAnnouncement blk)
-announcementValidity systemTime futureCheck cfg immLedger ancHdr = do
+announcementValidity ageLimits systemTime futureCheck cfg immLedger ancHdr = do
   onset <- lift $ case futureCheck of
     InFutureCheck.SomeHeaderInFutureCheck hifc -> do
       arrival <- InFutureCheck.recordHeaderArrival hifc (ancHeader ancHdr)
@@ -308,7 +316,7 @@ announcementValidity systemTime futureCheck cfg immLedger ancHdr = do
   -- is non-negative.
   now <- lift $ systemTimeCurrent systemTime
   let age = diffRelTime now onset
-  when (age > maxAnnouncementAgeRecv) $
+  when (age > maxAnnouncementAgeRecv ageLimits) $
     throwError Announcements.ErrTooOld
   staleness <-
     liftEither . first Announcements.ErrInvalid . runExcept $
@@ -331,27 +339,83 @@ data ValidAnnouncement blk = MkValidAnnouncement
   , announcementStaleness :: !OCINStaleness
   }
 
--- | Do not relay an announcement whose slot's wall-clock onset is older than
--- this.
+-- | How old an announcement may be, by the wall-clock onset of its slot.
 --
--- Comfortably less than 'maxAnnouncementAgeRecv', so that an announcement an
--- honest node relays just before this bound still arrives within its
--- downstream peer's larger bound, even after transmission time and clock skew.
--- It is also far younger than any peer's immutable tip, so no downstream peer
--- rejects a relayed announcement as 'SlotBeforeImmutableTip'.
+-- An honest node relays an announcement until it is 'maxAnnouncementAgeSend'
+-- old. Its downstream peer rejects what is older than its own
+-- 'maxAnnouncementAgeRecv', and what is in a slot before its immutable tip. So
+-- the configuration must ensure, for every node and each of its downstream
+-- peers, that both of these exceed the node's 'maxAnnouncementAgeSend' by more
+-- than a margin:
 --
--- TODO magic number; should be a config/RunNode option
-maxAnnouncementAgeSend :: NominalDiffTime
-maxAnnouncementAgeSend = 300 -- 5 minutes
+-- - the downstream peer's 'maxAnnouncementAgeRecv';
+-- - how old the downstream peer's immutable tip always is, by the onset of its
+--   slot.
+--
+-- The margin is the sum of
+--
+-- - 'Ouroboros.Consensus.Leios.NotifyLog.notifyLogPruneCadence', for which the
+--   node may still relay a notification past its expiry;
+-- - how far the node's clock may lag its peer's;
+-- - how long a notification may take from the node's log to its peer's checks,
+--   including the time its peer spends on the notifications ahead of it.
+--
+-- 'defaultLeiosAnnouncementAgeLimits' suits a network whose immutable tip is
+-- hours old. One whose immutable tip is only minutes old, such as a test
+-- network, needs smaller limits, and since each node's receive limit must
+-- exceed its upstream peers' send limits, all of its nodes need them.
+-- 'mkLeiosAnnouncementAgeLimits' checks only what a node can check alone: that
+-- its own receive limit exceeds its own send limit.
+--
+-- It is nonsensical for 'maxAnnouncementAgeSend' to be less than the vote
+-- window, 3 L_hdr + L_vote + L_diff
+-- ('Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State.leiosVoteWindow'):
+-- the node relays a vote until its window ends, so a peer that connects after
+-- its announcement expired would receive the vote without the announcement, and
+-- disconnect the node. But that is awkward to enforce, since the vote window
+-- comes from the ledger, and so unusual that it does not seem worth
+-- complicating the code to enforce or check it.
+--
+-- TODO No test relays a notification at the end of that margin: just before
+-- its expiry, read from the log just before a prune, delivered late to a peer
+-- whose clock is ahead, and whose immutable tip advances meanwhile.
+data LeiosAnnouncementAgeLimits
+  = -- | INVARIANT: the send limit, first, is not negative, and the receive
+    -- limit exceeds it
+    UnsafeMkLeiosAnnouncementAgeLimits !NominalDiffTime !NominalDiffTime
+  deriving stock (Eq, Show)
 
--- | Disconnect an upstream peer that relays an announcement whose slot's
--- wall-clock onset is older than this. See
+-- | Do not relay an announcement older than this.
+maxAnnouncementAgeSend :: LeiosAnnouncementAgeLimits -> NominalDiffTime
+maxAnnouncementAgeSend (UnsafeMkLeiosAnnouncementAgeLimits send _recv) = send
+
+-- | Disconnect an upstream peer that relays an announcement older than this.
+-- See
 -- 'Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.ErrTooOld'.
---
--- Comfortably greater than 'maxAnnouncementAgeSend', so that an honest peer is
--- never disconnected on account of transmission time or clock skew.
---
--- TODO magic number; should be a config/RunNode option... or even a protocol
--- parameter?
-maxAnnouncementAgeRecv :: NominalDiffTime
-maxAnnouncementAgeRecv = 600 -- 10 minutes
+maxAnnouncementAgeRecv :: LeiosAnnouncementAgeLimits -> NominalDiffTime
+maxAnnouncementAgeRecv (UnsafeMkLeiosAnnouncementAgeLimits _send recv) = recv
+
+-- | The limits, unless the send limit is negative or the receive limit does not
+-- exceed it.
+mkLeiosAnnouncementAgeLimits ::
+  -- | 'maxAnnouncementAgeSend'
+  NominalDiffTime ->
+  -- | 'maxAnnouncementAgeRecv'
+  NominalDiffTime ->
+  Either InvalidLeiosAnnouncementAgeLimits LeiosAnnouncementAgeLimits
+mkLeiosAnnouncementAgeLimits send recv
+  | send < 0 = Left $ NegativeAnnouncementAgeSend send
+  | recv <= send = Left $ AnnouncementAgeRecvNotAboveSend send recv
+  | otherwise = Right $ UnsafeMkLeiosAnnouncementAgeLimits send recv
+
+-- | Why 'mkLeiosAnnouncementAgeLimits' rejects a pair of limits.
+data InvalidLeiosAnnouncementAgeLimits
+  = -- | The send limit is negative.
+    NegativeAnnouncementAgeSend !NominalDiffTime
+  | -- | The receive limit, given second, does not exceed the send limit.
+    AnnouncementAgeRecvNotAboveSend !NominalDiffTime !NominalDiffTime
+  deriving stock (Eq, Show)
+
+-- | Five minutes to relay an announcement, and ten to accept one.
+defaultLeiosAnnouncementAgeLimits :: LeiosAnnouncementAgeLimits
+defaultLeiosAnnouncementAgeLimits = UnsafeMkLeiosAnnouncementAgeLimits 300 600

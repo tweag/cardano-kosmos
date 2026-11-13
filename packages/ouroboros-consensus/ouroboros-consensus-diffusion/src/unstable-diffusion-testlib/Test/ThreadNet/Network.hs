@@ -67,6 +67,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Data.Maybe.Strict (StrictMaybe (SNothing))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Typeable as Typeable
@@ -93,6 +94,9 @@ import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CSClient
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( defaultLeiosAnnouncementAgeLimits
+  )
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type (LeiosNotify)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert (PerasCertDiffusion)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote (PerasVoteDiffusion)
@@ -957,7 +961,15 @@ runThreadNetwork
                 -- ChainDB will reject it as invalid, and
                 -- 'Test.ThreadNet.General.prop_general' will eventually fail
                 -- because of a block rejection.
-                void $ ChainDB.addBlock chainDB InvalidBlockPunishment.noPunishment ebb
+                --
+                -- Only Byron has EBBs, and Byron has no Leios.
+                void $
+                  ChainDB.addBlock
+                    chainDB
+                    InvalidBlockPunishment.noPunishment
+                    (pointSlot p)
+                    SNothing
+                    ebb
                 pure forged
 
       -- This variable holds the number of the earliest slot in which the
@@ -1067,6 +1079,7 @@ runThreadNetwork
               , mempoolTimeoutConfig = Nothing
               , keepAliveRng = kaRng
               , peerSharingRng = psRng
+              , leiosAnnouncementAgeLimits = defaultLeiosAnnouncementAgeLimits
               , miniProtocolParameters = defaultMiniProtocolParameters
               , blockFetchConfiguration =
                   BlockFetchConfiguration
@@ -1834,7 +1847,7 @@ type LimitedApp' m addr blk =
     (AnyMessage KeepAlive)
     (AnyMessage (PeerSharing addr))
     (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
-    -- The annotated LeiosFetch codec needs the bytes, too.
+    -- The annotated LeiosFetch codec needs the bytes.
     Lazy.ByteString
     NodeToNodeInitiatorResult
     ()

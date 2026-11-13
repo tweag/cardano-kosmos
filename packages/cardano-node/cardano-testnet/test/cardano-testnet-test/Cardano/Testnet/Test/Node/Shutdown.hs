@@ -13,6 +13,7 @@ module Cardano.Testnet.Test.Node.Shutdown
 import           Cardano.Api
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -65,13 +66,13 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 -- TODO: Use cardanoTestnet in hprop_shutdown
 hprop_shutdown :: Property
 hprop_shutdown = integrationRetryWorkspace 2 "shutdown" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
   let tempBaseAbsPath' = makeTmpBaseAbsPath $ tempAbsPath conf
       tempAbsPath' = unTmpAbsPath $ tempAbsPath conf
       logDir' = makeLogDir $ tempAbsPath conf
       socketDir' = makeSocketDir $ tempAbsPath conf
       testnetMagic' = defaultTestnetMagic
-      sbe = ShelleyBasedEraConway
+      sbe = convert testEra
 
   -- TODO: We need to uniformly create these directories
   H.createDirectoryIfMissing_ logDir'
@@ -124,8 +125,6 @@ hprop_shutdown = integrationRetryWorkspace 2 "shutdown" $ \tempAbsBasePath' -> H
     , "--start-time", formatIso8601 startTime
     ]
 
-  byronGenesisHash <- liftToIntegration $ Testnet.getByronGenesisHash $ byronGenesisOutputDir </> "genesis.json"
-
   -- Move the files to the paths expected by 'defaultYamlHardforkViaConfig' below
   H.renameFile (byronGenesisOutputDir </> "genesis.json") (tempAbsPath' </> defaultGenesisFilepath ByronEra)
   H.renameFile (tempAbsPath' </> "shelley/genesis.json")        (tempAbsPath' </> defaultGenesisFilepath ShelleyEra)
@@ -134,20 +133,7 @@ hprop_shutdown = integrationRetryWorkspace 2 "shutdown" $ \tempAbsBasePath' -> H
   -- TODO: once 'cardano-cli latest genesis create' supports dijkstra, make this a copy instead of writing a default
   H.writeFile (tempAbsPath' </> defaultGenesisFilepath DijkstraEra) . LBS.unpack $ encode defaultDijkstraGenesis
 
-  (shelleyGenesisHash,alonzoGenesisHash)  <-
-    liftToIntegration $ do
-      shelleyGenesisHash <- Testnet.getShelleyGenesisHash (tempAbsPath' </> defaultGenesisFilepath ShelleyEra) "ShelleyGenesisHash"
-      alonzoGenesisHash  <- Testnet.getShelleyGenesisHash (tempAbsPath' </> defaultGenesisFilepath AlonzoEra)  "AlonzoGenesisHash"
-      return (shelleyGenesisHash, alonzoGenesisHash)
-
-  let finalYamlConfig :: LBS.ByteString
-      finalYamlConfig = encode . Object
-                                 $ mconcat [ byronGenesisHash
-                                           , shelleyGenesisHash
-                                           , alonzoGenesisHash
-                                           , defaultYamlHardforkViaConfig sbe]
-
-  H.evalIO $ LBS.writeFile (tempAbsPath' </> "configuration.yaml") finalYamlConfig
+  Testnet.writeConfiguration (tempAbsPath' </> "configuration.yaml") sbe
 
   H.evalIO $ LBS.writeFile (tempAbsPath' </> "mainnet-topology.json")
     $ encode defaultMainnetTopology
@@ -202,7 +188,7 @@ hprop_shutdownOnSlotSynced :: Property
 hprop_shutdownOnSlotSynced = integrationRetryWorkspace 2 "shutdown-on-slot-synced" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
   -- TODO: Move yaml filepath specification into individual node options
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
   let maxSlot = 150
       epochLength = 300
@@ -254,7 +240,7 @@ hprop_shutdownOnSigint :: Property
 hprop_shutdownOnSigint = integrationRetryWorkspace 2 "shutdown-on-sigint" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
   -- TODO: Move yaml filepath specification into individual node options
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
   let creationOptions = def
         { creationGenesisOptions = def { genesisEpochLength = 300 }

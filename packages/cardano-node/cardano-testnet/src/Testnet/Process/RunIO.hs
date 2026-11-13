@@ -15,7 +15,6 @@ module Testnet.Process.RunIO
   , procCustom
   , procFlex
   , liftIOAnnotated
-  , defaultExecConfig
   ) where
 
 import           Prelude

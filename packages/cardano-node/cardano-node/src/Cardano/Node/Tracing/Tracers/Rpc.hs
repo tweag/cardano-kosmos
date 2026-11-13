@@ -176,11 +176,11 @@ instance MetaTrace TraceRpc where
     ["SubmitService", "TxDecodingError"] -> Just "A regular request error, when submitted transaction decoding fails."
     ["SubmitService", "TxValidationError"] -> Just "A regular request error, when submitted transaction is invalid."
     ["SubmitService", "EvalTxDecodingError"] -> Just "A regular request error, when evalTx transaction decoding fails."
-    ["SyncService", "FetchBlock", "Span"] -> Just "Span for the FetchBlock SyncService method."
+    ["SyncService", "FetchBlock", "Span"] -> Just "Span for the FetchBlock UTXORPC method."
     ["SyncService", "FetchBlockNotFound"] -> Just "Requested block was not found in ChainDB."
     ["SyncService", "NodeKernelAccessUnavailable"] -> Just "Node kernel access not yet initialised. The node is still starting up."
-    ["SyncService", "ReadTip", "Span"] -> Just "Span for the ReadTip SyncService method."
-    ["SyncService", "FollowTip", "Span"] -> Just "Span for the FollowTip SyncService method."
+    ["SyncService", "ReadTip", "Span"] -> Just "Span for the ReadTip UTXORPC method."
+    ["SyncService", "FollowTip", "Span"] -> Just "Span for the FollowTip UTXORPC method."
     ["NodeKernelAccess", "UnsupportedBlockType"] -> Just "The block type is not supported by the RPC server."
     ["ServerListening"] -> Just "RPC server is starting to listen on the configured endpoint."
     _ -> Nothing
@@ -220,6 +220,7 @@ instance MetaTrace TraceRpc where
           , ["QueryService", "ReadUtxos", "Span"]
           , ["QueryService", "SearchUtxos", "Span"]
           , ["QueryService", "ReadGenesis", "Span"]
+          , ["QueryService", "ReadEraSummary", "Span"]
           , ["SubmitService", "SubmitTx", "Span"]
           , ["SubmitService", "EvalTx", "Span"]
           , ["SubmitService", "ReadMempool", "Span"]

@@ -17,6 +17,7 @@ module Cardano.CLI.Compatible.Json.Friendly
   , friendlyTxBody
   , friendlyProposal
   , friendlyDRep
+  , friendlyCertificate
 
     -- * Functions that are not in IO
 
@@ -44,9 +45,13 @@ import Cardano.CLI.Orphan ()
 import Cardano.CLI.Type.Common (FormatJson (..), FormatYaml (..))
 import Cardano.CLI.Type.MonadWarning (MonadWarning, runWarningIO)
 import Cardano.Crypto.Hash (hashToTextAsHex)
+import Cardano.Ledger.Address qualified as L
 import Cardano.Ledger.Api.Tx qualified as L
+import Cardano.Ledger.BaseTypes (Exclusive (..), Inclusive (..))
 import Cardano.Ledger.Core qualified as C
 import Cardano.Ledger.Credential (credKeyHash, credScriptHash)
+import Cardano.Ledger.Dijkstra.Scripts qualified as Dijkstra
+import Cardano.Ledger.Dijkstra.TxBody qualified as L
 import Cardano.Ledger.Keys (coerceKeyRole)
 
 import Control.Applicative ((<|>))
@@ -61,6 +66,7 @@ import Data.Foldable (asum)
 import Data.Function ((&))
 import Data.Map.Strict qualified as Map
 import Data.Maybe
+import Data.Ratio (denominator, numerator)
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Text qualified as Text
@@ -151,10 +157,27 @@ friendlyTxImpl
   -> m [Aeson.Pair]
 friendlyTxImpl era (Exp.SignedTx ledgerTx) =
   Exp.obtainCommonConstraints era $
+    (keyWitnessPairs era Signed ledgerTx <>)
+      <$> friendlyTxBodyImpl era (Exp.UnsignedTx ledgerTx)
+
+data Signedness = Signed | Unsigned
+
+keyWitnessPairs
+  :: forall era l
+   . Exp.Era era
+  -> Signedness
+  -> L.Tx l (Exp.LedgerEra era)
+  -> [Aeson.Pair]
+keyWitnessPairs era signedness tx =
+  Exp.obtainCommonConstraints era $
     let sbe = convert era :: ShelleyBasedEra era
-        witnesses = getTxWitnesses (ShelleyTx sbe ledgerTx)
-     in (("witnesses" .= map friendlyKeyWitness witnesses) :)
-          <$> friendlyTxBodyImpl era (Exp.UnsignedTx ledgerTx)
+        wits = tx ^. L.witsTxL
+        witnesses =
+          map (ShelleyBootstrapWitness sbe) (toList (wits ^. L.bootAddrTxWitsL))
+            <> map (ShelleyKeyWitness sbe) (toList (wits ^. L.addrTxWitsL))
+     in case signedness of
+          Signed -> ["witnesses" .= map friendlyKeyWitness witnesses]
+          Unsigned -> []
 
 friendlyKeyWitness :: KeyWitness era -> Aeson.Value
 friendlyKeyWitness =
@@ -176,18 +199,123 @@ friendlyTxBodyImpl era (Exp.UnsignedTx ledgerTx) =
   pure $
     Exp.obtainCommonConstraints era $
       let body = ledgerTx ^. L.bodyTxL
-          mAuxData = strictMaybeToMaybe (ledgerTx ^. L.auxDataTxL)
-       in basePairs era body mAuxData
-            <> [ "validity range" .= renderValidityInterval (body ^. L.vldtTxBodyL)
-               , "mint" .= renderMaryMint (body ^. L.mintTxBodyL)
-               , "collateral inputs" .= renderCollateralInputs body
-               , renderReqSigners body
-               , "reference inputs" .= renderReferenceInputs body
-               , "total collateral" .= toJSON (strictMaybeToMaybe (body ^. L.totalCollateralTxBodyL))
-               , "return collateral" .= friendlyReturnCollateral era (body ^. L.collateralReturnTxBodyL)
-               ]
-            <> alonzoScriptWitnessPairs era ledgerTx
-            <> conwayBodyPairs body
+       in [ "fee" .= friendlyLovelace (body ^. L.feeTxBodyL)
+          , "collateral inputs" .= renderCollateralInputs body
+          , "total collateral" .= toJSON (strictMaybeToMaybe (body ^. L.totalCollateralTxBodyL))
+          , "return collateral" .= friendlyReturnCollateral era (body ^. L.collateralReturnTxBodyL)
+          ]
+            <> sharedTxPairs era ledgerTx
+            <> dijkstraTopLevelPairs era body
+
+-- | Pairs for both top-level transactions and sub-transactions.
+sharedTxPairs
+  :: Exp.Era era
+  -> L.Tx l (Exp.LedgerEra era)
+  -> [Aeson.Pair]
+sharedTxPairs era ledgerTx =
+  Exp.obtainCommonConstraints era $
+    let body = ledgerTx ^. L.bodyTxL
+        mAuxData = strictMaybeToMaybe (ledgerTx ^. L.auxDataTxL)
+     in basePairs era body mAuxData
+          <> [ "validity range" .= renderValidityInterval (body ^. L.vldtTxBodyL)
+             , "mint" .= renderMaryMint (body ^. L.mintTxBodyL)
+             , renderReqSigners body
+             , "reference inputs" .= renderReferenceInputs body
+             ]
+          <> alonzoScriptWitnessPairs era ledgerTx
+          <> conwayBodyPairs body
+          <> dijkstraBodyPairs era body
+
+dijkstraBodyPairs
+  :: Exp.Era era
+  -> L.TxBody l (Exp.LedgerEra era)
+  -> [Aeson.Pair]
+dijkstraBodyPairs era body = case era of
+  Exp.ConwayEra -> []
+  Exp.DijkstraEra ->
+    [ "direct deposits" .= friendlyAccountAmounts (L.unDirectDeposits $ body ^. L.directDepositsTxBodyL)
+    , "account balance intervals"
+        .= friendlyAccountBalanceIntervals (body ^. L.accountBalanceIntervalsTxBodyL)
+    , "guards" .= case toList (body ^. L.guardsTxBodyL) of
+        [] -> Null
+        guards -> toJSON guards
+    , "required top-level guards"
+        .= friendlyRequiredTopLevelGuards (body ^. L.requiredTopLevelGuardsTxBodyL)
+    ]
+
+friendlyRequiredTopLevelGuards
+  :: L.Era era => Map.Map (L.Credential L.Guard) (L.StrictMaybe (L.Data era)) -> Aeson.Value
+friendlyRequiredTopLevelGuards guards
+  | Map.null guards = Null
+  | otherwise =
+      array
+        [ object ["credential" .= credential, "datum" .= fmap friendlyDatum (strictMaybeToMaybe datum)]
+        | (credential, datum) <- Map.toList guards
+        ]
+
+-- | Only a top-level transaction has starting account balance intervals and sub-transactions.
+dijkstraTopLevelPairs
+  :: Exp.Era era
+  -> L.TxBody C.TopTx (Exp.LedgerEra era)
+  -> [Aeson.Pair]
+dijkstraTopLevelPairs era body = case era of
+  Exp.ConwayEra -> []
+  Exp.DijkstraEra ->
+    [ "starting account balance intervals"
+        .= friendlyAccountBalanceIntervals (body ^. L.startingAccountBalanceIntervalsTxBodyL)
+    , "sub-transactions" .= case toList (body ^. L.subTransactionsTxBodyL) of
+        [] -> Null
+        subTransactions -> array $ map (renderSubTransaction Signed) subTransactions
+    ]
+
+renderSubTransaction
+  :: Signedness
+  -> L.Tx C.SubTx (Exp.LedgerEra Exp.DijkstraEra)
+  -> Aeson.Value
+renderSubTransaction signedness subTx =
+  object $
+    [ "id" .= serialiseToRawBytesHexText (Exp.getSignedSubTxId (Exp.SignedSubTx subTx))
+    ]
+      <> keyWitnessPairs Exp.DijkstraEra signedness subTx
+      <> sharedTxPairs Exp.DijkstraEra subTx
+
+friendlyAccountBalanceIntervals :: L.AccountBalanceIntervals era -> Aeson.Value
+friendlyAccountBalanceIntervals (L.AccountBalanceIntervals intervals)
+  | Map.null intervals = Null
+  | otherwise =
+      array
+        [ object $
+            [ "address" .= serialiseAddress addr
+            , "interval" .= friendlyAccountBalanceInterval interval
+            ]
+              <> friendlyStakeAddress addr
+        | (account, interval) <- Map.toList intervals
+        , let addr = fromShelleyStakeAddr account
+        ]
+
+friendlyAccountBalanceInterval :: L.AccountBalanceInterval era -> Aeson.Value
+friendlyAccountBalanceInterval = \case
+  L.AccountBalanceLowerBound (Inclusive lower) ->
+    object
+      [ "kind" .= String "lowerBound"
+      , "lower" .= friendlyLovelace lower
+      ]
+  L.AccountBalanceUpperBound (Exclusive upper) ->
+    object
+      [ "kind" .= String "upperBound"
+      , "upper" .= friendlyLovelace upper
+      ]
+  L.AccountBalanceBothBounds (Inclusive lower) (Exclusive upper) ->
+    object
+      [ "kind" .= String "bothBounds"
+      , "lower" .= friendlyLovelace lower
+      , "upper" .= friendlyLovelace upper
+      ]
+  L.AccountBalanceExact coin ->
+    object
+      [ "kind" .= String "exact"
+      , "coin" .= friendlyLovelace coin
+      ]
 
 renderCollateralInputs
   :: L.AlonzoEraTxBody (Exp.LedgerEra era)
@@ -198,7 +326,7 @@ renderCollateralInputs body =
 
 renderReqSigners
   :: L.AlonzoEraTxBody (Exp.LedgerEra era)
-  => L.TxBody C.TopTx (Exp.LedgerEra era)
+  => L.TxBody l (Exp.LedgerEra era)
   -> Aeson.Pair
 renderReqSigners body =
   "required signers (payment key hashes needed for scripts)"
@@ -206,16 +334,16 @@ renderReqSigners body =
 
 renderReferenceInputs
   :: L.BabbageEraTxBody (Exp.LedgerEra era)
-  => L.TxBody C.TopTx (Exp.LedgerEra era)
+  => L.TxBody l (Exp.LedgerEra era)
   -> Aeson.Value
 renderReferenceInputs body =
   toJSON (map fromShelleyTxIn (toList (body ^. L.referenceInputsTxBodyL)))
 
 -- | Pairs that are present in every Conway-onwards era.
 basePairs
-  :: forall era
+  :: forall era l
    . Exp.Era era
-  -> L.TxBody C.TopTx (Exp.LedgerEra era)
+  -> L.TxBody l (Exp.LedgerEra era)
   -> Maybe (L.TxAuxData (Exp.LedgerEra era))
   -> [Aeson.Pair]
 basePairs era body mAuxData =
@@ -225,9 +353,8 @@ basePairs era body mAuxData =
         , "certificates"
             .= if null certs
               then Null
-              else array [friendlyCertificate era (Exp.Certificate cert) | cert <- certs]
+              else array [friendlyCertificateImpl era (Exp.Certificate cert) | cert <- certs]
         , "era" .= (convert era :: CardanoEra era)
-        , "fee" .= friendlyLovelace (body ^. L.feeTxBodyL)
         , "inputs" .= toJSON (map fromShelleyTxIn (toList (body ^. L.inputsTxBodyL)))
         , "metadata" .= friendlyMetadata mAuxData
         , "outputs"
@@ -252,7 +379,7 @@ renderMaryMint ma
 alonzoScriptWitnessPairs
   :: L.AlonzoEraTx (Exp.LedgerEra era)
   => Exp.Era era
-  -> Ledger.Tx C.TopTx (Exp.LedgerEra era)
+  -> Ledger.Tx l (Exp.LedgerEra era)
   -> [Aeson.Pair]
 alonzoScriptWitnessPairs era tx =
   [ "redeemers" .= renderRedeemers era tx
@@ -261,13 +388,13 @@ alonzoScriptWitnessPairs era tx =
   ]
 
 conwayBodyPairs
-  :: forall era
+  :: forall era l
    . ( L.ConwayEraTxBody (Exp.LedgerEra era)
      , Typeable era
      , Exp.IsEra era
      , L.EraTx (Exp.LedgerEra era)
      )
-  => L.TxBody C.TopTx (Exp.LedgerEra era)
+  => L.TxBody l (Exp.LedgerEra era)
   -> [Aeson.Pair]
 conwayBodyPairs body =
   [ "governance actions"
@@ -295,7 +422,7 @@ friendlyLedgerProposal proposalProcedure =
 renderRedeemers
   :: L.AlonzoEraTx (Exp.LedgerEra era)
   => Exp.Era era
-  -> Ledger.Tx C.TopTx (Exp.LedgerEra era)
+  -> Ledger.Tx l (Exp.LedgerEra era)
   -> Aeson.Value
 renderRedeemers era tx =
   let plutusScriptPurposeAndExUnits = Map.toList $ Ledger.unRedeemers $ tx ^. Ledger.witsTxL . Ledger.rdmrsTxWitsL
@@ -305,7 +432,7 @@ renderRedeemers era tx =
 renderRedeemerInfo
   :: L.AlonzoEraTx (Exp.LedgerEra era)
   => Exp.Era era
-  -> Ledger.Tx C.TopTx (Exp.LedgerEra era)
+  -> Ledger.Tx l (Exp.LedgerEra era)
   -> Ledger.PlutusPurpose Ledger.AsIx (Exp.LedgerEra era)
   -> (Ledger.Data (Exp.LedgerEra era), ExUnits)
   -> Aeson.Value
@@ -396,14 +523,14 @@ renderPurpose era purpose = case era of
       ]
 
   dijkstraView
-    :: Ledger.PlutusPurpose L.AsIxItem ledgerEra -> Maybe Aeson.Value
-  dijkstraView _ = error "TODO Dijkstra"
+    :: Ledger.PlutusPurpose L.AsIxItem (Exp.LedgerEra DijkstraEra) -> Maybe Aeson.Value
+  dijkstraView p = labelPurpose "guarding script" . unAsIxItem <$> Dijkstra.toGuardingPurpose p
 
 renderScriptData
   :: ( L.AlonzoEraTxWits (Exp.LedgerEra era)
      , L.EraTx (Exp.LedgerEra era)
      )
-  => Ledger.Tx C.TopTx (Exp.LedgerEra era) -> Aeson.Value
+  => Ledger.Tx l (Exp.LedgerEra era) -> Aeson.Value
 renderScriptData tx =
   Aeson.Array $
     Vector.fromList
@@ -419,7 +546,7 @@ renderDats
   :: ( L.AlonzoEraTxWits (Exp.LedgerEra era)
      , L.EraTx (Exp.LedgerEra era)
      )
-  => Ledger.Tx C.TopTx (Exp.LedgerEra era) -> Aeson.Value
+  => Ledger.Tx l (Exp.LedgerEra era) -> Aeson.Value
 renderDats tx =
   let Ledger.TxDats dats = tx ^. Ledger.witsTxL . Ledger.datsTxWitsL
    in Aeson.Array $
@@ -480,7 +607,10 @@ friendlyExtraKeyWits keyhashes
   | otherwise = toJSON [PaymentKeyHash (coerceKeyRole kh) | kh <- Set.toList keyhashes]
 
 friendlyWithdrawals :: L.Withdrawals -> Aeson.Value
-friendlyWithdrawals (L.Withdrawals ws)
+friendlyWithdrawals (L.Withdrawals ws) = friendlyAccountAmounts ws
+
+friendlyAccountAmounts :: Map.Map L.AccountAddress Lovelace -> Aeson.Value
+friendlyAccountAmounts ws
   | Map.null ws = Null
   | otherwise =
       array
@@ -544,8 +674,19 @@ friendlyStakeReference = \case
   StakeAddressByPointer ptr -> String (textShow ptr)
   StakeAddressByValue cred -> object [friendlyStakeCredential $ toShelleyStakeCredential cred]
 
-friendlyCertificate :: Exp.Era era -> Exp.Certificate (Exp.LedgerEra era) -> Aeson.Value
-friendlyCertificate era =
+friendlyCertificate
+  :: MonadIO m
+  => Vary [FormatJson, FormatYaml]
+  -> Maybe (File () Out)
+  -> Exp.Era era
+  -> Exp.Certificate (Exp.LedgerEra era)
+  -> m (Either (FileError e) ())
+friendlyCertificate format mOutFile era cert = do
+  let certValue = friendlyCertificateImpl era cert
+  friendly format mOutFile certValue
+
+friendlyCertificateImpl :: Exp.Era era -> Exp.Certificate (Exp.LedgerEra era) -> Aeson.Value
+friendlyCertificateImpl era =
   Exp.obtainCommonConstraints era $
     object . (: []) . renderCertificate era
 
@@ -582,32 +723,49 @@ delegateeJson =
       , "DRep" .= drep
       ]
 
+friendlyPoolParams :: L.StakePoolParams era -> Aeson.Value
+friendlyPoolParams params =
+  object $
+    [ "pool id" .= serialiseToBech32 (StakePoolKeyHash (L.sppId params))
+    , "vrf key hash" .= L.sppVrf params
+    , "pledge" .= L.sppPledge params
+    , "cost" .= L.sppCost params
+    , "margin" .= (textShow (numerator margin) <> "/" <> textShow (denominator margin))
+    , "reward account" .= serialiseAddress (fromShelleyStakeAddr (L.sppAccountAddress params))
+    , "owners" .= L.sppOwners params
+    , "relays" .= L.sppRelays params
+    , "metadata" .= L.sppMetadata params
+    ]
+      <> ["bls key" .= blsKey | L.SJust blsKey <- [L.sppBlsKey params]]
+ where
+  margin = L.unboundRational (L.sppMargin params)
+
 renderConwayCertificate
   :: Ledger.ConwayTxCert (Exp.LedgerEra ConwayEra) -> (Aeson.Key, Aeson.Value)
 renderConwayCertificate cert =
   case cert of
     L.RegDRepTxCert credential coin mAnchor ->
-      "Drep registration certificate"
+      "DRep registration certificate"
         .= object
           [ "deposit" .= coin
-          , "certificate" .= renderDrepCredential credential
+          , "DRep credential" .= renderDrepCredential credential
           , "anchor" .= mAnchor
           ]
     L.UnRegDRepTxCert credential coin ->
-      "Drep unregistration certificate"
+      "DRep unregistration certificate"
         .= object
           [ "refund" .= coin
-          , "certificate" .= renderDrepCredential credential
+          , "DRep credential" .= renderDrepCredential credential
           ]
     L.AuthCommitteeHotKeyTxCert coldCred hotCred
       | L.ScriptHashObj sh <- coldCred ->
           "Cold committee authorization"
             .= object
-              ["script hash" .= sh]
+              ["script hash" .= sh, "hot credential" .= hotCred]
       | L.ScriptHashObj sh <- hotCred ->
           "Hot committee authorization"
             .= object
-              ["script hash" .= sh]
+              ["script hash" .= sh, "cold credential" .= coldCred]
       | L.KeyHashObj ck@L.KeyHash{} <- coldCred
       , L.KeyHashObj hk@L.KeyHash{} <- hotCred ->
           "Constitutional committee member hot key registration"
@@ -626,6 +784,7 @@ renderConwayCertificate cert =
         "Constitutional committee cold key resignation"
           .= object
             [ "cold key hash" .= ck
+            , "anchor" .= anchor
             ]
     L.RegTxCert stakeCredential ->
       "Stake address registration"
@@ -665,7 +824,7 @@ renderConwayCertificate cert =
     L.RegPoolTxCert poolParams ->
       "Pool registration"
         .= object
-          [ "pool params" .= poolParams
+          [ "pool params" .= friendlyPoolParams poolParams
           ]
     L.RetirePoolTxCert kh@L.KeyHash{} epoch ->
       "Pool retirement"
@@ -674,10 +833,10 @@ renderConwayCertificate cert =
           , "epoch" .= epoch
           ]
     L.UpdateDRepTxCert drepCredential mbAnchor ->
-      "Drep certificate update"
+      "DRep certificate update"
         .= object
-          [ "Drep credential" .= drepCredential
-          , "anchor " .= mbAnchor
+          [ "DRep credential" .= drepCredential
+          , "anchor" .= mbAnchor
           ]
     _ -> "unsupported certificate" .= String (T.pack $ show cert)
 
@@ -686,27 +845,27 @@ renderDijkstraCertificate
 renderDijkstraCertificate cert =
   case cert of
     L.RegDRepTxCert credential coin mAnchor ->
-      "Drep registration certificate"
+      "DRep registration certificate"
         .= object
           [ "deposit" .= coin
-          , "certificate" .= renderDrepCredential credential
+          , "DRep credential" .= renderDrepCredential credential
           , "anchor" .= mAnchor
           ]
     L.UnRegDRepTxCert credential coin ->
-      "Drep unregistration certificate"
+      "DRep unregistration certificate"
         .= object
           [ "refund" .= coin
-          , "certificate" .= renderDrepCredential credential
+          , "DRep credential" .= renderDrepCredential credential
           ]
     L.AuthCommitteeHotKeyTxCert coldCred hotCred
       | L.ScriptHashObj sh <- coldCred ->
           "Cold committee authorization"
             .= object
-              ["script hash" .= sh]
+              ["script hash" .= sh, "hot credential" .= hotCred]
       | L.ScriptHashObj sh <- hotCred ->
           "Hot committee authorization"
             .= object
-              ["script hash" .= sh]
+              ["script hash" .= sh, "cold credential" .= coldCred]
       | L.KeyHashObj ck@L.KeyHash{} <- coldCred
       , L.KeyHashObj hk@L.KeyHash{} <- hotCred ->
           "Constitutional committee member hot key registration"
@@ -725,6 +884,7 @@ renderDijkstraCertificate cert =
         "Constitutional committee cold key resignation"
           .= object
             [ "cold key hash" .= ck
+            , "anchor" .= anchor
             ]
     L.RegDepositTxCert stakeCredential deposit ->
       "Stake address registration"
@@ -754,7 +914,7 @@ renderDijkstraCertificate cert =
     L.RegPoolTxCert poolParams ->
       "Pool registration"
         .= object
-          [ "pool params" .= poolParams
+          [ "pool params" .= friendlyPoolParams poolParams
           ]
     L.RetirePoolTxCert kh@L.KeyHash{} epoch ->
       "Pool retirement"
@@ -763,9 +923,9 @@ renderDijkstraCertificate cert =
           , "epoch" .= epoch
           ]
     L.UpdateDRepTxCert drepCredential mbAnchor ->
-      "Drep certificate update"
+      "DRep certificate update"
         .= object
-          [ "Drep credential" .= drepCredential
+          [ "DRep credential" .= drepCredential
           , "anchor" .= mbAnchor
           ]
     _ -> "unsupported certificate" .= String (T.pack $ show cert)

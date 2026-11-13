@@ -21,6 +21,7 @@ module Cardano.Api.Experimental.Plutus.Internal.ScriptWitness
   , PlutusScriptPurpose (..)
   , PlutusScriptDatum (..)
   , NoScriptDatum
+  , mkSpendingScriptDatum
 
     -- * Helpers
   , getSpendingPlutusWitnessData
@@ -104,6 +105,10 @@ instance Eq (PlutusScriptWitness lang ProposingScript era) where
     l1 == l2 && d1 == d2 && r1 == r2 && eu1 == eu2 && s1 == s2
 
 instance Eq (PlutusScriptWitness lang VotingScript era) where
+  (==) (PlutusScriptWitness s1 l1 d1 r1 eu1) (PlutusScriptWitness s2 l2 d2 r2 eu2) =
+    l1 == l2 && d1 == d2 && r1 == r2 && eu1 == eu2 && s1 == s2
+
+instance Eq (PlutusScriptWitness lang GuardingScript era) where
   (==) (PlutusScriptWitness s1 l1 d1 r1 eu1) (PlutusScriptWitness s2 l2 d2 r2 eu2) =
     l1 == l2 && d1 == d2 && r1 == r2 && eu1 == eu2 && s1 == s2
 
@@ -219,6 +224,15 @@ data PlutusScriptDatum (lang :: L.Language) (purpose :: PlutusScriptPurpose) whe
   NoScriptDatum
     :: PlutusScriptDatum lang purpose
 
+-- | Construct the datum of a spending-purpose Plutus script witness from a
+-- plain 'HashableScriptData'.
+mkSpendingScriptDatum
+  :: L.SLanguage lang -> HashableScriptData -> PlutusScriptDatum lang SpendingScript
+mkSpendingScriptDatum L.SPlutusV1 datum = SpendingScriptDatum datum
+mkSpendingScriptDatum L.SPlutusV2 datum = SpendingScriptDatum datum
+mkSpendingScriptDatum L.SPlutusV3 datum = SpendingScriptDatum (Just datum)
+mkSpendingScriptDatum L.SPlutusV4 datum = SpendingScriptDatum (Just datum)
+
 instance Eq (PlutusScriptDatumF lang SpendingScript) => Eq (PlutusScriptDatum lang SpendingScript) where
   (==) (SpendingScriptDatum d1) (SpendingScriptDatum d2) = d1 == d2
   (==) InlineDatum InlineDatum = True
@@ -247,6 +261,11 @@ instance Eq (PlutusScriptDatum lang ProposingScript) where
   (==) _ _ = False
 
 instance Eq (PlutusScriptDatum lang VotingScript) where
+  (==) InlineDatum InlineDatum = True
+  (==) NoScriptDatum NoScriptDatum = True
+  (==) _ _ = False
+
+instance Eq (PlutusScriptDatum lang GuardingScript) where
   (==) InlineDatum InlineDatum = True
   (==) NoScriptDatum NoScriptDatum = True
   (==) _ _ = False

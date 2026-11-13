@@ -25,6 +25,7 @@ import           Cardano.Rpc.Server.Internal.UtxoRpc.Query ()
 import           Cardano.Rpc.Server.Internal.UtxoRpc.Type (anyUtxoDataUtxoRpcToUtxo,
                    utxoRpcBigIntToInteger, utxoRpcRationalNumberToRational)
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -54,10 +55,10 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 -- @TASTY_PATTERN='/RPC Query Protocol Params/' cabal test cardano-testnet-test@
 hprop_rpc_query_pparams :: Property
 hprop_rpc_query_pparams = integrationRetryWorkspace 2 "rpc-query-pparams" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+  let conf@Conf{tempAbsPath} = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
 
-  let era = Exp.ConwayEra
+  let era = testEra
       sbe = convert era
       eraName = eraToString sbe
       creationOptions = def{creationEra = AnyShelleyBasedEra sbe}

@@ -7,6 +7,7 @@ import           Cardano.Api hiding (cardanoEra)
 import qualified Cardano.Api as Api
 
 import           Cardano.Testnet as TN
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -27,10 +28,10 @@ import qualified Hedgehog.Extras.Test as H
 
 prop_foldEpochState :: H.Property
 prop_foldEpochState = integrationRetryWorkspace 2 "foldEpochState" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf <- TN.mkConf tempAbsBasePath'
+  let conf = TN.mkConfig tempAbsBasePath'
 
   let tempAbsPath' = unTmpAbsPath $ tempAbsPath conf
-      sbe = ShelleyBasedEraConway
+      sbe = convert testEra
       creationOptions = def { creationEra = AnyShelleyBasedEra sbe }
 
   runtime@TestnetRuntime{configurationFile} <- createAndRunTestnet creationOptions def conf

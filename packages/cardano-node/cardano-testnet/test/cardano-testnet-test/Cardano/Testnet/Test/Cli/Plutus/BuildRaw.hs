@@ -13,6 +13,7 @@ import           Cardano.Api.Experimental (Some (Some))
 import           Cardano.Api.Ledger (EpochInterval (..))
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -44,12 +45,12 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 hprop_build_raw_ref_script_spend :: Property
 hprop_build_raw_ref_script_spend = integrationRetryWorkspace 2 "build-raw-ref-script" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
     H.note_ SYS.os
-    conf@Conf{tempAbsPath} <- mkConf tempAbsBasePath'
+    let conf@Conf{tempAbsPath} = mkConfig tempAbsBasePath'
     let tempAbsPath' = unTmpAbsPath tempAbsPath
     work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
     let
-        sbe = ShelleyBasedEraConway
+        sbe = convert testEra
         era = toCardanoEra sbe
         cEra = AnyCardanoEra era
         eraName = eraToString era

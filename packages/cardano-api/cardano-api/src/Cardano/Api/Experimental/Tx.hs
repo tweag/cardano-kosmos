@@ -241,6 +241,13 @@ module Cardano.Api.Experimental.Tx
   , getSignedSubTxId
   , AsType (AsUnsignedSubTx, AsSignedSubTx)
 
+    -- * Ordered guard witnesses
+  , TxGuards
+  , ScriptGuardWitness (..)
+  , TxGuardsError (..)
+  , mkTxGuards
+  , emptyTxGuards
+
     -- * TxBodyContent sub type
   , TxCertificates (..)
   , TxMintValue (..)
@@ -308,6 +315,7 @@ import Cardano.Api.Experimental.Era
 import Cardano.Api.Experimental.Tx.Internal.AnyWitness
 import Cardano.Api.Experimental.Tx.Internal.BodyContent
 import Cardano.Api.Experimental.Tx.Internal.Fee
+import Cardano.Api.Experimental.Tx.Internal.Guard
 import Cardano.Api.Experimental.Tx.Internal.SubTransaction
 import Cardano.Api.Experimental.Tx.Internal.TxScriptWitnessRequirements
 import Cardano.Api.Experimental.Tx.Internal.Type
@@ -326,8 +334,6 @@ import Cardano.Api.Tx.Internal.Sign
 import Cardano.Ledger.Alonzo.Core qualified as Ledger
 import Cardano.Ledger.Api qualified as L
 import Cardano.Ledger.Binary qualified as Ledger
-import Cardano.Ledger.Credential qualified as Ledger (Credential)
-import Cardano.Ledger.Hashes qualified as L hiding (Hash)
 
 import Control.Exception (displayException)
 import Data.Bifunctor (bimap)
@@ -411,14 +417,12 @@ evaluateSignedTx
   -- ^ Registered stake pools
   -> Map StakeCredential L.Coin
   -- ^ Stake delegation deposits
-  -> Map (Ledger.Credential Ledger.DRepRole) L.Coin
-  -- ^ DRep delegation deposits
   -> L.UTxO (LedgerEra era)
   -- ^ UTxO set for the transaction inputs
   -> SignedTx era
   -- ^ Signed transaction to evaluate
   -> TxEvaluationResult (LedgerEra era)
-evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits drepDelegDeposits utxo (SignedTx tx) =
+evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits utxo (SignedTx tx) =
   -- obtainCommonConstraints is needed here to bring ShelleyLedgerEra era ~ LedgerEra era
   -- into scope, unifying SignedTx's ShelleyLedgerEra with evaluateTransaction's LedgerEra.
   obtainCommonConstraints (useEra @era) $
@@ -428,7 +432,6 @@ evaluateSignedTx systemStart epochInfo protocolParams poolIds stakeDelegDeposits
       protocolParams
       poolIds
       stakeDelegDeposits
-      drepDelegDeposits
       utxo
       tx
 

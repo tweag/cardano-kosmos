@@ -127,7 +127,7 @@ library
                       , network
                       , network-mux >= 0.8
                       , optparse-applicative
-                      , ouroboros-network:{api, framework} ^>= 1.3
+                      , ouroboros-network:{api, framework} ^>= 2.0
                       , signal
                       , slugify
                       , smtp-mail ^>= 0.5
@@ -163,7 +163,9 @@ executable cardano-tracer
                       , ScopedTypeVariables
 
   build-depends:        cardano-tracer
+                      , code-page
                       , optparse-applicative
+                      , with-utf8
 
   ghc-options:          -threaded
                         -rtsopts

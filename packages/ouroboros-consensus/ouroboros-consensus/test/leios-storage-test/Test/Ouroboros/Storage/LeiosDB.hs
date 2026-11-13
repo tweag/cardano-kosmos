@@ -26,8 +26,11 @@ import Control.Monad.Class.MonadTime.SI (diffTime, getMonotonicTime)
 import Control.Tracer (Tracer (..), emit, nullTracer)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
+import Data.Foldable (toList)
 import Data.Function ((&))
 import Data.List (nub, sortOn)
+import Data.List.NonEmpty (NonEmpty (..))
+import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
 import qualified Data.Text as T
@@ -41,7 +44,10 @@ import Ouroboros.Consensus.Leios.Types
   , TxHash
   , TxOffset
   , encodeEndorserBlockSize
+  , endorserBlockHash
   , endorserBlockReferences
+  , forgeLeiosEb
+  , forgedEbBody
   , mkEndorserBlock
   )
 import Ouroboros.Consensus.Storage.LeiosDB
@@ -53,6 +59,7 @@ import Ouroboros.Consensus.Storage.LeiosDB
   , Promise (..)
   , TraceLeiosDb (..)
   , newLeiosDBInMemory
+  , storeForgedEb
   , truncateLeiosDbAfterSlot
   , withLeiosDBSQLite
   , withReader
@@ -247,6 +254,11 @@ mkTestGroups impl =
       , testProperty "partial txs returns Nothing" $ prop_completedEbPartialTxs impl
       , testProperty "no body returns Nothing" $ prop_completedEbNoBody impl
       ]
+  , testGroup
+      "storeForgedEb"
+      [ testProperty "stores the point, the body and the txs of the endorser block" $
+          prop_storeForgedEbThenLookup impl
+      ]
   ]
 
 -- * QuickCheck generators
@@ -280,6 +292,12 @@ genEb numTxs = do
 -- | Generate a LeiosPoint and EndorserBlock together with the given number of transactions.
 genPointAndEb :: Int -> Gen (LeiosPoint, EndorserBlock)
 genPointAndEb numTxs = (,) <$> genPoint <*> genEb numTxs
+
+-- | Transaction bytes, distinct from each other.
+genDistinctTxBytes :: Gen (NonEmpty BS.ByteString)
+genDistinctTxBytes = NE.nub <$> ((:|) <$> genTxBytes <*> listOf genTxBytes)
+ where
+  genTxBytes = chooseInt (1, 32) >>= fmap BS.pack . vector
 
 -- | Bytes for the tx at the given offset of the EB: of its declared size, as
 -- a write must be to be accepted, and distinct per offset.
@@ -791,7 +809,7 @@ test_gcEvictsOldEb db = withRW db $ \con -> do
   -- The old EB references transactions 0, 1 and 2, and the other only 0 and 1.
   writeWholeEb con [mkTestPoint 5 1] (mkTestEb 3)
   writeWholeEb con [mkTestPoint 10 2] (mkTestEb 2)
-  leiosDbGarbageCollect db 6
+  garbageCollect db 6
   rwLookupEbBody con (mkTestEbHash 1) >>= (@?= [])
   holdsClosure con (mkTestEbHash 1) >>= (@?= False)
   rwScanEbPoints con >>= (@?= [(10, mkTestEbHash 2)])
@@ -805,14 +823,14 @@ test_gcEvictsOldEb db = withRW db $ \con -> do
 test_gcKeepsEbWithPointAtSlot :: LeiosDbHandle IO -> IO ()
 test_gcKeepsEbWithPointAtSlot db = withRW db $ \con -> do
   writeWholeEb con [mkTestPoint 5 1, mkTestPoint 6 1] (mkTestEb 2)
-  leiosDbGarbageCollect db 6
+  garbageCollect db 6
   holdsClosure con (mkTestEbHash 1) >>= (@?= True)
 
 test_gcKeepsPinnedEb :: LeiosDbHandle IO -> IO ()
 test_gcKeepsPinnedEb db = withRW db $ \con -> do
   writeWholeEb con [mkTestPoint 5 1] (mkTestEb 2)
   leiosDbPromoteToImmutable db [mkTestPoint 5 1]
-  leiosDbGarbageCollect db 6
+  garbageCollect db 6
   holdsClosure con (mkTestEbHash 1) >>= (@?= True)
 
 test_promoteIncompleteFails :: LeiosDbHandle IO -> IO ()
@@ -1080,6 +1098,29 @@ data Op
 -- body, as it would on the wire.
 type Bodies = Map.Map EndorserBlockHash (EndorserBlock, [Int])
 
+-- | 'storeForgedEb' writes the endorser block at the point of the given slot
+-- and the hash of the body. After the writer closes, a reader sees that point
+-- and the bytes of all its txs.
+prop_storeForgedEbThenLookup :: DbImpl -> Property
+prop_storeForgedEbThenLookup impl =
+  forAll genSlotNo $ \slot ->
+    forAll genDistinctTxBytes $ \txs ->
+      ioProperty $ withFreshDb impl $ \db -> do
+        let forged = forgeLeiosEb txs
+            body = forgedEbBody forged
+            ebHash = endorserBlockHash body
+        withWriter db $ \writer -> storeForgedEb writer slot forged
+        (points, closure) <-
+          withReader db $ \reader ->
+            (,) <$> testScanEbPoints reader <*> lookupEbClosure reader ebHash
+        pure $
+          conjoin
+            [ counterexample "the point is not the slot and the hash of the body" $
+                points === [(slot, ebHash)]
+            , counterexample "the stored txs are not the forged ones" $
+                closure === Just (zip (map fst (endorserBlockReferences body)) (toList txs))
+            ]
+
 -- | Property: running the same operations against both implementations, a
 -- reader sees the same in each, and each write completes the same endorser
 -- blocks.
@@ -1156,11 +1197,6 @@ poolTxBytes i = BS.replicate (10 + i) (fromIntegral i)
 -- whose points are older than its slot, pinned or not, since a pinned one has
 -- a complete closure, so has been copied.
 --
--- WARNING: the node as of this incomplete port can still pin an endorser block
--- whose closure is incomplete. Its ChainSel adopts a block certifying an
--- endorser block without checking it holds that block's closure. TODO Remove
--- this warning once ChainSel checks.
---
 -- An endorser block is also promoted at most once: the node pins only what the
 -- immutable chain certifies, and a chain cannot certify the same endorser
 -- block twice, since it cannot be valid twice.
@@ -1224,7 +1260,7 @@ observe db settle bodies ops = withRW db $ \rw -> do
           else go rw points bodied pinned nEvicted rest
       [] -> go rw points bodied pinned nEvicted rest
     OpGc slot -> do
-      leiosDbGarbageCollect db slot
+      garbageCollect db slot
       settle
       let newest ebHash = maximum [pointSlotNo p | p <- points, pointEbHash p == ebHash]
           evicted =

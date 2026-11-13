@@ -15,6 +15,7 @@ import           Cardano.Api as A
 import qualified Cardano.Api.Ledger as L
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -55,9 +56,9 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 hprop_transaction :: Property
 hprop_transaction = integrationRetryWorkspace 2 "submit-api-transaction" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
-      sbe = ShelleyBasedEraConway
+      sbe = convert testEra
       eraString = eraToString sbe
       tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
       creationOptions = def
@@ -120,7 +121,6 @@ hprop_transaction = integrationRetryWorkspace 2 "submit-api-transaction" $ \temp
 
   let submitApiConf = SubmitApiConf
         { tempAbsPath = unTmpAbsPath tempAbsPath
-        , configPath = configurationFile
         , epochSlots = 2
         , sprocket = poolSprocket1
         , maybePort = Nothing

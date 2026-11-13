@@ -14,6 +14,11 @@
     # };
     customConfig.url = "github:input-output-hk/empty-flake";
 
+    ouroboros-consensus-src = {
+      url = "github:input-output-hk/empty-flake";
+      flake = false;
+    };
+
     CHaP = {
       url = "github:intersectmbo/cardano-haskell-packages?ref=index-only";
       flake = false;
@@ -549,6 +554,7 @@
           (import ./nix/haskell.nix {
             inherit (final) haskell-nix;
             inherit CHaP incl windowsCompilerNixName;
+            ouroboros-consensus-src = input.ouroboros-consensus-src;
             macOS-security = macOS-security (final.pkgs);
             # buildPlatform, not hostPlatform: herald is a developer tool that
             # runs on the machine, so cross shells (e.g. windows) must not try

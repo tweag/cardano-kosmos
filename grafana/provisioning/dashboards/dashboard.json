@@ -89,7 +89,7 @@
       },
       "gridPos": {
         "h": 2,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 1
       },
@@ -129,6 +129,136 @@
         }
       ],
       "title": "Consensus",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
+      },
+      "description": "Number of blocks in the immutable chain shared by all nodes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 300,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^length$/",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
+          },
+          "refId": "A",
+          "queryText": "-- Common prefix: blocks present in the immutable chain of every node.\nWITH cp AS (\n    SELECT hash, MAX(slot) AS slot FROM immutable_blocks\n    GROUP BY hash\n    HAVING COUNT(DISTINCT pool_id) = (SELECT COUNT(DISTINCT pool_id) FROM immutable_blocks)\n)\nSELECT COUNT(*) AS length, MAX(slot) AS tip_slot FROM cp;",
+          "rawQueryText": "-- Common prefix: blocks present in the immutable chain of every node.\nWITH cp AS (\n    SELECT hash, MAX(slot) AS slot FROM immutable_blocks\n    GROUP BY hash\n    HAVING COUNT(DISTINCT pool_id) = (SELECT COUNT(DISTINCT pool_id) FROM immutable_blocks)\n)\nSELECT COUNT(*) AS length, MAX(slot) AS tip_slot FROM cp;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Common Prefix Length",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "sidecar_uid"
+      },
+      "description": "Max (over nodes) number of blocks between the common prefix tip and the node tip.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 301,
+      "options": {
+        "colorMode": "background_solid",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^depth$/",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "sidecar_uid"
+          },
+          "refId": "A",
+          "queryText": "-- Common prefix: blocks present in the immutable chain of every node.\nWITH cp AS (\n    SELECT hash, MAX(slot) AS slot FROM immutable_blocks\n    GROUP BY hash\n    HAVING COUNT(DISTINCT pool_id) = (SELECT COUNT(DISTINCT pool_id) FROM immutable_blocks)\n)\n-- Longest suffix (in blocks) any node has on top of the common prefix.\nSELECT MAX(block) - (SELECT COUNT(*) FROM cp) AS depth\nFROM node_tips WHERE block IS NOT NULL;",
+          "rawQueryText": "-- Common prefix: blocks present in the immutable chain of every node.\nWITH cp AS (\n    SELECT hash, MAX(slot) AS slot FROM immutable_blocks\n    GROUP BY hash\n    HAVING COUNT(DISTINCT pool_id) = (SELECT COUNT(DISTINCT pool_id) FROM immutable_blocks)\n)\n-- Longest suffix (in blocks) any node has on top of the common prefix.\nSELECT MAX(block) - (SELECT COUNT(*) FROM cp) AS depth\nFROM node_tips WHERE block IS NOT NULL;",
+          "queryType": "table",
+          "timeColumns": [
+            "time",
+            "ts"
+          ]
+        }
+      ],
+      "title": "Max Length Above Common Prefix",
       "type": "stat"
     },
     {

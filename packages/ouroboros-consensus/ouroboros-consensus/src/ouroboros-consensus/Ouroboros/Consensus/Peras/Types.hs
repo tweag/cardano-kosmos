@@ -16,6 +16,7 @@ module Ouroboros.Consensus.Peras.Types
   ( -- * Peras round numbers
     PerasRoundNo (..)
   , onPerasRoundNo
+  , zeroPerasRoundNo
 
     -- * Peras boosted blocks
   , PerasBoostedBlock (..)
@@ -41,6 +42,7 @@ import Cardano.Binary
   )
 import Codec.Serialise.Class (Serialise (..))
 import Control.DeepSeq (NFData)
+import Data.Aeson (ToJSON)
 import Data.Coerce (coerce)
 import Data.Kind (Type)
 import Data.Word (Word16, Word32, Word64)
@@ -87,7 +89,11 @@ newtype PerasRoundNo
     , Serialise
     , ToCBOR
     , FromCBOR
+    , ToJSON
     )
+
+zeroPerasRoundNo :: PerasRoundNo
+zeroPerasRoundNo = PerasRoundNo 0
 
 instance Condense PerasRoundNo where
   condense = show . unPerasRoundNo

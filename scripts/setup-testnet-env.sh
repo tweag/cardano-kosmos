@@ -49,6 +49,7 @@ read -r \
   num_dreps \
   max_lovelace_supply \
   start_directly_in_dijkstra \
+  peras_genesis \
 < <(echo '(import "nickel/mk-testnet-config.ncl") (import "'"$scenarioFile"'")' | nickel export --format json | jq -r '[
     .nodes_arg,
     .testnet_magic,
@@ -59,7 +60,8 @@ read -r \
     .genesis.active_slot_coeff_f,
     .genesis.num_dreps,
     .genesis.max_lovelace_supply,
-    .genesis.start_directly_in_dijkstra
+    .genesis.start_directly_in_dijkstra,
+    (.genesis.peras | tojson)
   ] | @tsv')
 
 echo "Running cardano_testnet create-env"
@@ -91,6 +93,8 @@ jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGene
 # Dijkstra genesis decoder only accepts the initial 251 parameters.
 dijkstraGenesisFile="${DEVENV_PATH}/dijkstra-genesis.json"
 jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
+jq --argjson peras "$peras_genesis" '. * $peras' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
 
 echo "Changing configuration params"
 

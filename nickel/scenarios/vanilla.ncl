@@ -40,18 +40,12 @@ in {
   },
   genesis = {
     max_lovelace_supply = 100000020000000,
-    num_dreps = count_dreps topology.nodes
+    num_dreps = count_dreps topology.nodes,
+    peras = {
+      perasMinCandidateBlockAge = 30,
+      perasQuorumThresholdSafetyMargin = 0.02,
+      perasTargetCommitteeSize = 5,
+    },
   },
-  env = [
-    "PERAS_IGNORANCE_ROUNDS=3",
-    "PERAS_COOLDOWN_ROUNDS=5",
-    "PERAS_BLOCK_MIN_SLOTS=30",
-    "PERAS_CERT_MAX_ROUNDS=6",
-    "PERAS_CERT_ARRIVAL_THRESHOLD=30",
-    "PERAS_WEIGHT=15",
-    "PERAS_QUORUM_WEIGHT_THRESHOLD=0.75",
-    "PERAS_QUORUM_WEIGHT_THRESHOLD_SAFETY_MARGIN=0.02",
-    "PERAS_TARGET_COMMITTEE_SIZE=5",
-  ],
 } | Scenario
 

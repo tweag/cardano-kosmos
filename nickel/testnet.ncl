@@ -37,5 +37,10 @@ in
       severity = 'Debug,
       backends = [ 'EKGBackend, 'Forwarder ],
     },
+    "ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB" = {
+      severity = 'Debug,
+      backends = [ 'Forwarder ],
+      detail = 'DNormal,
+    },
   },
 } | InputParams

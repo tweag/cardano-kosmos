@@ -5,6 +5,9 @@
 # datasource:
 #
 #   node_tips          - per-node chain tip (Consensus panels)
+#   immutable_blocks   - per-node blocks copied to the ImmutableDB, from
+#                        cardano-tracer logs (CopiedBlockToImmutableDB);
+#                        used by the Healthy/Diverged panel
 #   ci_nodes/ci_edges  - physical topology graph
 #   cn_edges           - localroot topology graph (from nodeN/topology.json)
 #   ada_pots           - pots comparison (no dbsync/yaci in kosmos; left empty)
@@ -94,6 +97,8 @@ setup_database() {
 PRAGMA journal_mode = WAL;
 DROP VIEW IF EXISTS lr_edges;
 DROP TABLE IF EXISTS node_tips;
+DROP VIEW IF EXISTS immutable_tips;
+DROP TABLE IF EXISTS immutable_blocks;
 DROP TABLE IF EXISTS ci_nodes;
 DROP TABLE IF EXISTS ci_edges;
 DROP TABLE IF EXISTS cn_edges;
@@ -109,6 +114,22 @@ CREATE TABLE node_tips (
     slot BIGINT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Every block each node has copied into its ImmutableDB. A node's immutable
+-- tip is its highest-slot entry; the immutable chain of a node is the set of
+-- its entries.
+CREATE TABLE immutable_blocks (
+    pool_id VARCHAR NOT NULL,
+    hash CHAR(64) NOT NULL,
+    slot BIGINT NOT NULL,
+    PRIMARY KEY (pool_id, hash)
+);
+CREATE INDEX immutable_blocks_slot ON immutable_blocks (pool_id, slot);
+
+CREATE VIEW immutable_tips AS
+SELECT b.pool_id, b.hash, b.slot
+FROM immutable_blocks b
+WHERE b.slot = (SELECT MAX(slot) FROM immutable_blocks WHERE pool_id = b.pool_id);
 
 CREATE TABLE ci_nodes (
     id TEXT PRIMARY KEY,
@@ -324,6 +345,29 @@ update_blocks() {
     [ -n "${sql}" ] && sql_sc <<<"BEGIN;"$'\n'"${sql}"$'\n'"COMMIT;"
 }
 
+# Blocks moved from the VolatileDB to the ImmutableDB, per node. Each node's
+# logs live in ${LOGS_DIR}/<host>_<port>/, the port identifying the node.
+# Re-scanning is idempotent.
+update_immutable() {
+    local dir port node sql=""
+    local -a files
+    for dir in "${LOGS_DIR}"/*_*/; do
+        port="${dir%/}"; port="${port##*_}"
+        node="${NODE_BY_PORT[${port}]:-}"
+        [ -n "${node}" ] || continue
+        mapfile -t files < <(find "${dir}" -maxdepth 1 -name 'node-*.json' \
+            -newer "${RUN_MARKER}" 2>/dev/null)
+        [ "${#files[@]}" -gt 0 ] || continue
+        sql+="$(grep -h 'CopiedBlockToImmutableDB' "${files[@]}" 2>/dev/null \
+            | jq -r --arg node "${node}" '
+                (.data.slot // .data.block // empty) as $p
+                | select(($p.headerHash // $p.hash) and ($p.slot != null))
+                | "INSERT OR IGNORE INTO immutable_blocks (pool_id, hash, slot) VALUES (\u0027\($node)\u0027, \u0027\($p.headerHash // $p.hash)\u0027, \($p.slot));"' 2>/dev/null)"$'\n'
+    done
+    [[ "${sql}" =~ INSERT ]] && sql_sc <<<"BEGIN;"$'\n'"${sql}"$'\n'"COMMIT;"
+    return 0
+}
+
 update_protocol_params() {
     local out size mem steps
     out="$("${CARDANO_CLI}" query protocol-parameters --testnet-magic "${TESTNET_MAGIC}" \
@@ -352,6 +396,7 @@ main() {
         update_tips || sleep_time=1
         update_graph_stats || true
         update_blocks || true
+        update_immutable || true
         update_protocol_params || true
         sleep "${sleep_time}"
     done

@@ -61,6 +61,9 @@ packages:
   packages/cardano-node/bench/trace-schemas/scripts/schema-gen
   packages/cardano-node/trace-forward
 
+  packages/cardano-base/cardano-crypto-peras
+  packages/cardano-base/cardano-strict-containers
+
   packages/cardano-ledger/eras/allegra/impl
   packages/cardano-ledger/eras/alonzo/impl
   packages/cardano-ledger/eras/babbage/impl
@@ -68,6 +71,7 @@ packages:
   packages/cardano-ledger/eras/dijkstra/impl
   packages/cardano-ledger/eras/mary/impl
   packages/cardano-ledger/eras/shelley/impl
+  packages/cardano-ledger/eras/shelley/test-suite
   packages/cardano-ledger/libs/cardano-ledger-api
   packages/cardano-ledger/libs/cardano-ledger-binary
   -- Breaks nix develop at the moment
@@ -90,6 +94,7 @@ packages:
 
   packages/ouroboros-consensus
   packages/ouroboros-network/ouroboros-network
+  packages/ouroboros-network/cardano-diffusion
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node

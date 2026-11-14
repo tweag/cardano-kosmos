@@ -4,6 +4,9 @@ set -e
 
 echo "Building cardano packages..."
 
+# For some reason there is a race if plutus-core is built in parallel, so we build it with -j1
+# See issue cardano-kosmos#71
+cabal build -j1 plutus-core
 cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
 
 CARDANO_CLI=$(cabal list-bin cardano-cli)
@@ -92,6 +95,11 @@ jq ".securityParam = $security_param_k |
     .extraConfig.initialFunds = $new_initial_funds" $shelleyGenesisFile | sponge $shelleyGenesisFile
 
 jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGenesisFile
+
+# create-testnet-data writes the full PlutusV4 parameter list, but the ledger's
+# Dijkstra genesis decoder only accepts the initial 251 parameters.
+dijkstraGenesisFile="${DEVENV_PATH}/dijkstra-genesis.json"
+jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
 
 echo "Changing configuration params"
 

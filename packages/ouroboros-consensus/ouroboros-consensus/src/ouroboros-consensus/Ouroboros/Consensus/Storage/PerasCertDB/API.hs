@@ -3,16 +3,11 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
 
 module Ouroboros.Consensus.Storage.PerasCertDB.API
   ( PerasCertDB (..)
-  , WithBoostedBlockStatus (..)
-  , forgetBoostedBlockStatus
   , AddPerasCertResult (..)
-  , PerasCertTicketNo
-  , zeroPerasCertTicketNo
+  , PerasRoundNo
 
     -- * Invariants
   , prop_addCertThenGetCertIds
@@ -20,7 +15,6 @@ module Ouroboros.Consensus.Storage.PerasCertDB.API
   , prop_getCertsAfterMonotonic
   , prop_garbageCollectRemovesOldCerts
   , prop_addCertLatestCertSeenMonotonic
-  , prop_garbageCollectPreservesLatestCertSeen
   ) where
 
 import qualified Data.List as List
@@ -28,7 +22,6 @@ import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
-import Data.Word (Word64)
 import GHC.Generics (Generic)
 import NoThunks.Class
 import Ouroboros.Consensus.Block
@@ -54,8 +47,8 @@ data PerasCertDB m blk = PerasCertDB
       STM m (Set PerasRoundNo)
   -- ^ Get the set of all cert IDs currently in the database.
   , getCertsAfter ::
-      PerasCertTicketNo ->
-      STM m (Map PerasCertTicketNo (m (WithArrivalTime (ValidatedPerasCert blk))))
+      PerasRoundNo ->
+      STM m (Map PerasRoundNo (m (WithArrivalTime (ValidatedPerasCert blk))))
   -- ^ Get all certs with a ticket number strictly greater than the given one,
   -- in ascending order.
   -- Unlike 'getVotesAfter' in 'PerasVoteDB', the resulting map contains 'm' actions to
@@ -70,7 +63,7 @@ data PerasCertDB m blk = PerasCertDB
   -- The 'Fingerprint' is updated every time a new certificate is added, but it
   -- stays the same when certificates are garbage-collected.
   , getLatestCertSeen ::
-      STM m (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+      STM m (Maybe (WithArrivalTime (ValidatedPerasCert blk)))
   -- ^ This field impacts voting directly because having seen a certificate is a
   -- precondition for voting in any round except for the very first one
   -- (at origin).
@@ -87,48 +80,6 @@ data PerasCertDB m blk = PerasCertDB
   }
   deriving NoThunks via OnlyCheckWhnfNamed "PerasCertDB" (PerasCertDB m blk)
 
--- | Indicate whether the block being boosted by a certificate is expected to
--- still be part of the volatile chain suffix or not.
---
--- This is relevant for Peras voting because we need to know if a candidate
--- block extends the chain that contains the block being boosted by the latest
--- certificate seen. For this purpose, we want to limit the voting rules to only
--- look within the volatile chain suffix, and assume that, if the boosted block
--- is no longer in the volatile suffix, then it trivially extends the candidate
--- block (because it must have been copied into the immutable chain prefix). For
--- this reason, we need to manually keep track of whether the boosted block of
--- this certificate has already been garbage collected from the volatile suffix
--- or not.
-data WithBoostedBlockStatus cert
-  = -- | Certificate boosting a block within the volatile chain suffix
-    CertBoostingBlockInVolatileDB !cert
-  | -- | Certificate boosting a block that no longer belongs to the volatile
-    -- chain suffix. This typically means that the block has been copied to the
-    -- immutable prefix, and then garbage collected from the volatile suffix.
-    CertBoostingBlockNoLongerInVolatileDB !cert
-  deriving stock (Show, Eq, Generic)
-  deriving anyclass NoThunks
-
--- | Deconstruct a certificate from its provenance wrapper
-forgetBoostedBlockStatus :: WithBoostedBlockStatus cert -> cert
-forgetBoostedBlockStatus = \case
-  CertBoostingBlockInVolatileDB cert -> cert
-  CertBoostingBlockNoLongerInVolatileDB cert -> cert
-
--- | A sequence number, incremented every time we receive a new certificate.
---
--- Note that we will /usually/ receive certificates monotonically by round
--- number, so round numbers could /almost/ fulfill the role of ticket numbers.
--- However, in certain edge cases (while catching up, or during cooldowns), this
--- might not be true, such as during syncing or during cooldown periods.
--- Therefore, for robustness, we choose to maintain dedicated ticket numbers
--- separately.
-newtype PerasCertTicketNo = PerasCertTicketNo Word64
-  deriving stock Show
-  deriving newtype (Eq, Ord, Enum, NoThunks)
-
-zeroPerasCertTicketNo :: PerasCertTicketNo
-zeroPerasCertTicketNo = PerasCertTicketNo 0
 
 data AddPerasCertResult
   = AddedPerasCertToDB
@@ -166,7 +117,7 @@ prop_getCertsAfterZero ::
   m Bool
 prop_getCertsAfterZero db = do
   (allCertActions, certIds) <- atomically $ do
-    allCerts <- getCertsAfter db zeroPerasCertTicketNo
+    allCerts <- getCertsAfter db zeroPerasRoundNo
     certIds <- getCertIds db
     pure (allCerts, certIds)
   allCertValues <- sequence (Map.elems allCertActions)
@@ -183,15 +134,15 @@ prop_getCertsAfterZero db = do
 prop_getCertsAfterMonotonic ::
   MonadSTM m =>
   PerasCertDB m blk ->
-  PerasCertTicketNo ->
+  PerasRoundNo ->
   m Bool
-prop_getCertsAfterMonotonic db ticketNo =
+prop_getCertsAfterMonotonic db roundNo =
   atomically $ do
-    certs <- getCertsAfter db ticketNo
+    certs <- getCertsAfter db roundNo
     let tickets = Map.keys certs
     pure $
       tickets == List.sort tickets
-        && all (> ticketNo) tickets
+        && all (> roundNo) tickets
 
 -- | After garbage collection for slot S, no certs with target slot < S should remain.
 -- NOTE: this property is not purely STM.
@@ -205,7 +156,7 @@ prop_garbageCollectRemovesOldCerts ::
 prop_garbageCollectRemovesOldCerts db slotNo = do
   allCertActions <- atomically $ do
     _ <- garbageCollect db slotNo
-    getCertsAfter db zeroPerasCertTicketNo
+    getCertsAfter db zeroPerasRoundNo
   allCertValues <- sequence (Map.elems allCertActions)
   let targetSlots = pointSlot . getPerasCertPoint <$> allCertValues
   pure $
@@ -225,24 +176,7 @@ prop_addCertLatestCertSeenMonotonic db cert =
     prevLatest <- getLatestCertSeen db
     _ <- addCert db cert
     newLatest <- getLatestCertSeen db
-    let getRound = getPerasCertRound . forgetBoostedBlockStatus
     pure $ case (prevLatest, newLatest) of
       (_, Nothing) -> False -- after adding a cert, the latest cert seen should not go back to 'Nothing'
       (Nothing, Just _) -> True -- if there was no cert seen before, any new cert should be greater than or equal to it
-      (Just prev, Just new) -> getRound new >= getRound prev
-
--- | 'getLatestCertSeen' is not affected by garbage collection.
-prop_garbageCollectPreservesLatestCertSeen ::
-  ( MonadSTM m
-  , IsPerasCert (PerasCert blk) blk
-  ) =>
-  PerasCertDB m blk ->
-  SlotNo ->
-  m Bool
-prop_garbageCollectPreservesLatestCertSeen db slotNo =
-  atomically $ do
-    prevLatest <- getLatestCertSeen db
-    _ <- garbageCollect db slotNo
-    newLatest <- getLatestCertSeen db
-    let getRound = getPerasCertRound . forgetBoostedBlockStatus
-    pure $ fmap getRound prevLatest == fmap getRound newLatest
+      (Just prev, Just new) -> getPerasCertRound new >= getPerasCertRound prev

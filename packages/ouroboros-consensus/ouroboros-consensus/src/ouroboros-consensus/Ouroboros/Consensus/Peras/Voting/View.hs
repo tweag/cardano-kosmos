@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -27,13 +28,14 @@ module Ouroboros.Consensus.Peras.Voting.View
   , perasRoundStart
   , perasChainAtCandidateBlock
   , LatestCertSeenView (..)
+  , PerasCandidate (..)
+  , PerasCandidateAge (..)
   , PerasVotingView (..)
-  , WithBoostedBlockStatus (..)
   , mkPerasVotingView
   )
 where
 
-import Cardano.Slotting.Slot (WithOrigin)
+import Cardano.Slotting.Slot (WithOrigin (..))
 import Control.Exception (Exception)
 import Control.Monad.Except (ExceptT, MonadError (..), runExceptT)
 import Control.Monad.Reader (MonadReader (..), Reader, runReader)
@@ -45,6 +47,7 @@ import Ouroboros.Consensus.Block.Abstract
   , Point
   , SlotNo (..)
   , castPoint
+  , pointSlot
   )
 import Ouroboros.Consensus.Block.SupportsPeras
   ( BlockSupportsPeras (..)
@@ -62,12 +65,9 @@ import Ouroboros.Consensus.HardFork.History.EraParams
 import qualified Ouroboros.Consensus.HardFork.History.Qry as HF
 import qualified Ouroboros.Consensus.HardFork.History.Summary as HF
 import Ouroboros.Consensus.Peras.Params
-  ( PerasBlockMinSlots (..)
+  ( PerasBlockMaxSlots (..)
+  , PerasBlockMinSlots (..)
   , PerasParams (..)
-  )
-import Ouroboros.Consensus.Storage.PerasCertDB.API
-  ( WithBoostedBlockStatus (..)
-  , forgetBoostedBlockStatus
   )
 import Ouroboros.Network.AnchoredFragment (AnchoredFragment)
 import qualified Ouroboros.Network.AnchoredFragment as AF
@@ -144,21 +144,31 @@ perasRoundStart roundNo = PerasQry $ do
 perasChainAtCandidateBlock ::
   GetHeader blk =>
   PerasBlockMinSlots ->
+  PerasBlockMaxSlots ->
   PerasRoundNo ->
   AnchoredFragment (Header blk) ->
-  PerasQry xs (AnchoredFragment (Header blk))
-perasChainAtCandidateBlock blockMinSlots currRoundNo currChain = do
+  PerasQry xs (PerasCandidate (AnchoredFragment (Header blk)))
+perasChainAtCandidateBlock blockMinSlots blockMaxSlots currRoundNo currChain = do
   -- Slot number at the start of the current round
   currRoundStart <- perasRoundStart currRoundNo
   -- Minimum number of slots to consider before the candidate block
   let _L = SlotNo (unPerasBlockMinSlots blockMinSlots)
-  -- Determine the candidate slot horizon
-  -- NOTE: here we need make sure that the result doesn't underflow
-  let candidateSlotHorizon
-        | currRoundStart >= _L = currRoundStart - _L
-        | otherwise = SlotNo 0
-  -- Split the chain at the candidate slot horizon
-  pure $ fst $ AF.splitAtSlot candidateSlotHorizon currChain
+  -- Maximum number of slots after which the candidate block is considered too old
+  let _M = SlotNo (unPerasBlockMaxSlots blockMaxSlots)
+  -- Check the age of the candidate block relative to the current round start, L, and M.
+  if currRoundStart < _L
+    then pure $ tooYoung $ fst $ AF.splitAtSlot (SlotNo 0) currChain
+    else
+      let chain = fst $ AF.splitAtSlot (currRoundStart - _L) currChain
+       in case AF.headSlot chain of
+            Origin ->
+              if currRoundStart <= _M
+                then pure $ justRight chain
+                else pure $ tooOld chain
+            At headSlot ->
+              if currRoundStart <= headSlot + _M
+                then pure $ justRight chain
+                else pure $ tooOld chain
 
 {-------------------------------------------------------------------------------
   Voting interface
@@ -184,6 +194,30 @@ data LatestCertSeenView cert
   }
   deriving Show
 
+data PerasCandidateAge
+  = PerasCandidateTooYoung
+  | PerasCandidateWithRightAge
+  | PerasCandidateTooOld
+  deriving (Eq, Generic, Show, NoThunks)
+
+-- | Annotates a candidate for Peras election with its age relative to the current round,
+-- perasBlockMinSlots, and perasBlockMaxSlots. In practice, `c` will either be Point
+-- or AnchoredFragment.
+data PerasCandidate c = PerasCandidate
+  { pcCandidate :: c
+  , pcCandidateAge :: PerasCandidateAge
+  }
+  deriving (Eq, Functor, Generic, Show, NoThunks)
+
+tooOld :: c -> PerasCandidate c
+tooOld c = PerasCandidate c PerasCandidateTooOld
+
+tooYoung :: c -> PerasCandidate c
+tooYoung c = PerasCandidate c PerasCandidateTooYoung
+
+justRight :: c -> PerasCandidate c
+justRight c = PerasCandidate c PerasCandidateWithRightAge
+
 -- | Interface needed to evaluate the Peras voting rules
 --
 -- NOTE: the voting rules depend on the candidate block only indirectly. The
@@ -200,11 +234,13 @@ data PerasVotingView cert blk = PerasVotingView
   , latestCertOnChainRound :: !(WithOrigin PerasRoundNo)
   -- ^ 'PerasRoundNo' of the latest certificate present in our preferred chain
   -- (we don't actually need the whole certificate here).
-  , candidateBlock :: Point blk
+  , candidateBlock :: PerasCandidate (Point blk)
   -- ^ The candidate block being voted for.
   --
   -- NOTE: this is the tip of the 'chainAtCandidateBlock' used to initialize
   -- the voting view.
+  -- If the candidate is too young or too old, we want to process that information
+  -- in the voting rules, rather than failing to construct the voting view.
   }
   deriving Show
 
@@ -222,13 +258,13 @@ mkPerasVotingView ::
   -- | Current Peras round number
   PerasRoundNo ->
   -- | Most recent certificate seen by the voter
-  WithOrigin (WithBoostedBlockStatus cert) ->
+  WithOrigin cert ->
   -- | 'PerasRoundNo' of the most recent certificate included in some block in
   -- our preferred chain
   WithOrigin PerasRoundNo ->
   -- | Prefix leading to the candidate block in the volatile suffix of our
   -- preferred chain
-  AnchoredFragment (Header blk) ->
+  PerasCandidate (AnchoredFragment (Header blk)) ->
   -- | Constructed voting view
   PerasQry xs (PerasVotingView cert blk)
 mkPerasVotingView
@@ -247,11 +283,10 @@ mkPerasVotingView
         , candidateBlock = candidateBlock
         }
    where
-    mkLatestCertSeenView certWithProvenance = do
-      let lcsCert = forgetBoostedBlockStatus certWithProvenance
+    mkLatestCertSeenView lcsCert = do
       lcsArrivalSlot <- perasCertArrivalSlot lcsCert
       lcsRoundStartSlot <- perasRoundStart (getPerasCertRound lcsCert)
-      let lcsCandidateBlockExtendsCert = candidateBlockExtendsCert certWithProvenance
+      let lcsCandidateBlockExtendsCert = candidateBlockExtendsCert lcsCert
       pure $
         LatestCertSeenView
           { lcsCert
@@ -262,37 +297,22 @@ mkPerasVotingView
 
     -- Does the candidate block extend the one boosted by a certificate?
     --
-    -- This can be trivially tested by checking whether the certificate is
-    -- within the bounds of the volatile chain prefix leading to the candidate
-    -- block. Conversely, the case of a certificate pointing to a block that's
-    -- too new to be voted for is also covered by this logic, as it won't be
-    -- part of the 'chainAtCandidateBlock' fragment.
-    --
-    -- NOTE: the case of an extremely old certificate boosting a block beyond
-    -- the volatile suffix is covered by also providing the status of the
-    -- boosted block w.r.t. the volatile suffix.
-    candidateBlockExtendsCert (CertBoostingBlockNoLongerInVolatileDB _) =
-      -- This case is vacuously true: the boosted block is from a slot that has
-      -- already been garbage collected from the volatile suffix, which implies
-      -- that it extends any volatile suffix.
-      True
-    candidateBlockExtendsCert (CertBoostingBlockInVolatileDB cert) =
-      -- FIXME: there is a bug in this code path: the call to
-      -- 'withinFragmentBounds' always returns 'False'. We need to understand if
-      -- this is because 'withinFragmentBounds' is being called on an immutable
-      -- block and that's not being properly reflected on the
-      -- 'WithBoostedBlockStatus' of 'cert', or if something fishy is going on
-      -- between 'chainAtCandidateBlock' and 'withinFragmentBounds'.
-      const True $
-        -- The block boosted by the latest certificate seen is still in the
-        -- VolatileDB, so we can check whether it is within the bounds of the
-        -- anchored fragment leading to the candidate block.
-        AF.withinFragmentBounds
-          (castPoint (getPerasCertPoint cert))
-          chainAtCandidateBlock
+    -- NOTE: a boosted block older than the immutable tip is assumed to be on
+    -- our chain. This is not necessarily the case (it could belong to a fork
+    -- that was never adopted), but checking it would require looking into the
+    -- ImmutableDB. Fortunately, VR-1B only matters for blocks in the volatile suffix:
+    -- a certificate boosting a block beyond the immutable tip is too old to
+    -- satisfy VR-1A (assuming reasonable protocol and network parameters),
+    -- so that approximation is safe.
+    candidateBlockExtendsCert cert =
+      AF.withinFragmentBounds boostedBlock chain
+        || pointSlot boostedBlock < AF.anchorToSlotNo (AF.anchor chain)
+     where
+      chain = pcCandidate chainAtCandidateBlock
+      boostedBlock = castPoint (getPerasCertPoint cert)
 
     candidateBlock =
       AF.anchorToPoint
         . AF.castAnchor
         . AF.headAnchor
-        $ chainAtCandidateBlock
+        <$> chainAtCandidateBlock

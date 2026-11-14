@@ -15,11 +15,7 @@
 -- NOTE: this module exists solely because the orphan module
 -- 'Ouroboros.Consensus.Shelley.Node.Serialisation' needs some of these
 -- instances, but defining them there would be too confusing.
-module Ouroboros.Consensus.Shelley.Node.Peras
-  ( -- * Exported for testing purposes only
-    toOpaqueLedgerPerasCert
-  , fromOpaqueLedgerPerasCert
-  ) where
+module Ouroboros.Consensus.Shelley.Node.Peras () where
 
 import Cardano.Binary (Decoder, Encoding, FromCBOR (..), ToCBOR (..), serialize)
 import Cardano.Ledger.Api
@@ -36,7 +32,7 @@ import Data.Bifunctor (Bifunctor (..))
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.ByteString.Short as ShortByteString
-import Data.Maybe.Strict (StrictMaybe (..))
+import Data.Maybe.Strict (StrictMaybe (..), strictMaybeToMaybe)
 import qualified Data.Measure as Measure
 import Data.MemPack.Buffer
   ( byteArrayFromShortByteString
@@ -79,9 +75,6 @@ import Ouroboros.Consensus.Peras.Context
   , mkBoundedPerasEpochContextWith
   )
 import qualified Ouroboros.Consensus.Peras.Crypto.BLS as BLS
-import Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
-  ( unsafePerasBLSPrivateKeyFromEnv
-  )
 import qualified Ouroboros.Consensus.Peras.Error.V1 as V1
 import Ouroboros.Consensus.Peras.Params
   ( PerasParams
@@ -96,8 +89,7 @@ import qualified Ouroboros.Consensus.Protocol.PolyPraos as PolyPraos
 import qualified Ouroboros.Consensus.Protocol.Praos.Views as Praos
 import Ouroboros.Consensus.Protocol.Praos2 (LeiosCrypto, Praos2)
 import Ouroboros.Consensus.Shelley.Ledger.Block
-  ( LedgerPerasCertError
-  , ShelleyBlock (..)
+  ( ShelleyBlock (..)
   , ShelleyPerasCertCompatibleWithLedger (..)
   )
 import Ouroboros.Consensus.Shelley.Ledger.Ledger
@@ -315,7 +307,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -332,7 +324,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -349,7 +341,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -366,7 +358,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -383,7 +375,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -400,7 +392,7 @@ instance
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance
   ( Typeable proto
@@ -420,106 +412,45 @@ instance
     let sizeUpperBound = V1.perasCertSizeUpperBound $ vpcCert cert
     when (sizeUpperBound > dijkstraPerasMaxCertSize) $
       Left $
-        V1.PerasCertTooLargeError sizeUpperBound dijkstraPerasMaxCertSize
+        V1.PerasCertTooLargeError dijkstraPerasMaxCertSize sizeUpperBound
     pure cert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock blk =
-    bimap V1.PerasTemporaryCertInBlockError id
-      . extractPerasCertFromShelleyBlockBody
+  getPerasCertInBlock =
+    extractPerasCertFromShelleyBlockBody
       . SL.blockBody
       . shelleyBlockRaw
-      $ blk
-  readPerasPrivateKeyFromEnv _ =
-    unsafePerasBLSPrivateKeyFromEnv
 
 {-------------------------------------------------------------------------------
   ShelleyPerasCertCompatibleWithLedger
 -------------------------------------------------------------------------------}
 
--- NOTE: these instances will be removed once we have a proper type for Peras
--- certificates in the ledger.
-
 instance ShelleyPerasCertCompatibleWithLedger proto ShelleyEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
 instance ShelleyPerasCertCompatibleWithLedger proto AllegraEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
 instance ShelleyPerasCertCompatibleWithLedger proto MaryEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
 instance ShelleyPerasCertCompatibleWithLedger proto AlonzoEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
 instance ShelleyPerasCertCompatibleWithLedger proto BabbageEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
 instance ShelleyPerasCertCompatibleWithLedger proto ConwayEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
+  extractPerasCertFromShelleyBlockBody _ = Nothing
   injectPerasCertIntoShelleyBlockBody _ = id
 
-instance
-  Typeable proto =>
-  ShelleyPerasCertCompatibleWithLedger proto DijkstraEra
-  where
+instance ShelleyPerasCertCompatibleWithLedger proto DijkstraEra where
   extractPerasCertFromShelleyBlockBody blockBody =
-    case blockBody ^. SL.perasCertBlockBodyL of
-      SNothing ->
-        Right Nothing
-      SJust ledgerCert ->
-        case fromOpaqueLedgerPerasCert ledgerCert of
-          Left err -> Left err
-          Right cert -> Right (Just cert)
+    V1.PerasCert <$> strictMaybeToMaybe (blockBody ^. SL.perasCertBlockBodyL)
 
   injectPerasCertIntoShelleyBlockBody cert =
-    SL.perasCertBlockBodyL .~ SJust (toOpaqueLedgerPerasCert cert)
-
-toOpaqueLedgerPerasCert ::
-  Typeable blk =>
-  V1.PerasCert blk ->
-  SL.PerasCert
-toOpaqueLedgerPerasCert =
-  SL.PerasCert . toByteArray . toCBOR
- where
-  toByteArray :: Encoding -> ByteArray
-  toByteArray =
-    byteArrayFromShortByteString
-      . ShortByteString.toShort
-      . CBOR.toStrictByteString
-
-fromOpaqueLedgerPerasCert ::
-  Typeable blk =>
-  SL.PerasCert ->
-  Either LedgerPerasCertError (V1.PerasCert blk)
-fromOpaqueLedgerPerasCert (SL.PerasCert byteArray) =
-  fromByteArray fromCBOR byteArray
- where
-  fromByteArray ::
-    (forall s. Decoder s (V1.PerasCert blk)) ->
-    ByteArray ->
-    Either LedgerPerasCertError (V1.PerasCert blk)
-  fromByteArray decoder =
-    handleParseErrors
-      . CBOR.deserialiseFromBytes decoder
-      . LazyByteString.fromStrict
-      . ShortByteString.fromShort
-      . byteArrayToShortByteString
-
-  handleParseErrors ::
-    Either CBOR.DeserialiseFailure (ByteString, a) ->
-    Either LedgerPerasCertError a
-  handleParseErrors = \case
-    Left err -> failure err
-    Right (trailing, a)
-      | not (LazyByteString.null trailing) -> failure "trailing bytes"
-      | otherwise -> pure a
-   where
-    failure err =
-      Left $
-        "Failed to deserialize opaque Peras certificate from byte array: "
-          <> show err
+    SL.perasCertBlockBodyL .~ SJust (V1.unPerasCert cert)

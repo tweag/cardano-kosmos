@@ -4,9 +4,9 @@
 ; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
 ;
 [subrepo]
-	remote = git@github.com:IntersectMBO/ouroboros-consensus.git
-	branch = ae2c76ebbff5f79d59560d6c097501a9be0eb193
-	commit = ae2c76ebbff5f79d59560d6c097501a9be0eb193
-	parent = a6d6cd1d208681c570b4f0ec207e07c132e3c1e9
+	remote = git@github.com:tweag/ouroboros-consensus.git
+	branch = aedc1bdf8737e2ee1dafc47562f1f4191c837ef0
+	commit = aedc1bdf8737e2ee1dafc47562f1f4191c837ef0
+	parent = 3b253c6ac766841c7ca085d0940668ee742f6fd8
 	method = merge
 	cmdver = 0.4.9

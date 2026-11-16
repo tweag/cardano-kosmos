@@ -18,6 +18,6 @@ DEVENV_PATH="$2"
 pathOutput="$DEVENV_PATH/process-compose.yaml"
 
 portsOfNodes=$(cat "$DEVENV_PATH/nodes-ports.json")
-output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$scenarioFile"'") '"$portsOfNodes"'' | nickel export --format yaml)
+output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$DEVENV_PATH"/cardano_binaries.json'") (import "'"$scenarioFile"'") '"$portsOfNodes"'' | nickel export --format yaml)
 
 echo "$output" > "$pathOutput"

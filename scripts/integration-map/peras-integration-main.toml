@@ -21,27 +21,27 @@ branch = "peras/kosmos-integration-main"
 name = "cardano-ledger"
 path = "~/code/cardano-ledger-main-v2"
 fork = "tweag/cardano-ledger"
-base = "b21c518eb6"
+base = "cc2b0654c9"
 base_label = "master"
-base_url = "https://github.com/IntersectMBO/cardano-ledger/commit/b21c518eb6"
+base_url = "https://github.com/IntersectMBO/cardano-ledger/commit/cc2b0654c9"
 branch = "peras/kosmos-integration-main"
 
 [[repo]]
 name = "ouroboros-network"
 path = "~/code/ouroboros-network-main"
 fork = "tweag/ouroboros-network"
-base = "4646039f0"
-base_label = "2.0.0.0 release"
-base_url = "https://github.com/IntersectMBO/ouroboros-network/commit/4646039f0"
+base = "34831d62d6"
+base_label = "main"
+base_url = "https://github.com/IntersectMBO/ouroboros-network/commit/34831d62d6"
 branch = "peras/kosmos-integration-main"
 
 [[repo]]
 name = "ouroboros-consensus"
 path = "~/code/consensus-main-v2"
 fork = "tweag/ouroboros-consensus"
-base = "e23469f66"
+base = "817363d62b"
 base_label = "main"
-base_url = "https://github.com/IntersectMBO/ouroboros-consensus/commit/e23469f66"
+base_url = "https://github.com/IntersectMBO/ouroboros-consensus/commit/817363d62b"
 branch = "peras/kosmos-integration-main"
 
 [[repo]]
@@ -57,154 +57,19 @@ branch = "peras/kosmos-integration-main"
 name = "cardano-node"
 path = "~/code/cardano-node-main"
 fork = "tweag/cardano-node"
-base = "885ae5820"
+base = "875ce5c93f"
 base_label = "master"
-base_url = "https://github.com/IntersectMBO/cardano-node/commit/885ae5820"
+base_url = "https://github.com/IntersectMBO/cardano-node/commit/875ce5c93f"
 branch = "peras/kosmos-integration-main"
 
 [[repo]]
 name = "cardano-cli"
 path = "~/code/cardano-cli-main"
 fork = "tweag/cardano-cli"
-base = "75797d94d"
+base = "d9730d8a7a"
 base_label = "master"
-base_url = "https://github.com/IntersectMBO/cardano-cli/commit/75797d94d"
+base_url = "https://github.com/IntersectMBO/cardano-cli/commit/d9730d8a7a"
 branch = "peras/kosmos-integration-main"
-
-# Open PRs that a merged changeset corresponds to. `head`: the PR head when last checked; `adapted_from`: the PR
-# commit a cherry-picked changeset was taken from, when the PR could not be merged as-is.
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2450"
-pr = "IntersectMBO/ouroboros-consensus#2450"
-title = "[Peras 78] Fix and comment the wFA^LS vote weight computation"
-draft = false
-head = "9fc2b8bef0e253c6f9671b2332ae23278ada33ad"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2413"
-pr = "IntersectMBO/ouroboros-consensus#2413"
-title = "[Peras 79] Derive PerasParams from the on-chain protocol parameters"
-draft = false
-head = "d4be815d89db5a68218008e56d220bad141cb12b"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2457"
-pr = "IntersectMBO/ouroboros-consensus#2457"
-title = "[Peras 80] Extend forge with Peras certificate inclusion callback"
-draft = false
-head = "bbe2b958134791a09d189591df6e164591c68c25"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "peras/vote-forging-main"
-pr = "IntersectMBO/ouroboros-consensus#2461"
-title = "[Peras ?] Adapt vote forging controller to use an updatable PerasVoteForging"
-draft = true
-head = "d77aca651dd299e6adc99e93e880abac0d66c61d"
-adapted_from = "d77aca651dd299e6adc99e93e880abac0d66c61d"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "peras/bootstrap-round-vr2b-main"
-pr = "IntersectMBO/ouroboros-consensus#2444"
-title = "[WIP] Amend voting rules to only boostrap based on explicit perasBootstrapRound"
-draft = true
-head = "abad72b5696d4918ff15ec16ff1bf52ed8cdbbfa"
-adapted_from = "abad72b5696d4918ff15ec16ff1bf52ed8cdbbfa"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2453"
-pr = "IntersectMBO/ouroboros-consensus#2453"
-title = "[Peras 81] Remove BlockStatus wrapper and rely on slot computation for VR-1B"
-draft = false
-head = "18923838852419255145308f0a7b6086485bc958"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2484"
-pr = "IntersectMBO/ouroboros-consensus#2484"
-title = "[Peras 82] Do not vote if the candidate block is too old"
-draft = true
-head = "8a394073d096b697315a900d69ea3732049c6d7b"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "tweag/ouroboros-consensus#36"
-pr = "tweag/ouroboros-consensus#36"
-title = "Object diffusion/progress"
-draft = false
-head = "d1af90670b00d88f582d88d34394455e905634ee"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "tweag/ouroboros-consensus#37"
-pr = "tweag/ouroboros-consensus#37"
-title = "Account for certificate weight in GDD density computations"
-draft = true
-head = "2c3f6ff144308b5157520ac2e46a4b4ca402a9da"
-
-[[pr]]
-repo = "cardano-ledger"
-ref = "peras/cert-from-base-main"
-pr = "IntersectMBO/cardano-ledger#6164"
-title = "[DRAFT] Use peras types from cardano-base in ledger"
-draft = true
-head = "8379de065f5e91870d6aea955c4e4f2ce7969ef9"
-adapted_from = "8379de065f5e91870d6aea955c4e4f2ce7969ef9"
-
-[[pr]]
-repo = "cardano-base"
-ref = "IntersectMBO/cardano-base#700"
-pr = "IntersectMBO/cardano-base#700"
-title = "cardano-strict-containers: add Data.Bitmap"
-draft = false
-head = "d2ff278b412ba8740886e535bf664bbbc9a7f3f6"
-
-[[pr]]
-repo = "cardano-base"
-ref = "IntersectMBO/cardano-base#701"
-pr = "IntersectMBO/cardano-base#701"
-title = "cardano-crypto-peras: add base types"
-draft = false
-head = "45b2a01cc578e1689d2c92888a9a295528af7510"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2293"
-pr = "IntersectMBO/ouroboros-consensus#2293"
-title = "Immutable (aka historical) certificate database"
-draft = true
-head = "bc34f22d1c7b6cf136b3d66cf767b005111da7c8"
-
-[[pr]]
-repo = "ouroboros-consensus"
-ref = "IntersectMBO/ouroboros-consensus#2342"
-pr = "IntersectMBO/ouroboros-consensus#2342"
-title = "Add peras cert db tests"
-draft = true
-head = "fb6be62089407b61fb50238b87f305c749561890"
-
-[[pr]]
-repo = "ouroboros-network"
-ref = "peras/object-diffusion-termination-main"
-pr = "IntersectMBO/ouroboros-network#5431"
-title = "object diffusion: more client agency for graceful termination, and make server idleness explicit"
-draft = false
-head = "ab855518a03e31246a5500bce6d890872498462c"
-adapted_from = "ab855518a03e31246a5500bce6d890872498462c"
-
-[[pr]]
-repo = "cardano-node"
-ref = "IntersectMBO/cardano-node#6773"
-pr = "IntersectMBO/cardano-node#6773"
-title = "[Peras] Support PerasEnabled as a configuration flag"
-draft = true
-head = "995f75e4ac46cf2714fddb8580ad72bc10665bbb"
 
 # Other open PRs a merged changeset contains.
 
@@ -222,6 +87,20 @@ pr = "IntersectMBO/ouroboros-consensus#2322"
 title = "[Peras 72] Make Object Diffusion server idleness explicit"
 draft = false
 
+[[includes]]
+repo = "ouroboros-consensus"
+ref = "tweag/ouroboros-consensus#36"
+pr = "IntersectMBO/ouroboros-consensus#2286"
+title = "Peras: support Object Diffusion termination and GSM caught-up detection"
+draft = true
+
+[[includes]]
+repo = "ouroboros-consensus"
+ref = "tweag/ouroboros-consensus#36"
+pr = "IntersectMBO/ouroboros-consensus#2326"
+title = "Drop `PerasCertTicketNo` and just use `PerasRoundNo` directly"
+draft = true
+
 # Changesets whose kind is not given by their branch prefix. "stub": a placeholder pending real work.
 
 [[kind_override]]
@@ -230,23 +109,6 @@ ref = "peras/trivial-cert-validation"
 kind = "stub"
 note = "placeholder until step 20 (cardano-peras #276) validates certificates"
 url = "https://github.com/tweag/cardano-peras/issues/276"
-
-# Kosmos-side changes listed under a step, by step number.
-[kosmos_side]
-1 = [
-  "CHaP index-state 2026-11-05; grapesy >= 1.2.1 from CHaP instead of a git pin",
-  "Vendor cardano-diffusion, network-mux, ntp-client, monoidal-synchronisation, cardano-ledger-shelley-test",
-  "Vanilla scenario: drop the PERAS_* env, which nothing reads any more",
-  "Trim the PlutusV4 cost model of the generated Dijkstra genesis (251 params)",
-]
-2 = [
-  "Vendor cardano-base master's crypto packages (no crypto-class 2.6 constraint)",
-  "Context-less cardano-keys a549816 from git",
-  "Build plutus-core with a single job (now built in place)",
-]
-5 = [
-  "Vanilla scenario: Peras parameters in the Dijkstra genesis",
-]
 
 # Cross-repository requirements: `repo`/`ref` requires `needs_repo`/`needs_ref` ("@base": that repository's base).
 # "build": the dependent uses what the dependency introduces; "runtime": it builds without it but does not work.
@@ -293,11 +155,11 @@ why = "createPossessionProofDSIGN without a signing context, from cardano-base m
 
 [[requires]]
 repo = "cardano-api"
-ref = "peras/bls-context-less"
+ref = "kosmos-compat/consensus-main"
 needs_repo = "cardano-base"
 needs_ref = "@base"
 how = "build"
-why = "createPossessionProofDSIGN without a signing context, from cardano-base master"
+why = "Sebastian Nagel's leios-main-compat commits build against cardano-base master (createPossessionProofDSIGN without a signing context)"
 
 [[requires]]
 repo = "cardano-node"
@@ -335,7 +197,7 @@ why = "votes form certificates, which blocks carry and the ledger must accept"
 repo = "ouroboros-consensus"
 ref = "tweag/ouroboros-consensus#36"
 needs_repo = "ouroboros-network"
-needs_ref = "peras/object-diffusion-termination-main"
+needs_ref = "IntersectMBO/ouroboros-network#5431"
 how = "build"
 why = "uses the MsgAwaitReply and MsgServerIdle messages the network topic adds"
 
@@ -343,7 +205,7 @@ why = "uses the MsgAwaitReply and MsgServerIdle messages the network topic adds"
 repo = "cardano-node"
 ref = "peras/object-diffusion-tracers-main"
 needs_repo = "ouroboros-network"
-needs_ref = "peras/object-diffusion-termination-main"
+needs_ref = "IntersectMBO/ouroboros-network#5431"
 how = "build"
 why = "traces MsgAwaitReply and MsgServerIdle"
 
@@ -410,3 +272,418 @@ needs_repo = "cardano-ledger"
 needs_ref = "peras/cert-validation"
 how = "build"
 why = "applies blocks with the ledger's applyBlockEither*WithPerasContext"
+
+# ==== Steps ====
+# One [[step]] per kosmos step, in order; its [[step.merge]] entries are the merges it brings, per repository in
+# first-parent order. `kint export` rewrites this section from git and keeps the hand-written fields: `kosmos_side`,
+# `kosmos_files`, `pr`, `pr_title`, `pr_draft`. `base`: repositories the step vendors at their upstream base.
+
+# ---- step 1
+[[step]]
+title = "Every repository on its upstream main or master, with BLS signatures without a signing context (cardano-base master)"
+base = [
+  "cardano-base",
+  "ouroboros-network",
+]
+
+  [[step.merge]]
+  repo = "cardano-ledger"
+  ref = "peras/bls-context-less"
+  desc = "proofs of possession without a signing context"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/tools-test-sequential"
+  desc = "run the db-synthesizer tests one after the other: they share their ChainDB directory"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-compat/ledger-master"
+  desc = "cardano-ledger master cc2b0654c9: Sebastian Nagel's bump from IntersectMBO/ouroboros-consensus#2515, 2508112700 and 424542c56b"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-compat/network-main"
+  desc = "ouroboros-network main: NodeToNodeV_17 for Peras, per-connection tx-submission configuration, mkDefaultMiniProtocolParameters"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/bls-context-less-main"
+  desc = "Peras and Leios BLS without a signing context, for cardano-base master's crypto-class"
+
+  [[step.merge]]
+  repo = "cardano-api"
+  ref = "kosmos-compat/consensus-main"
+  desc = "upstream leios-main-compat a8031ce484, Sebastian Nagel's commits without the pins, and master's intermediate Dijkstra parameters renamed: cardano-api against ledger master, consensus main and cardano-base master"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "kosmos-compat/consensus-main"
+  desc = "consensus main's Leios API, no Leios announcement age limits, ledger master NewEpochState, consensus 5.0 bound, extractAsMempoolTxs, refInputsCostPerMultiAssetByte"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "kosmos-compat/network-main"
+  desc = "ouroboros-network main: no mux counters, NodeToNodeV_17 in the startup trace, tx-generator mini-protocol parameters"
+
+  [[step.merge]]
+  repo = "cardano-cli"
+  ref = "kosmos-compat/consensus-main"
+  desc = "upstream leios-main-compat a58b1eb82: cardano-cli against ledger master; refInputsCostPerMultiAssetByte"
+
+# ---- step 2
+[[step]]
+title = "Every Peras ChainDB trace has a severity, so all of them show in the logs"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/chaindb-trace-severities-main"
+  desc = "exhaustive severities for the Peras ChainDB traces"
+
+# ---- step 3
+[[step]]
+title = "Correct vote weights in the wFA^LS committee (consensus#2450)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2450"
+  desc = "fix and comment the wFA^LS vote weight computation"
+  pr = "IntersectMBO/ouroboros-consensus#2450"
+  pr_title = "[Peras 78] Fix and comment the wFA^LS vote weight computation"
+  pr_draft = false
+
+# ---- step 4
+[[step]]
+title = "Parameters come from the ledger's protocol parameters, per epoch (consensus#2413)"
+kosmos_side = [
+  "Vanilla scenario: Peras parameters in the Dijkstra genesis",
+]
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2413"
+  desc = "derive PerasParams from the on-chain protocol parameters; Peras epoch-context support"
+  pr = "IntersectMBO/ouroboros-consensus#2413"
+  pr_title = "[Peras 79] Derive PerasParams from the on-chain protocol parameters"
+  pr_draft = false
+
+# ---- step 5
+[[step]]
+title = "Forged blocks can carry a certificate (consensus#2457)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2457"
+  desc = "extend forge with the Peras certificate inclusion callback"
+  pr = "IntersectMBO/ouroboros-consensus#2457"
+  pr_title = "[Peras 80] Extend forge with Peras certificate inclusion callback"
+  pr_draft = false
+
+# ---- step 6
+[[step]]
+title = "Rounds of an upcoming epoch resolve before the ledger reaches it (from consensus#2067)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/tick-epoch-context-resolver-main"
+  desc = "IntersectMBO/ouroboros-consensus#2067's e185441f3 and 470fdf169: tick the Peras epoch-context resolver on the fly"
+
+# ---- step 7
+[[step]]
+title = "Less laziness in the hard-fork history query (from consensus#2067)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/hfc-query-strictness-main"
+  desc = "IntersectMBO/ouroboros-consensus#2067's bd7258d0b: reduce laziness in the HFC query"
+
+# ---- step 8
+[[step]]
+title = "Node configuration switch to enable Peras (node#6773)"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "IntersectMBO/cardano-node#6773"
+  desc = "PerasEnabled configuration flag"
+  pr = "IntersectMBO/cardano-node#6773"
+  pr_title = "[Peras] Support PerasEnabled as a configuration flag"
+  pr_draft = true
+
+# ---- step 9
+[[step]]
+title = "Nodes vote with their pools' genesis BLS keys (consensus#2461)"
+
+  [[step.merge]]
+  repo = "cardano-ledger"
+  ref = "peras/trivial-cert-validation"
+  desc = "re-enable trivial Peras certificate validation"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/voting-controller-main"
+  desc = "IntersectMBO/ouroboros-consensus#2067's a0788f188 adapted: Peras voting controller, without the env-var credentials"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/vote-forging-main"
+  desc = "IntersectMBO/ouroboros-consensus#2461 adapted from d77aca651: vote forging thread; the PerasVoteForging handle supplies the voting credentials"
+  pr = "IntersectMBO/ouroboros-consensus#2461"
+  pr_title = "[Peras ?] Adapt vote forging controller to use an updatable PerasVoteForging"
+  pr_draft = true
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/bls-keys-from-ledger-main"
+  desc = "export the Peras ledger key scope"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "IntersectMBO/cardano-node peras/vote-forging"
+  desc = "install the PerasVoteForging handle at startup; cherry-picked onto master"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "IntersectMBO/cardano-node peras/bls-key-plumbing"
+  desc = "BLS key file for Peras votes; cherry-picked onto master"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "peras/bls-keys-from-genesis-main"
+  desc = "vote with the pools' genesis BLS keys, taken from cardano-config's --shelley-bls-key"
+
+  [[step.merge]]
+  repo = "cardano-cli"
+  ref = "peras/testnet-bls-keys-main"
+  desc = "BLS keys for testnet pools in create-testnet-data"
+
+# ---- step 10
+[[step]]
+title = "VR-1B no longer needs the certified block in the VolatileDB (consensus#2453)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2453"
+  desc = "VR-1B fix: drop the BlockStatus wrapper and rely on slot computation"
+  pr = "IntersectMBO/ouroboros-consensus#2453"
+  pr_title = "[Peras 81] Remove BlockStatus wrapper and rely on slot computation for VR-1B"
+  pr_draft = false
+
+# ---- step 11
+[[step]]
+title = "No votes for candidate blocks that are too old or too young (VR3, consensus#2484)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2484"
+  desc = "VR3: perasBlockMaxSlots and the candidate age rule"
+  pr = "IntersectMBO/ouroboros-consensus#2484"
+  pr_title = "[Peras 82] Do not vote if the candidate block is too old or too young"
+  pr_draft = false
+
+# ---- step 12
+[[step]]
+title = "Voting starts at the genesis bootstrap round (VR-2B, consensus#2444)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2444"
+  desc = "VR-2B: amend the voting rules to bootstrap only from an explicit perasBootstrapRound"
+  pr = "IntersectMBO/ouroboros-consensus#2444"
+  pr_title = "[Peras 83] Amend voting rules to only boostrap based on explicit perasBootstrapRound"
+  pr_draft = false
+
+# ---- step 13
+[[step]]
+title = "Certificate and vote diffusion terminates cleanly and reports idleness (tweag#36, network#5431)"
+
+  [[step.merge]]
+  repo = "ouroboros-network"
+  ref = "IntersectMBO/ouroboros-network#5431"
+  desc = "object diffusion: more client agency for graceful termination, and explicit server idleness"
+  pr = "IntersectMBO/ouroboros-network#5431"
+  pr_title = "object diffusion: more client agency for graceful termination, and make server idleness explicit"
+  pr_draft = false
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "tweag/ouroboros-consensus#36"
+  desc = "object diffusion progress; includes IntersectMBO/ouroboros-consensus#2321, #2322 and gsm_caught_up"
+  pr = "tweag/ouroboros-consensus#36"
+  pr_title = "Object diffusion/progress"
+  pr_draft = false
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/object-diffusion-epoch-context-main"
+  desc = "Peras byte limits and certificate requestability from the epoch context, for tweag #36"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "peras/object-diffusion-tracers-main"
+  desc = "trace MsgAwaitReply and MsgServerIdle from IntersectMBO/ouroboros-network#5431"
+
+# ---- step 14
+[[step]]
+title = "Syncing waits for Peras certificates before disconnecting peers (GDD, tweag#37)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "tweag/ouroboros-consensus#37"
+  desc = "GDD: wait for Peras certificates"
+  pr = "tweag/ouroboros-consensus#37"
+  pr_title = "Account for certificate weight in GDD density computations"
+  pr_draft = true
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/gdd-epoch-context-main"
+  desc = "the GDD's perasBlockMaxSlots from the Peras epoch context, for tweag #37"
+
+# ---- step 15
+[[step]]
+title = "Ledger and consensus share the certificate format from cardano-crypto-peras (base#700, base#701, ledger#6164)"
+
+  [[step.merge]]
+  repo = "cardano-base"
+  ref = "IntersectMBO/cardano-base#700"
+  desc = "Data.Bitmap in cardano-strict-containers; cardano-crypto-leios 0.4 on it"
+  pr = "IntersectMBO/cardano-base#700"
+  pr_title = "cardano-strict-containers: add Data.Bitmap"
+  pr_draft = false
+
+  [[step.merge]]
+  repo = "cardano-base"
+  ref = "IntersectMBO/cardano-base#701"
+  desc = "cardano-crypto-peras base types"
+  pr = "IntersectMBO/cardano-base#701"
+  pr_title = "cardano-crypto-peras: add base types"
+  pr_draft = false
+
+  [[step.merge]]
+  repo = "cardano-ledger"
+  ref = "kosmos-compat/crypto-leios-0.4"
+  desc = "BitField codecs for cardano-crypto-leios 0.4's Data.Bitmap, from IntersectMBO/cardano-base#700"
+
+  [[step.merge]]
+  repo = "cardano-ledger"
+  ref = "peras/cert-from-base-main"
+  desc = "IntersectMBO/cardano-ledger#6164 adapted: Peras certificate from cardano-crypto-peras"
+  pr = "IntersectMBO/cardano-ledger#6164"
+  pr_title = "[DRAFT] Use peras types from cardano-base in ledger"
+  pr_draft = true
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/gdd-word64-rounds-main"
+  desc = "compute the GDD virtual last Peras round in Word64, ahead of the Word32 PerasRoundNo from cardano-crypto-peras"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/cert-from-base-main"
+  desc = "Peras base types and certificate from cardano-crypto-peras"
+
+# ---- step 16
+[[step]]
+title = "Nodes archive the certificates of immutable blocks on disk (consensus#2293)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2293"
+  desc = "immutable, aka historical, Peras certificate database"
+  pr = "IntersectMBO/ouroboros-consensus#2293"
+  pr_title = "Immutable (aka historical) certificate database"
+  pr_draft = true
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-compat/hist-certs-on-integration"
+  desc = "IntersectMBO/ouroboros-consensus#2293 against the round-keyed PerasCertDB and the Leios test block"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-local/hist-certs-tools-expect-fail"
+  desc = "expect the db-synthesizer tests to fail while IntersectMBO/ouroboros-consensus#2293's perasimmutablecert/ is unknown to db-synthesizer"
+
+# ---- step 17
+[[step]]
+title = "Tests for the certificate archive (consensus#2342)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2342"
+  desc = "tests for the historical certificate database; saturating PerasWeight addition"
+  pr = "IntersectMBO/ouroboros-consensus#2342"
+  pr_title = "Add peras cert db tests"
+  pr_draft = true
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-compat/hist-cert-tests-on-integration"
+  desc = "IntersectMBO/ouroboros-consensus#2342's tests against main's ChainDB and GDD interfaces and the Word32 PerasRoundNo"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "kosmos-local/hist-cert-tests-expect-fail"
+  desc = "expect four of IntersectMBO/ouroboros-consensus#2342's tests to fail, as they do against #2293 upstream"
+
+# ---- step 18
+[[step]]
+title = "The voting committee code moves from consensus to cardano-base"
+
+  [[step.merge]]
+  repo = "cardano-base"
+  ref = "peras/committee-from-consensus"
+  desc = "the voting committee code and PerasBLSCrypto moved from ouroboros-consensus"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/committee-from-base"
+  desc = "take the voting committee code and PerasBLSCrypto from cardano-crypto-peras"
+
+  [[step.merge]]
+  repo = "cardano-node"
+  ref = "kosmos-compat/committee-from-base"
+  desc = "Peras voting committee modules from cardano-crypto-peras, following ouroboros-consensus"
+
+# ---- step 19
+[[step]]
+title = "The ledger validates Peras certificates, for the epoch of the block and the one before it (cardano-peras#276)"
+
+  [[step.merge]]
+  repo = "cardano-base"
+  ref = "peras/cert-validation"
+  desc = "Peras certificate verification in cardano-crypto-peras"
+
+  [[step.merge]]
+  repo = "cardano-ledger"
+  ref = "peras/cert-validation"
+  desc = "validate Peras certificates in the Dijkstra BBODY rule with cardano-crypto-peras, for the epoch of the block and the one before it"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/cert-validation-main"
+  desc = "pass the nonces and rounds of the epoch of the block and the one before it to the ledger, which validates Peras certificates"
+
+# ---- step 20
+[[step]]
+title = "The ChainDB's Peras handles no longer keep the genesis ledger state alive (consensus#2478)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "IntersectMBO/ouroboros-consensus#2478"
+  desc = "ChainDB: do not retain the ChainDB arguments in the Peras handles"
+  pr = "IntersectMBO/ouroboros-consensus#2478"
+  pr_title = "ChainDB: do not retain the ChainDB arguments in the Peras handles"
+  pr_draft = false
+
+# ---- step 21
+[[step]]
+title = "An experimental ObjectDiffusion V2 inbound side, with its decision benchmark (consensus#1786)"
+
+  [[step.merge]]
+  repo = "ouroboros-consensus"
+  ref = "peras/object-diffusion-v2"
+  desc = "IntersectMBO/ouroboros-consensus#1786 adapted from 0e03ff05f: experimental ObjectDiffusion V2 inbound side and its decision benchmark"
+  pr = "IntersectMBO/ouroboros-consensus#1786"
+  pr_title = "[Peras 11] Add ObjectDiffusion V2"
+  pr_draft = true

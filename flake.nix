@@ -209,6 +209,7 @@
               freshPkgs.nickel
               freshPkgs.sqlite
               freshPkgs.envoy-bin
+              freshPkgs.python3
             ];
           });
           cluster = shell;

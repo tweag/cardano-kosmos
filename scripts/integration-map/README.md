@@ -1,61 +1,81 @@
-# Integration map
+# Integration tools
 
-`integration-map.py` makes one HTML page. The page shows a kosmos lockstep branch and the integration branches that
-its steps pin. The page has three views:
+Two scripts for the Peras lockstep integration:
 
-- A graph of the merges. Each repository has one column. The rows are in merge order. The arrows show the
-  requirements between repositories.
-- A list of the changesets of each repository.
-- A table of the steps and the repositories.
+- `kint` checks that the integration is consistent and writes down its current state.
+- `integration-map.py` draws the integration as one HTML page.
 
-To make the page, run this command from the root of the kosmos repository:
+Both read the same configuration, `peras-integration-main.toml`.
+
+## Terms
+
+- **Integration branch**: in each repository, the branch that kosmos vendors. It is the upstream base, then one
+  `--no-ff` merge per changeset. Each merge message is `Merge <ref> (<description>)`.
+- **Changeset**: what one merge brings. There are two sorts:
+  - **external**: a PR (`owner/repo#N`) or another repository's branch (`owner/repo branch`). It is merged as-is and
+    never rewritten.
+  - **topic**: a branch of the fork (any other ref). It starts from the integration commit it merges into, so it can
+    be rebuilt on a new state.
+- **Step**: a kosmos commit that moves one or more subrepo pins. A kosmos commit that moves no pin, such as the commit
+  that adds these scripts, is not a step.
+
+## kint
+
+```
+scripts/integration-map/kint export
+scripts/integration-map/kint verify
+```
+
+`kint export` reads git and writes:
+
+- the `[[step]]` section of the configuration: every step and its merges, in order, without SHAs;
+- the lock, `peras-integration-main.lock.toml`: the SHAs of the steps and the merges.
+
+It keeps the fields that you write by hand: `kosmos_side`, `kosmos_files`, `pr`, `pr_title`, `pr_draft`. Run it after
+every change to the branches. Do not edit the lock.
+
+`kint verify` checks that:
+
+- each integration branch is only `Merge <ref> (<description>)` merges on top of its base;
+- each merge is in a step, and each pin is the last merge of its step (or the repository's base);
+- the configuration and the lock describe what git has;
+- each topic starts from the integration commit it merges into, and its local branch is what was merged;
+- no message mentions an AI: merges, kosmos commits, and commits written with your git identity;
+- each step vendors exactly the trees of its pins;
+- each requirement, include and kind override names a changeset, and no requirement comes after its dependent.
+
+It exits with 1 if a check fails.
+
+## The map
 
 ```
 nix develop -c scripts/integration-map/integration-map.py scripts/integration-map/peras-integration-main.toml map.html
 ```
 
-The script reads the data from git. Each repository must have a local clone. The clone must have the integration
-branch and the topic branches that it merges.
+The page has three views:
 
-A step is a commit of the kosmos branch that changes one or more subrepo pins. A commit that changes no pin is not a
-step. For example, the commit that adds this script is not a step.
+- **Graph**: one column per repository, one row per merge, arrows for the requirements.
+- **By repository**: each changeset, with its kind, PR, size and requirements.
+- **Lockstep**: steps × repositories.
 
-## Order
+The order comes from git. Steps are in kosmos commit order. A merge belongs to the first step whose pin contains it.
+In one repository, merges are in first-parent order. Merges in different repositories in the same step have no order:
+only a `[[requires]]` entry relates them.
 
-The script gets the order from git:
-
-- The order of the steps is the order of the commits on the kosmos branch.
-- A merge is in the first step whose pin contains it.
-- In one repository, the order of the merges is the first-parent order of the integration branch.
-
-Git does not give an order to merges in different repositories in the same step. A step moves all its pins in one
-commit. Thus, the only relation between these merges is a requirement in the configuration. If the configuration does
-not declare a requirement, the graph shows no relation.
+The kind of a changeset comes from its ref: `kosmos-compat/` is kosmos-compat, `kosmos-local/` is test-only, anything
+else is upstream-bound. A `[[kind_override]]` can mark it as a stub.
 
 ## Configuration
 
-`peras-integration-main.toml` is the configuration for the map of `peras/integration-main`. It gives the data that git
-does not record.
-
 | Table | Content |
 |---|---|
-| `[kosmos]` | `base`: the commit before the first step. `branch`: the lockstep branch. `path` (optional): the kosmos clone. If you do not set `path`, the script uses the clone that contains it. |
-| `[[repo]]` | One entry for each repository. The order of the entries is the order of the columns. `name`: the repository. `path`: the local clone. `fork`: the GitHub slug. `base`: the upstream commit before the first merge. `base_label` and `base_url`: the text and link for this commit. `branch`: the integration branch. |
-| `[[pr]]` | An open PR for a merged changeset (`repo`, `ref`). `pr`: `owner/repo#N`. `title`: the title of the PR. `draft`: `true` if the PR is a draft. `head`: the head of the PR at the last check. `adapted_from`: the PR commit that a cherry-picked changeset comes from. |
-| `[[includes]]` | An other open PR that a changeset contains. The fields are the same as in `[[pr]]`. |
-| `[[kind_override]]` | A changeset that has a different kind from its branch prefix. `kind`: `"stub"`. `note` and `url`: the text and link to show. |
-| `[kosmos_side]` | The kosmos changes of a step. The key is the step number. |
-| `[[requires]]` | A requirement between repositories: `repo` and `ref` need `needs_repo` and `needs_ref`. If `needs_ref` is `"@base"`, the requirement is the base of `needs_repo`. `how`: `"build"` or `"runtime"`. `why`: the evidence. |
+| `[kosmos]` | `base`: the commit before the first step. `branch`: the lockstep branch. `path` (optional): the kosmos clone; by default, the clone that contains the scripts. |
+| `[[repo]]` | One per repository, in column order. `name`, `path` (local clone), `fork` (GitHub slug), `base` (upstream commit), `base_label` and `base_url` (how to show the base), `branch` (integration branch). |
+| `[[step]]` | One per step, in order. `title`. `base` (optional): repositories the step vendors at their base. `kosmos_side` (optional): the step's kosmos changes. `kosmos_files` (optional): a directory of kosmos files the step adds. |
+| `[[step.merge]]` | One per merge of the step. `repo`, `ref`, `desc` (as in the merge message). Optional: `pr` (`owner/repo#N`), `pr_title`, `pr_draft`. |
+| `[[includes]]` | Another open PR that a changeset contains: `repo`, `ref`, `pr`, `title`, `draft`. |
+| `[[kind_override]]` | `repo`, `ref`, `kind = "stub"`, `note` and `url` to show. |
+| `[[requires]]` | `repo` and `ref` need `needs_repo` and `needs_ref` (`"@base"`: that repository's base). `how`: `"build"` or `"runtime"`. `why`: the evidence. |
 
-A merged changeset has the reference that its merge message shows: `Merge <ref> (<description>)`.
-
-The branch prefix gives the kind of a changeset:
-
-- `kosmos-compat/`: kosmos-compat.
-- `kosmos-local/`: test-only.
-- All other prefixes: upstream-bound.
-
-The script stops with an error in these conditions:
-
-- A requirement refers to a changeset that does not exist.
-- A requirement refers to a changeset that is in a later step than its dependent.
+The lock has, for each merge: `commit` (the merge), `source` (the merged commit), `pr_head` (the PR head at the last
+check) and `adapted_from` (the PR commit a cherry-picked topic comes from).

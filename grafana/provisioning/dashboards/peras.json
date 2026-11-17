@@ -4,20 +4,20 @@
   "metadata": {
     "name": "calqvf6",
     "namespace": "default",
-    "uid": "1d4d76c4-a741-4925-b410-56a88336de40",
-    "resourceVersion": "1794925956904989",
+    "uid": "a4733e6f-2146-413e-8021-ae54a1a1523d",
+    "resourceVersion": "1794953621429005",
     "generation": 1,
-    "creationTimestamp": "2026-11-17T14:32:36Z",
+    "creationTimestamp": "2026-11-17T22:13:41Z",
     "labels": {
-      "grafana.app/deprecatedInternalID": "1504006714777600"
+      "grafana.app/deprecatedInternalID": "1620040126312448"
     },
     "annotations": {
       "grafana.app/createdBy": "access-policy:service",
       "grafana.app/managedBy": "classic-file-provisioning",
       "grafana.app/managerId": "Cardano Dashboard",
-      "grafana.app/sourceChecksum": "fd54bf06e8c14a1915af3358aed929f6",
+      "grafana.app/sourceChecksum": "41a517df4c98de28e1a85a8b83769bd0",
       "grafana.app/sourcePath": "/home/qnikst/workspace/cardano-kosmos/grafana/provisioning/dashboards/peras.json",
-      "grafana.app/sourceTimestamp": "1794923021000",
+      "grafana.app/sourceTimestamp": "1794953529000",
       "grafana.app/updatedBy": "access-policy:service",
       "grafana.app/folder": ""
     }
@@ -686,7 +686,7 @@
                       "kind": "DataQuery",
                       "spec": {
                         "editorMode": "code",
-                        "expr": "increased(cardano_node_metrics_perasCertAddedToDB_counter)",
+                        "expr": "increase(cardano_node_metrics_perasCertAddedToDB_counter)",
                         "legendFormat": "{{node}}",
                         "range": true
                       },
@@ -914,7 +914,7 @@
                       "kind": "DataQuery",
                       "spec": {
                         "editorMode": "code",
-                        "expr": "increase(cardano_node_metrics_perasNotVotedForBlock_counter[30s])>0",
+                        "expr": "increase(cardano_node_metrics_perasNotVotedForBlock_counter[24s])>0",
                         "interval": "60",
                         "legendFormat": "{{node}}",
                         "range": true
@@ -940,18 +940,20 @@
               "fieldConfig": {
                 "defaults": {
                   "color": {
-                    "mode": "palette-classic"
+                    "fixedColor": "dark-red",
+                    "mode": "shades",
+                    "seriesBy": "max"
                   },
                   "custom": {
                     "axisBorderShow": false,
                     "axisCenteredZero": false,
                     "axisColorMode": "text",
                     "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "barWidthFactor": 0.6,
-                    "drawStyle": "line",
-                    "fillOpacity": 0,
+                    "axisPlacement": "right",
+                    "barAlignment": 1,
+                    "barWidthFactor": 0.9,
+                    "drawStyle": "bars",
+                    "fillOpacity": 68,
                     "gradientMode": "none",
                     "hideFrom": {
                       "legend": false,
@@ -959,18 +961,21 @@
                       "viz": false
                     },
                     "insertNulls": false,
-                    "lineInterpolation": "stepAfter",
+                    "lineInterpolation": "linear",
+                    "lineStyle": {
+                      "fill": "solid"
+                    },
                     "lineWidth": 1,
-                    "pointSize": 5,
+                    "pointSize": 1,
                     "scaleDistribution": {
                       "type": "linear"
                     },
-                    "showPoints": "auto",
+                    "showPoints": "always",
                     "showValues": false,
                     "spanNulls": false,
                     "stacking": {
                       "group": "A",
-                      "mode": "none"
+                      "mode": "normal"
                     },
                     "thresholdsStyle": {
                       "mode": "off"
@@ -1029,7 +1034,7 @@
                       "kind": "DataQuery",
                       "spec": {
                         "editorMode": "code",
-                        "expr": "increase(cardano_node_metrics_perasVotedForBlock_counter[30s])>0",
+                        "expr": "increase(cardano_node_metrics_perasCertAddedToDB_counter[17s])",
                         "legendFormat": "{{node}}",
                         "range": true
                       },
@@ -1054,7 +1059,8 @@
               "fieldConfig": {
                 "defaults": {
                   "color": {
-                    "mode": "palette-classic"
+                    "mode": "palette-classic",
+                    "seriesBy": "max"
                   },
                   "custom": {
                     "axisBorderShow": false,
@@ -1063,9 +1069,9 @@
                     "axisLabel": "",
                     "axisPlacement": "auto",
                     "barAlignment": 0,
-                    "barWidthFactor": 0.6,
-                    "drawStyle": "line",
-                    "fillOpacity": 0,
+                    "barWidthFactor": 0.9,
+                    "drawStyle": "bars",
+                    "fillOpacity": 68,
                     "gradientMode": "none",
                     "hideFrom": {
                       "legend": false,
@@ -1074,17 +1080,20 @@
                     },
                     "insertNulls": false,
                     "lineInterpolation": "linear",
+                    "lineStyle": {
+                      "fill": "solid"
+                    },
                     "lineWidth": 1,
-                    "pointSize": 5,
+                    "pointSize": 1,
                     "scaleDistribution": {
                       "type": "linear"
                     },
-                    "showPoints": "auto",
+                    "showPoints": "always",
                     "showValues": false,
                     "spanNulls": false,
                     "stacking": {
                       "group": "A",
-                      "mode": "none"
+                      "mode": "normal"
                     },
                     "thresholdsStyle": {
                       "mode": "off"
@@ -1133,6 +1142,41 @@
             "kind": "RowsLayoutRow",
             "spec": {
               "collapse": false,
+              "layout": {
+                "kind": "AutoGridLayout",
+                "spec": {
+                  "columnWidthMode": "standard",
+                  "items": [
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-9"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "AutoGridLayoutItem",
+                      "spec": {
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-8"
+                        }
+                      }
+                    }
+                  ],
+                  "maxColumnCount": 3,
+                  "rowHeightMode": "standard"
+                }
+              },
+              "title": "Voting"
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "collapse": true,
               "layout": {
                 "kind": "GridLayout",
                 "spec": {
@@ -1211,42 +1255,7 @@
           {
             "kind": "RowsLayoutRow",
             "spec": {
-              "collapse": false,
-              "layout": {
-                "kind": "AutoGridLayout",
-                "spec": {
-                  "columnWidthMode": "standard",
-                  "items": [
-                    {
-                      "kind": "AutoGridLayoutItem",
-                      "spec": {
-                        "element": {
-                          "kind": "ElementReference",
-                          "name": "panel-8"
-                        }
-                      }
-                    },
-                    {
-                      "kind": "AutoGridLayoutItem",
-                      "spec": {
-                        "element": {
-                          "kind": "ElementReference",
-                          "name": "panel-9"
-                        }
-                      }
-                    }
-                  ],
-                  "maxColumnCount": 3,
-                  "rowHeightMode": "standard"
-                }
-              },
-              "title": "Voting"
-            }
-          },
-          {
-            "kind": "RowsLayoutRow",
-            "spec": {
-              "collapse": false,
+              "collapse": true,
               "layout": {
                 "kind": "AutoGridLayout",
                 "spec": {

@@ -115,6 +115,7 @@ import Ouroboros.Network.BlockFetch.Decision
 import Ouroboros.Network.BlockFetch.Decision.Trace (TraceDecisionEvent (..))
 import Ouroboros.Network.OrphanInstances ()
 import Ouroboros.Network.SizeInBytes (SizeInBytes (..))
+import qualified Ouroboros.Consensus.Storage.ChainDB.API as Peras
 
 enclosingValue :: ToJSON a => Enclosing' a -> Value
 enclosingValue RisingEdge = object ["edge" .= String "Starting"]
@@ -3068,7 +3069,14 @@ instance
       Peras.Vote{} -> [CounterM "perasVotedForBlock" (Just 1)]
       Peras.NoVote{} -> [CounterM "perasNotVotedForBlock" (Just 1)]
   asMetrics (TracePerasVotingForgedVote _ _) =
-    [ CounterM "perasForgedVote" (Just 1)]
+    [ CounterM "perasForgedVote" (Just 1) ]
+  asMetrics (TracePerasVotingAddCertChainSelOutcome _ outcome) =
+    case outcome of
+      Peras.PerasCertProcessed result ->
+        case result of
+          Peras.AddedPerasCertToDB -> [ CounterM "perasCertAddedToDB" (Just 1) ]
+          _ -> []
+      _ -> []
   asMetrics _ = []
 
 instance MetaTrace (TracePerasVoteForgingEvent blk) where

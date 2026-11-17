@@ -46,11 +46,22 @@ def by_changeset(entries):
     return d
 
 
-PRS = by_changeset(CONFIG.get("pr", []))
+# The PR heads at the last check, and the PR commits that adapted changesets come from, are in the lock.
+try:
+    with open(re.sub(r"\.toml$", "", config_path) + ".lock.toml", "rb") as f:
+        LOCK_MERGES = {(m["repo"], m["ref"]): m for m in tomllib.load(f).get("merge", [])}
+except FileNotFoundError:
+    LOCK_MERGES = {}
+STEPS = CONFIG.get("step", [])
+PRS = by_changeset([{"repo": m["repo"], "ref": m["ref"], "pr": m["pr"], "title": m["pr_title"],
+                     "draft": m.get("pr_draft", False),
+                     "head": LOCK_MERGES.get((m["repo"], m["ref"]), {}).get("pr_head"),
+                     "adapted_from": LOCK_MERGES.get((m["repo"], m["ref"]), {}).get("adapted_from")}
+                    for s in STEPS for m in s.get("merge", []) if "pr" in m])
 INCLUDES = by_changeset(CONFIG.get("includes", []))
 KIND_OVERRIDE = {(x["repo"], x["ref"]): {"kind": x["kind"], "note": x["note"], "url": x["url"]}
                  for x in CONFIG.get("kind_override", [])}
-KOSMOS_SIDE = {int(k): v for k, v in CONFIG.get("kosmos_side", {}).items()}
+KOSMOS_SIDE = {i: s["kosmos_side"] for i, s in enumerate(STEPS, 1) if "kosmos_side" in s}
 REQUIRES = [((x["repo"], x["ref"]), (x["needs_repo"], x["needs_ref"]), x["how"], x["why"])
             for x in CONFIG.get("requires", [])]
 

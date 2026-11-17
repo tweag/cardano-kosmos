@@ -40,3 +40,6 @@ third-party
 .buckconfig
 *.bzl
 .buckconfig.local
+
+# python
+__pycache__

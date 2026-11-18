@@ -176,7 +176,7 @@
           (map (p: {
             name = p.pname;
             path = p;
-          }) (with freshPkgs.grafanaPlugins; [prometheus loki frser-sqlite-datasource]));
+          }) (with freshPkgs.grafanaPlugins; [prometheus loki frser-sqlite-datasource volkovlabs-echarts-panel]));
         extendedShell = shell.dev.overrideAttrs (attrs: {
           GRAFANA_CORE_PLUGINS = grafanaPlugins;
           nativeBuildInputs = (attrs.nativeBuildInputs or []) ++ [

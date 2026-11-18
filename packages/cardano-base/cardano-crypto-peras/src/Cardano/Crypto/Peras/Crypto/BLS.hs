@@ -11,7 +11,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | BLS-based crypto scheme used in Peras voting committees
-module Ouroboros.Consensus.Peras.Crypto.BLS
+module Cardano.Crypto.Peras.Crypto.BLS
   ( PerasBLSCrypto
   , ElectionId
   , VoteCandidate
@@ -38,21 +38,21 @@ import Cardano.Crypto.DSIGN (BLS12381MinSigDSIGN, DSIGNAlgorithm (..))
 import Cardano.Crypto.Hash (Hash)
 import qualified Cardano.Crypto.Hash as Hash
 import Cardano.Crypto.Peras (PerasBlockRef (..))
-import Cardano.Ledger.BaseTypes (Nonce (..), SlotNo (..))
-import Cardano.Ledger.Binary (runByteBuilder)
-import Cardano.Ledger.Hashes (HASH)
+import Cardano.Crypto.Peras.Committee.Base (Nonce (..), SlotNo (..))
+import Cardano.Crypto.Peras.Committee.Base (runByteBuilder)
+import Cardano.Crypto.Peras.Committee.Base (HASH)
 import qualified Data.ByteString.Builder as BS
 import qualified Data.ByteString.Builder.Extra as BS
 import qualified Data.ByteString.Short as BS
 import GHC.Base (Any)
 import GHC.Generics (Generic)
 import NoThunks.Class (NoThunks)
-import Ouroboros.Consensus.Block.Abstract (WithOrigin (..))
-import Ouroboros.Consensus.Block.SupportsPeras
+import Cardano.Slotting.Slot (WithOrigin (..))
+import Cardano.Crypto.Peras
   ( PerasBoostedBlock (..)
   , PerasRoundNo (..)
   )
-import Ouroboros.Consensus.Committee.Crypto
+import Cardano.Crypto.Peras.Committee.Crypto
   ( CryptoSupportsAggregateVoteSigning (..)
   , CryptoSupportsBatchVRFVerification (..)
   , CryptoSupportsVRF (..)
@@ -63,8 +63,8 @@ import Ouroboros.Consensus.Committee.Crypto
   , VRFPoolContext (..)
   , VoteCandidate
   )
-import Ouroboros.Consensus.Committee.Crypto.BLS (KeyRole (..))
-import qualified Ouroboros.Consensus.Committee.Crypto.BLS as BLS
+import Cardano.Crypto.Peras.Committee.Crypto.BLS (KeyRole (..))
+import qualified Cardano.Crypto.Peras.Committee.Crypto.BLS as BLS
 
 -- | BLS-based crypto scheme used in Peras voting committees
 --
@@ -138,7 +138,7 @@ hashVoteSignature roundNo boostedBlock =
     case unPerasBoostedBlock boostedBlock of
       Origin ->
         mempty
-      NotOrigin point ->
+      At point ->
         blockRefSlotBytes point
           <> blockRefHashBytes point
 
@@ -195,7 +195,7 @@ instance CryptoSupportsVoteSigning PerasBLSCrypto where
   signVote sk roundNo boostedBlock =
     PerasBLSCryptoVoteSignature
       . BLS.signWithRole @SIGN sk
-      $ hashVoteSignature roundNo boostedBlock
+      $ Hash.hashToBytes (hashVoteSignature roundNo boostedBlock)
 
   verifyVoteSignature
     pk
@@ -204,7 +204,7 @@ instance CryptoSupportsVoteSigning PerasBLSCrypto where
     (PerasBLSCryptoVoteSignature sig) =
       BLS.verifyWithRole @SIGN
         pk
-        (hashVoteSignature roundNo boostedBlock)
+        (Hash.hashToBytes (hashVoteSignature roundNo boostedBlock))
         sig
 
 instance CryptoSupportsVRF PerasBLSCrypto where
@@ -240,10 +240,10 @@ instance CryptoSupportsVRF PerasBLSCrypto where
   evalVRF context (PerasBLSCryptoVRFElectionInput input) =
     case context of
       VRFSignContext sk -> do
-        let sig = BLS.signWithRole @VRF (BLS.coercePrivateKey @VRF sk) input
+        let sig = BLS.signWithRole @VRF (BLS.coercePrivateKey @VRF sk) (Hash.hashToBytes input)
         pure $ PerasBLSCryptoVRFOutput sig
       VRFVerifyContext pk (PerasBLSCryptoVRFOutput sig) -> do
-        BLS.verifyWithRole @VRF (BLS.coercePublicKey @VRF pk) input sig
+        BLS.verifyWithRole @VRF (BLS.coercePublicKey @VRF pk) (Hash.hashToBytes input) sig
         pure $ PerasBLSCryptoVRFOutput sig
 
   normalizeVRFOutput (PerasBLSCryptoVRFOutput sig) =
@@ -296,7 +296,7 @@ instance CryptoSupportsAggregateVoteSigning PerasBLSCrypto where
     aggSig = do
       BLS.verifyWithRole @SIGN
         (unPerasBLSCryptoAggregateVoteVerificationKey aggPk)
-        (hashVoteSignature roundNo boostedBlock)
+        (Hash.hashToBytes (hashVoteSignature roundNo boostedBlock))
         (unPerasBLSCryptoAggregateVoteSignature aggSig)
 
 instance CryptoSupportsBatchVRFVerification PerasBLSCrypto where
@@ -318,6 +318,6 @@ instance CryptoSupportsBatchVRFVerification PerasBLSCrypto where
     sigs = do
       BLS.linearizeAndVerifyVRFs
         pks
-        input
+        (Hash.hashToBytes input)
         . fmap unPerasBLSCryptoVRFOutput
         $ sigs

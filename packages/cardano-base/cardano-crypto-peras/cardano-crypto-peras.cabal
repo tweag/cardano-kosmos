@@ -40,15 +40,29 @@ library
   exposed-modules:
     Cardano.Crypto.Peras
     Cardano.Crypto.Peras.Cert
+    Cardano.Crypto.Peras.Committee.Base
+    Cardano.Crypto.Peras.Committee.Class
+    Cardano.Crypto.Peras.Committee.Crypto
+    Cardano.Crypto.Peras.Committee.Crypto.BLS
+    Cardano.Crypto.Peras.Committee.EveryoneVotes
+    Cardano.Crypto.Peras.Committee.LS
+    Cardano.Crypto.Peras.Committee.Orphans
+    Cardano.Crypto.Peras.Committee.Types
+    Cardano.Crypto.Peras.Committee.WFA
+    Cardano.Crypto.Peras.Committee.WFALS
+    Cardano.Crypto.Peras.Crypto.BLS
     Cardano.Crypto.Peras.Vote
 
   build-depends:
+    array,
     bytestring,
     cardano-binary >=1.9.1,
     cardano-crypto-class >=2.6,
     cardano-slotting,
     cardano-strict-containers >=0.1.7,
+    containers,
     deepseq,
+    nonempty-containers,
     nothunks,
     quiet,
     serialise,

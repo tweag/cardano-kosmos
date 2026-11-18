@@ -7,7 +7,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 -- | Deterministic portion of the Weighted Fait-Accompli committee selection scheme
-module Ouroboros.Consensus.Committee.WFA
+module Cardano.Crypto.Peras.Committee.WFA
   ( -- * Weighted Fait-Accompli committee selection scheme
     PersistentCommitteeSize (..)
   , NonPersistentCommitteeSize (..)
@@ -42,9 +42,9 @@ import Cardano.Binary
   )
 import Cardano.Crypto.DSIGN (BLS12381MinSigDSIGN, DSIGNAlgorithm (SigDSIGN))
 import qualified Cardano.Crypto.Hash as Hash
-import Cardano.Ledger.BaseTypes (Nonce (NeutralNonce, Nonce))
-import Cardano.Ledger.Binary (runByteBuilder)
-import Cardano.Ledger.Core (HASH, Hash, KeyHash (unKeyHash))
+import Cardano.Crypto.Peras.Committee.Base (Nonce (NeutralNonce, Nonce))
+import Cardano.Crypto.Peras.Committee.Base (runByteBuilder)
+import Cardano.Crypto.Peras.Committee.Base (HASH, Hash, KeyHash (unKeyHash))
 import Control.Exception (Exception, assert)
 import Data.Array (Array, Ix, listArray)
 import qualified Data.Array as Array
@@ -56,14 +56,14 @@ import qualified Data.Map.Strict as Map
 import Data.Word (Word64, Word8)
 import GHC.Generics (Generic)
 import NoThunks.Class (NoThunks)
-import Ouroboros.Consensus.Committee.Types
+import Cardano.Crypto.Peras.Committee.Types
   ( Cumulative (..)
   , LedgerStake (..)
   , PoolId
   , TargetCommitteeSize (..)
   , unPoolId
   )
-import Ouroboros.Consensus.Util.Orphans ()
+import Cardano.Crypto.Peras.Committee.Orphans ()
 
 -- * Weighted Fait-Accompli committee selection scheme
 

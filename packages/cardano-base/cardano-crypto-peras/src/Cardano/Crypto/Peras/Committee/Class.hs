@@ -5,7 +5,7 @@
 {-# LANGUAGE TypeFamilies #-}
 
 -- | Generic interface used by implementations of voting committees.
-module Ouroboros.Consensus.Committee.Class
+module Cardano.Crypto.Peras.Committee.Class
   ( -- * Voting committee interface
     VotingCommittee
   , CryptoSupportsVotingCommittee (..)
@@ -28,13 +28,13 @@ import Data.Kind (Type)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Proxy (Proxy (..))
-import Ouroboros.Consensus.Committee.Crypto
+import Cardano.Crypto.Peras.Committee.Crypto
   ( CryptoSupportsVoteSigning
   , ElectionId
   , PrivateKey
   , VoteCandidate
   )
-import Ouroboros.Consensus.Committee.Types (PoolId, VoteWeight)
+import Cardano.Crypto.Peras.Committee.Types (PoolId, VoteWeight)
 
 -- | Structure storing the voting committee context
 --

@@ -8,18 +8,18 @@
 -- Committee Selection paper: (https://eprint.iacr.org/2023/1273.pdf, §2.3).
 -- See also:
 --  https://github.com/input-output-hk/ouroboros-leios/blob/c5658913221a7f58063bc4f82efaec0900e53dab/post-cip/weighted-fait-accompli.pdf
-module Ouroboros.Consensus.Committee.LS
+module Cardano.Crypto.Peras.Committee.LS
   ( -- * Local sortition check
     LocalSortitionNumSeats (..)
   , localSortitionNumSeats
   ) where
 
-import Cardano.Ledger.BaseTypes (FixedPoint, HasZero)
+import Cardano.Crypto.Peras.Committee.Base (FixedPoint, HasZero)
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
-import Ouroboros.Consensus.Committee.Crypto (NormalizedVRFOutput (..))
-import Ouroboros.Consensus.Committee.Types (Cumulative (..), LedgerStake (..))
-import Ouroboros.Consensus.Committee.WFA
+import Cardano.Crypto.Peras.Committee.Crypto (NormalizedVRFOutput (..))
+import Cardano.Crypto.Peras.Committee.Types (Cumulative (..), LedgerStake (..))
+import Cardano.Crypto.Peras.Committee.WFA
   ( NonPersistentCommitteeSize (..)
   , TotalNonPersistentStake (..)
   )

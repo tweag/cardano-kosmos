@@ -6,7 +6,7 @@ node_idx=$1
 DEVENV_PATH="${2:-devnet-env}"
 
 if [ ! $node_idx ]; then
-  echo "Pass an index of the node you want to isolate (starts from 1)"
+  echo "Pass an index of the node you want to restart (starts from 1)"
   echo "E.g.: ./scripts/restart-node.sh 1"
 fi
 

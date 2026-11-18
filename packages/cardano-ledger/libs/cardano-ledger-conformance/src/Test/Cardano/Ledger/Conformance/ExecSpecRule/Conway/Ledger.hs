@@ -28,6 +28,7 @@ import Cardano.Ledger.Conway.Core (
  )
 import Cardano.Ledger.Conway.Governance
 import qualified Cardano.Ledger.Conway.Rules as Conway
+import Cardano.Ledger.MempoolTx (MempoolTx)
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Control.State.Transition.Extended (TRC (..))
@@ -92,7 +93,7 @@ instance
   ( EraPParams era
   , EraCertState era
   , EncCBOR (TxOut era)
-  , EncCBOR (Tx TopTx era)
+  , EncCBOR (MempoolTx era)
   ) =>
   EncCBOR (ConwayLedgerExecContext era)
   where
@@ -116,20 +117,24 @@ instance ExecSpecRule "LEDGER" ConwayEra where
     let externalFunctions' = externalFunctions {Agda.extValidPlutusScript = Agda.isValid (strcSignal trc)}
      in runFromAgdaFunction (Agda.ledgerStep externalFunctions') trc
 
-  extraInfo globals ConwayLedgerExecContext {..} (TRC (Shelley.LedgerEnv {..}, LedgerState {..}, sig)) _ =
-    extraInfo @"UTXOW" @ConwayEra
-      globals
-      clecUtxoExecContext
-      (TRC (utxoEnv, lsUTxOState, sig))
-      stFinal
-    where
-      utxoEnv = Shelley.UtxoEnv ledgerSlotNo ledgerPp lsCertState
-      stFinal =
-        first (T.pack . show) $
-          runSTS @"UTXOW" @ConwayEra globals utxoEnv lsUTxOState sig
+  extraInfo
+    globals
+    ConwayLedgerExecContext {..}
+    (TRC (Shelley.LedgerEnv {..}, LedgerStateWithLimits LedgerState {..} _, sig))
+    _ =
+      extraInfo @"UTXOW" @ConwayEra
+        globals
+        clecUtxoExecContext
+        (TRC (utxoEnv, lsUTxOState, sig))
+        stFinal
+      where
+        utxoEnv = Shelley.UtxoEnv ledgerSlotNo ledgerPp lsCertState
+        stFinal =
+          first (T.pack . show) $
+            runSTS @"UTXOW" @ConwayEra globals utxoEnv lsUTxOState sig
 
 instance ExecSpecTopLevelRule "LEDGER" ConwayEra where
-  mkRuleExecContext _ (TRC (env, state, signal)) =
+  mkRuleExecContext _ (TRC (env, LedgerStateWithLimits state _, signal)) =
     ConwayLedgerExecContext
       { clecGuardrailsScriptHash =
           state ^. lsUTxOStateL . utxosGovStateL . constitutionGovStateL . constitutionGuardrailsScriptHashL

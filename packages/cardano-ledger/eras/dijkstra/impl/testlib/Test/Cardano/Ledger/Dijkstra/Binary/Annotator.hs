@@ -23,7 +23,7 @@ import Cardano.Ledger.Block (Block (..))
 import Cardano.Ledger.Coin (decodePositiveCoin)
 import Cardano.Ledger.Conway.Governance (VotingProcedures (..))
 import Cardano.Ledger.Dijkstra (DijkstraEra)
-import Cardano.Ledger.Dijkstra.Block.Endorser (EbReferences (MkEbReferences))
+import Cardano.Ledger.Dijkstra.Block.Endorser (DijkstraEbReferences (MkDijkstraEbReferences))
 import Cardano.Ledger.Dijkstra.BlockBody.Internal (
   DijkstraBlockBody (..),
   DijkstraBlockBodyRaw (..),
@@ -38,6 +38,7 @@ import Cardano.Ledger.Dijkstra.Tx (
  )
 import Cardano.Ledger.Dijkstra.TxBody
 import Cardano.Ledger.MemoBytes (decodeMemoized, mkMemoizedEra)
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (..))
 import Control.Monad (when)
 import Data.Coerce (coerce)
 import qualified Data.Map.Strict as Map
@@ -103,6 +104,7 @@ instance Typeable l => DecCBOR (DijkstraTxBodyRaw l DijkstraEra) where
           pure $ collateralInputsDijkstraTxBodyRawL .~ x $ acc
         14 -> Just $ do
           x <- decodeGuards
+          when (OSet.null x) $ fail (emptyFailure "Guards" "non-empty")
           pure $ guardsDijkstraTxBodyRawL .~ x $ acc
         15 -> Just $ do
           x <- decCBOR
@@ -204,7 +206,7 @@ instance Era era => DecCBOR (DijkstraNativeScript era) where
 instance Typeable l => DecCBOR (DijkstraTx l DijkstraEra) where
   decCBOR =
     withSTxBothLevels @l $ \case
-      STopTx -> decodeDijkstraTopTxInMempool
+      STopTx -> decodeDijkstraTopTxInBlock
       SSubTx -> decodeRecordNamed "DijkstraSubTx" (const 3) $ do
         body <- decCBOR
         wits <- decCBOR
@@ -213,6 +215,9 @@ instance Typeable l => DecCBOR (DijkstraTx l DijkstraEra) where
   {-# INLINE decCBOR #-}
 
 deriving newtype instance Typeable l => DecCBOR (Tx l DijkstraEra)
+
+instance DecCBOR (MempoolTx DijkstraEra) where
+  decCBOR = UnsafeMkMempoolTx . MkDijkstraTx <$> decodeDijkstraTopTxInMempool
 
 decodeDijkstraTopTxInMempool :: Decoder s (DijkstraTx TopTx DijkstraEra)
 decodeDijkstraTopTxInMempool =
@@ -255,8 +260,8 @@ instance DecCBOR (DijkstraBlockBodyRaw DijkstraEra) where
 instance DecCBOR (DijkstraBlockBody DijkstraEra) where
   decCBOR = MkDijkstraBlockBody <$> decodeMemoized decCBOR
 
-instance DecCBOR EbReferences where
-  decCBOR = MkEbReferences <$> decodeMemoized decCBOR
+instance Typeable era => DecCBOR (DijkstraEbReferences era) where
+  decCBOR = MkDijkstraEbReferences <$> decodeMemoized decCBOR
 
 instance DecCBOR h => DecCBOR (Block h DijkstraEra) where
   decCBOR =

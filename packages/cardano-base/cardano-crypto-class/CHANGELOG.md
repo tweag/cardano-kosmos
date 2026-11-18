@@ -1,0 +1,212 @@
+# Changelog for `cardano-crypto-class`
+
+## 2.6.0.0
+
+* Replace memory dependency with ram (drop in replacement)
+* Depend on crypton ^>- 1.1
+* Fix the DST used when hashing the public key for BLS12-381 proofs of possession:
+  `createPossessionProofDSIGN` and `verifyPossessionProofDSIGN` now use the
+  `"BLS_POP_"`-prefixed DST prescribed by draft-irtf-cfrg-bls-signature-06
+  (Section 4.2.3) instead of the `"BLS_SIG_"` one used for ordinary signatures.
+  The PoP DST is selected internally per curve variant, so these functions (and
+  `aggregateVerKeysDSIGN`) no longer take a signing context.
+* Select the BLS12-381 *signing* DST internally per curve variant as well:
+  `ContextDSIGN (BLS12381DSIGN curve)` is now `()`, and `signDSIGN` /
+  `verifyDSIGN` use the canonical `"BLS_SIG_"`-prefixed DST of the PoP
+  ciphersuite for the chosen variant. `BLS12381SignContext`, `minSigPoPDST` and
+  `minVerKeyPoPDST` are removed from the public API, and message augmentation
+  is no longer supported (the POP scheme does not use it).
+
+## 2.5.1.0
+
+* Add `VerKeySizeVRF`, `SignKeySizeVRF` and `CertSizeVRF` type-level sizes to `VRFAlgorithm`
+* Change `sizeVerKeyVRF`, `sizeSignKeyVRF` and `sizeCertVRF` from `VRFAlgorithm` methods to standalone functions
+* Add `FixedSizeCodec` as a superclass of `DSIGNAlgorithm`, `KESAlgorithm`, `VRFAlgorithm`, `UnsoundPureKESAlgorithm` and `DSIGNAggregatable`
+* Remove `failSizeCheck`
+* Deprecate the `encode*` and `decode*` functions for DSIGN, KES and VRF keys, signatures and certificates in favor of `encodeFixedSized` and `decodeFixedSized`
+* Deprecate the `rawSerialise*` and `rawDeserialise*` methods for DSIGN, KES and VRF keys, signatures, certificates and proofs of possession in favor of `rawEncodeFixedSized` and `rawDecodeFixedSized`
+* Deprecate `verKeySizeDSIGN`, `signKeySizeDSIGN`, `sigSizeDSIGN`, `verKeySizeKES`, `sigSizeKES`, `sizeVerKeyVRF`, `sizeSignKeyVRF` and `sizeCertVRF` in favor of `fixedSize`
+* Re-export `fixedSize` from `Cardano.Crypto.KES.Class`
+* Add `FixedSizeCodec` instances for `PinnedSizedBytes` and `PackedBytes`
+* Add `psbFromByteStringForM`
+* Add `hashFromByteStringM`
+* Add `psbToByteArray`
+* Add `psbFromByteStringM`
+
+## 2.5.0.0
+
+* Drop mu2 from `PossessionProofDSIGN`
+* Add `Ord` superclass constraint for the `CertVRF` associated type in `VRFAlgorithm`
+* Add `Ord` instance for `CertVRF SimpleVRF`
+* Add `Ord` instance for `CertifiedVRF`
+* Add `NFData` superclass constraints for the `VerKeyVRF`, `SignKeyVRF`,
+  and `CertVRF` associated types in `VRFAlgorithm`.
+* Remove constructors of `BLS12381SignContext` from export; use `minSigPoPDST` or `minVerKeyPoPDST` for the standard PoP ciphersuites.
+
+### `testlib`
+
+* Bump `contra-tracer` to `^>=0.2.1`
+
+## 2.4.0.0
+
+* Add `Show` for `PackedBytes`
+* Add `Storable` instance for `PackedBytes` and `Hash`
+* Lift `TotalPeriodsKES` in `KESAlgorithm` to a type-level associated `Nat` and make `totalPeriodsKES` its default term-level reflection.
+* Add `psbToPackedBytes` to `Cardano.Crypto.PinnedSizedBytes`
+* Add `IncrementalHashAlgorithm` typeclass with `Blake2b_224` and `Blake2b_256` instances
+* Add `withHashContext` and `withHashContextST` for resource management when incremental hashing
+* Add `psbCreateSizedAligned` and `psbCreateSizedResultAligned` to `Cardano.Crypto.PinnedSizedBytes`
+* Deprecate `CRYPTO_BLAKE2B_256_STATE_SIZE`; add `CRYPTO_BLAKE2B_STATE_SIZE` in its place
+* Remove `psbToByteArray`
+* Remove `psbFromByteStringM`
+
+### `testlib`
+
+* Add `Arbitrary` for `PackedBytes`
+* Add `AnyPackedBytes`
+
+## 2.3.3.0
+
+* Add `psbToByteArray`
+* Add `psbFromByteStringM`
+
+## 2.3.2.0
+
+* Add `Storable` instance for `PackedBytes` and `Hash`
+
+## 2.3.1.0
+
+* Added `NFData` instance to `VerKeyKES (MockKES t)`.
+
+## 2.3.0.0
+
+* Add `Arbitrary` instances for `SigDSIGN`, `SignKeyDSIGN`, `SignedDSIGN`, `VerKeyDSIGN`
+* Add `Arbitrary` instances for `CertVRF`, `CertifiedVRF`, `OutputVRF`, `SignKeyVRF`, `VerKeyVRF`
+* Remove `byteArrayToByteString`, `slice`, `splitsAt`
+* Rename types in the `KES` class to use the suffix of `Size` instead of the prefix.
+* Rename types in the `Hash` class to use the suffix of `Size` instead of the prefix.
+* Rename types in the `DSIGN` class to use the suffix of `Size` instead of the prefix.
+* Deprecated type `SizeVerKeyDSIGN` in favor of `VerKeySizeDSIGN`
+* Deprecated function `sizeVerKeyDSIGN` in favor of `verKeySizeDSIGN`
+* Deprecated type `SizeSignKeyDSIGN` in favor of `SignKeySizeDSIGN`
+* Deprecated function `sizeSignKeyDSIGN` in favor of `signKeySizeDSIGN`
+* Deprecated type `SizeSigDSIGN` in favor of `SigSizeDSIGN`
+* Deprecated function `sizeSigDSIGN` in favor of `sigSizeDSIGN`
+* Deprecated type `SizeHash` in favor of `HashSize`
+* Deprecated function `sizeHash` in favor of `hashSize`
+* Deprecated type `SizeVerKeyKES` in favor of `VerKeySizeKES`
+* Deprecated function `sizeVerKeyKES` in favor of `verKeySizeKES`
+* Deprecated type `SizeSignKeyKES` in favor of `SignKeySizeKES`
+* Deprecated function `sizeSignKeyKES` in favor of `signKeySizeKES`
+* Deprecated type `SizeSigKES` in favor of `SigSizeKES`
+* Deprecated function `sizeSigKES` in favor of `sigSizeKES`
+* Expose `Cardano.Crypto.PackedBytes` module with a safe API
+* Remove `Serialise` instance for `PackedBytes` as unused
+* Switch `OutputVRF` to use `ByteArray` instead of `ByteString`. Change field accessor name to `getOutputVRFByteArray`
+* Add `byteArrayToNatural`, `naturalToByteArray` and `byteArrayToInteger`.
+* Expose `bytesToInteger`
+* Add `hashToByteArray`
+* Add `BLS12-381` aggregatable signature schemes
+* Extend `DSIGNAlgorithm v` to also support optional `genKeyDSIGNWithContext`
+* Introduce `DSIGNAggregatable v` class that extends `DSIGNAlgorithm v`
+* Add Cabal components using code moved from `cardano-crypto-tests`:
+  - `lib:testlib`
+  - `lib:benchlib`
+  - `test:tests`
+  - `bench:bench`
+* Add `cbits/blst_util.h` to `c-sources`
+* Add `ToCBOR` and `FromCBOR` instances for `MessageHash`
+* Add `ToCBOR` and `FromCBOR` instances for `PinnedSizedBytes`
+* Add `ToCBOR` and `FromCBOR` instances for `PackedBytes`
+* Add `packByteString`
+* Add `packShortByteString` and `packShortByteStringWithOffset`
+* Deprecate `packBytesMaybe`
+* Refactor BLS12-381 module to use `PinnedSizedBytes`
+* Removal of `NFData` instance of `VerKeyKES (MockKES t)`
+
+### `testlib`
+
+* Add with modules:
+  - `Test.Crypto.AllocLog`
+  - `Test.Crypto.DSIGN`
+  - `Test.Crypto.EllipticCurve`
+  - `Test.Crypto.EqST`
+  - `Test.Crypto.Hash`
+  - `Test.Crypto.Instances`
+  - `Test.Crypto.KES`
+  - `Test.Crypto.Regressions`
+  - `Test.Crypto.RunIO`
+  - `Test.Crypto.Util`
+  - `Test.Crypto.Vector.SerializationUtils`
+
+### `benchlib`
+
+* Add with module:
+  - `Bench.Crypto.BenchData`
+
+## 2.2.3.2
+
+* Fix `FromCBOR` instance for `Hash`
+
+## 2.2.3.1
+
+* Add package bound on pkg-config lib blst in #544
+
+## 2.2.3.0
+
+* Add `blsMSM` to the BLS12_381 interface
+* Drop GHC <= 9.4 support
+
+## 2.2.2.1
+
+*
+
+## 2.2.2.0
+
+* Add `SHA512` and `SHA3_512` algorithms.
+
+## 2.2.1.0
+
+* Add `NoThunks` constraint on `UnsoundPureSignKeyKES` that was missed during KES changes
+
+## 2.2.0.0
+
+* Add required `HashAlgorithm` constraint to `Hash` serialization.
+* Add `MemPack` instance for `Hash` and `PackedBytes`
+* Introduce memory locking and secure forgetting functionality:
+  [#255](https://github.com/input-output-hk/cardano-base/pull/255)
+  [#404](https://github.com/input-output-hk/cardano-base/pull/404)
+* KES started using the new memlocking functionality:
+  [#255](https://github.com/input-output-hk/cardano-base/pull/255)
+  [#404](https://github.com/input-output-hk/cardano-base/pull/404)
+* Introduction of `DSIGNM` that uses the new memlocking functionality:
+  [#404](https://github.com/input-output-hk/cardano-base/pull/404)
+* Included bindings to `blst` library to enable operations over curve BLS12-381
+  [#266](https://github.com/input-output-hk/cardano-base/pull/266)
+* Introduction of `DirectSerialise` / `DirectDeserialise` APIs, providing
+  direct access to mlocked keys in RAM:
+  [#404](https://github.com/input-output-hk/cardano-base/pull/404)
+* Restructuring of libsodium bindings and related APIs:
+  [#404](https://github.com/input-output-hk/cardano-base/pull/404)
+* Re-introduction of non-mlocked KES implementations to support a smoother
+  migration path:
+  [#504](https://github.com/IntersectMBO/cardano-base/pull/504)
+* Exposing constructors of the BLS12-381 internals: [#509](https://github.com/IntersectMBO/cardano-base/pull/509)
+
+## 2.1.0.2
+
+* Deserialization performance improvements
+* GHC-9.6 compatibility
+
+## 2.1.0.1
+
+* Remove `development` flag: #372
+
+## 2.1.0.0
+
+* Fixed the name `encodedSignKeyDESIGNSizeExpr` -> `encodedSignKeyDSIGNSizeExpr`
+* Add `IsString` instance for `Code Q (Hash h a)`, so `$$"deadbeaf"` would work with GHC-9.2
+
+## 2.0.0.1
+
+* Initial release

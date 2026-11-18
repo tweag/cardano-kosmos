@@ -15,6 +15,7 @@ import           Cardano.Api
 import qualified Cardano.Api.Ledger as L
 
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -48,16 +49,16 @@ import qualified Hedgehog.Extras as H
 -- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/PlutusV3 purposes/"'@
 hprop_plutus_purposes_v3 :: Property
 hprop_plutus_purposes_v3 = integrationRetryWorkspace 2 "all-plutus-script-purposes" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
     tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
-    ceo = ConwayEraOnwardsConway
-    sbe = convert ceo
-    era = toCardanoEra sbe
-    anyEra = AnyCardanoEra era
+    era = testEra
+    ceo = convert era
+    sbe = convert era
+    anyEra = AnyCardanoEra $ toCardanoEra sbe
     creationOptions = def { creationEra = AnyShelleyBasedEra sbe }
 
   TestnetRuntime
@@ -198,16 +199,16 @@ hprop_plutus_purposes_v3 = integrationRetryWorkspace 2 "all-plutus-script-purpos
 -- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/PlutusV2 transaction with two script certs/"'@
 hprop_tx_two_script_certs_v2 :: Property
 hprop_tx_two_script_certs_v2 = integrationRetryWorkspace 2 "tx-2-script-certs" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
     tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'
-    ceo = ConwayEraOnwardsConway
-    sbe = convert ceo
-    era = toCardanoEra sbe
-    anyEra = AnyCardanoEra era
+    era = testEra
+    ceo = convert era
+    sbe = convert era
+    anyEra = AnyCardanoEra $ toCardanoEra sbe
     creationOptions = def { creationEra = AnyShelleyBasedEra sbe }
 
   TestnetRuntime

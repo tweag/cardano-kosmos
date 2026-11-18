@@ -5,7 +5,6 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 
 module Ouroboros.Consensus.NodeKernel
   ( -- * Node kernel
@@ -19,28 +18,30 @@ module Ouroboros.Consensus.NodeKernel
   , getPeersFromCurrentLedger
   , getPeersFromCurrentLedgerAfterSlot
   , initNodeKernel
+  , leiosDeadlinePruner
+  , leiosDeadlinePrunerInterval
   , toConsensusMode
   ) where
 
-import Cardano.Base.FeatureFlags (CardanoFeatureFlag (..))
+import Cardano.Base.FeatureFlags (CardanoFeatureFlag)
 import Cardano.Network.ConsensusMode (ConsensusMode (..))
 import Cardano.Network.LedgerStateJudgement (LedgerStateJudgement (..))
 import Cardano.Network.NodeToNode
   ( ConnectionId
   , MiniProtocolParameters (..)
+  , NodeToNodeVersion
+  , mkNodeTxDecisionPolicy
+  , txSubmissionConfigForVersion
   )
 import Cardano.Network.PeerSelection.Bootstrap (UseBootstrapPeers)
 import Cardano.Network.PeerSelection.LocalRootPeers
   ( OutboundConnectionsState (..)
   )
-import Cardano.Slotting.Slot (WithOrigin (..))
 import qualified Control.Concurrent.Class.MonadSTM as LazySTM
 import qualified Control.Concurrent.Class.MonadSTM.Strict as StrictSTM
 import Control.DeepSeq (force)
 import Control.Monad
 import qualified Control.Monad.Class.MonadTimer.SI as SI
-import Control.Monad.Trans.Maybe (hoistMaybe, runMaybeT)
-import Control.Monad.Writer (runWriterT, tell)
 import Control.ResourceRegistry
 import Control.Tracer
 import Data.Bifunctor (second)
@@ -54,17 +55,13 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
-import qualified Data.Set as Set
 import qualified Data.Text as Text
+import Data.Time.Clock (NominalDiffTime)
 import Data.Void (Void)
-import Data.Word (Word64)
 import Ouroboros.Consensus.Block hiding (blockMatchesHeader)
 import Ouroboros.Consensus.BlockchainTime
 import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.Genesis.Governor (gddWatcher)
-import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory)
-import qualified Ouroboros.Consensus.HardFork.History.EraParams as HF
-import Ouroboros.Consensus.HardFork.History.Qry (slotToPerasRoundNo')
 import Ouroboros.Consensus.HeaderValidation
 import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Extended
@@ -74,8 +71,9 @@ import Ouroboros.Consensus.Leios.AnnounceState (AnnounceState, newAnnounceState)
 import Ouroboros.Consensus.Leios.NotifyLog
   ( NotifyLog
   , newNotifyLog
-  , notifyLogPruner
+  , pruneNotifyLog
   )
+import Ouroboros.Consensus.Leios.VoteState (VoteState, newVoteState, pruneVotes)
 import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface as BlockFetchClientInterface
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
@@ -90,6 +88,9 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck
   ( ClockSkew
   , SomeHeaderInFutureCheck
+  )
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( LeiosAnnouncementAgeLimits
   )
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.State
   ( LeiosNotifyPeerState
@@ -106,13 +107,6 @@ import Ouroboros.Consensus.Node.Genesis
 import Ouroboros.Consensus.Node.Run
 import Ouroboros.Consensus.Node.Tracers
 import Ouroboros.Consensus.NodeKernel.Forge (forge)
-import Ouroboros.Consensus.Peras.Cert.Inclusion (PerasCertInclusionRulesDecision (..))
-import Ouroboros.Consensus.Peras.Context
-  ( forgePerasVoteIfEligibleWithHandle
-  , runQueryWithContextHandle
-  )
-import Ouroboros.Consensus.Peras.Voting.Rules (PerasVotingRulesDecision (..))
-import Ouroboros.Consensus.Peras.Weight (weightBoostOfFragment)
 import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Storage.ChainDB.API
   ( ChainDB
@@ -120,7 +114,12 @@ import Ouroboros.Consensus.Storage.ChainDB.API
 import qualified Ouroboros.Consensus.Storage.ChainDB.API as ChainDB
 import Ouroboros.Consensus.Storage.ChainDB.Init (InitChainDB)
 import qualified Ouroboros.Consensus.Storage.ChainDB.Init as InitChainDB
-import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
+import Ouroboros.Consensus.Storage.LeiosDB.API
+  ( LeiosDbHandle
+  , LeiosDbWriter (..)
+  , openWriter
+  , storeForgedEb
+  )
 import Ouroboros.Consensus.Util.AnchoredFragment
   ( preferAnchoredCandidate
   )
@@ -131,6 +130,7 @@ import Ouroboros.Consensus.Util.LeakyBucket
   )
 import Ouroboros.Consensus.Util.Orphans ()
 import Ouroboros.Consensus.Util.STM
+import Ouroboros.Consensus.Util.Time (nominalDelay)
 import qualified Ouroboros.Network.AnchoredFragment as AF
 import Ouroboros.Network.Block (castTip, tipFromHeader)
 import Ouroboros.Network.BlockFetch
@@ -156,7 +156,7 @@ import Ouroboros.Network.TxSubmission.Inbound.V1
   , TxSubmissionMempoolWriter
   )
 import qualified Ouroboros.Network.TxSubmission.Inbound.V1 as Inbound
-import Ouroboros.Network.TxSubmission.Inbound.V2 (TxDecisionPolicy)
+import Ouroboros.Network.TxSubmission.Inbound.V2 (TxDecisionPolicy, TxSubmissionConfig)
 import Ouroboros.Network.TxSubmission.Inbound.V2.Registry
   ( PeerTxRegistry
   , SharedTxStateVar
@@ -189,7 +189,13 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
   -- ^ The node's mempool
   , getTopLevelConfig :: TopLevelConfig blk
   -- ^ The node's top-level static configuration
-  , getFetchClientRegistry :: FetchClientRegistry (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+  , getFetchClientRegistry ::
+      FetchClientRegistry
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
   -- ^ The fetch client registry, used for the block fetch clients.
   , getKeepAliveRegistry :: KeepAliveRegistry (ConnectionId addrNTN) m
   -- ^ The keep alive registry, used for the block fetch clients.
@@ -223,12 +229,17 @@ data NodeKernel m addrNTN addrNTC blk = NodeKernel
   -- ^ Accumulator for tx-submission counters of disconnected peers.
   , getTxDecisionPolicy :: TxDecisionPolicy
   -- ^ Tx-submission decision policy.
+  , getTxSubmissionConfig :: NodeToNodeVersion -> TxSubmissionConfig
+  -- ^ Tx-submission configuration of a connection, for its negotiated version.
   , getLeiosNotifyClientStates ::
       StrictTVar m (Map (ConnectionId addrNTN) (StrictTVar m (LeiosNotifyPeerState blk)))
   -- ^ The state of each LeiosNotify client, by upstream peer, which
   -- 'leiosNotifyPruner' prunes.
   , getLeiosAnnounceState :: AnnounceState m blk
   -- ^ The announcements the node has accepted, from whichever peer.
+  , getLeiosVoteState :: VoteState m blk
+  -- ^ The votes the node has accepted from any peer, which decides which of
+  -- them it relays.
   , getLeiosNotifyLog :: NotifyLog m blk
   -- ^ What the node relays to its downstream peers over LeiosNotify.
   }
@@ -244,6 +255,8 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , chainDB :: ChainDB m blk
   , leiosDB :: LeiosDbHandle m
   -- ^ Whoever opened it closes it, once the node kernel's threads have stopped.
+  , leiosAnnouncementAgeLimits :: LeiosAnnouncementAgeLimits
+  -- ^ How old an announcement the node relays or accepts.
   , initChainDB :: StorageConfig blk -> InitChainDB m blk -> m ()
   , chainSyncFutureCheck :: SomeHeaderInFutureCheck m blk
   , maxClockSkew :: ClockSkew
@@ -268,38 +281,6 @@ data NodeKernelArgs m addrNTN addrNTC blk = NodeKernelArgs
   , getDiffusionPipeliningSupport :: DiffusionPipeliningSupport
   }
 
-advertController ::
-  (IOLike m, StandardHash blk, HasHeader (Header blk)) =>
-  Tracer m TestnetTrace -> ChainDB m blk -> m b
-advertController tracer chainDB = forever $ do
-  certs <- atomically $ ChainDB.getPerasCertIds chainDB
-  votes <- atomically $ ChainDB.getPerasVoteIds chainDB
-  currChain <- atomically $ ChainDB.getCurrentChain chainDB
-  perasWeights0 <- atomically $ ChainDB.getPerasWeightSnapshot chainDB
-  point <- atomically $ ChainDB.getTipPoint chainDB
-  blockNum0 <- atomically $ ChainDB.getTipBlockNo chainDB
-  let chainLen = AF.length $ currChain
-      perasWeights = forgetFingerprint perasWeights0
-      boost = unPerasWeight (weightBoostOfFragment perasWeights currChain)
-      (slotNo, blockHashStr) =
-        case point of
-          GenesisPoint -> (0, "")
-          BlockPoint s h -> (unSlotNo s, show h)
-      blockNum =
-        case blockNum0 of
-          Origin -> 0
-          At bn -> unBlockNo bn
-  traceWith tracer $
-    AdvertLog
-      (Set.size certs)
-      (Set.size votes)
-      chainLen
-      boost
-      slotNo
-      blockHashStr
-      blockNum
-  SI.threadDelay 3
-
 initNodeKernel ::
   forall m addrNTN addrNTC blk.
   ( IOLike m
@@ -315,10 +296,10 @@ initNodeKernel
   args@NodeKernelArgs
     { registry
     , cfg
-    , featureFlags
     , tracers
     , chainDB
     , leiosDB
+    , leiosAnnouncementAgeLimits
     , initChainDB
     , blockFetchConfiguration
     , btime
@@ -330,6 +311,8 @@ initNodeKernel
     , miniProtocolParameters
     , systemTime
     } = do
+    -- The node halts on an invalid tx-submission configuration.
+    txDecisionPolicy <- either throwIO pure $ mkNodeTxDecisionPolicy miniProtocolParameters
 
     -- using a lazy 'TVar', 'BlockForging' does not have a 'NoThunks' instance.
     blockForgingVar :: LazySTM.TMVar m [MkBlockForging m blk] <- LazySTM.newTMVarIO []
@@ -345,24 +328,6 @@ initNodeKernel
           , varChainSyncHandles
           , varGsmState
           } = st
-
-    -- Back the ChainDB's slot clock with the wall-clock slot, to allow ticking
-    -- the PerasEpochContextResolver to the current wall-clock slot.
-    ChainDB.setChainClock chainDB $
-      -- Supposedly the ChainClock is no longer gonna be needed after we
-      -- implement forecasting for the PerasEpochContextResolver, and anchor it
-      -- to the immutable tip instead of the volatile tip.
-      --
-      -- However, in the event that we still need to back the ChainDB's slot
-      -- clock to tick the resolver on mainnet Peras, we should make sure that
-      -- we don't tick when a node is still syncing.
-      --
-      -- So we could replace the line below by:
-      --
-      -- readTVar varGsmState >>= \case
-      --   GSM.CaughtUp -> getCurrentSlot btime
-      --     _ -> pure CurrentSlotUnknown
-      getCurrentSlot btime
 
     varOutboundConnectionsState <- newTVarIO UntrustedState
 
@@ -459,10 +424,6 @@ initNodeKernel
       forkLinkedThread registry "NodeKernel.blockForging" $
         blockForgingController st (LazySTM.takeTMVar blockForgingVar)
 
-    void $
-      forkLinkedThread registry "NodeKernel.objDiffusionAdvert" $
-        advertController (testnetTracer tracers) chainDB
-
     -- Run the block fetch logic in the background. This will call
     -- 'addFetchedBlock' whenever a new block is downloaded.
     void $
@@ -476,36 +437,25 @@ initNodeKernel
           blockFetchConfiguration
 
     leiosNotifyLog <- newNotifyLog
-    leiosAnnounceState <- newAnnounceState leiosNotifyLog
+    leiosAnnounceState <- newAnnounceState leiosAnnouncementAgeLimits leiosNotifyLog
+    leiosVoteState <- newVoteState (leiosVoteStateTracer tracers) leiosAnnounceState leiosNotifyLog
     leiosNotifyClientStates <- newTVarIO Map.empty
     void $
       forkLinkedThread registry "NodeKernel.leiosNotifyPruner" $
-        leiosNotifyPruner chainDB leiosAnnounceState leiosNotifyClientStates
+        leiosNotifyPruner chainDB leiosAnnounceState leiosVoteState leiosNotifyClientStates
     void $
-      forkLinkedThread registry "NodeKernel.notifyLogPruner" $
-        notifyLogPruner systemTime leiosNotifyLog
+      forkLinkedThread registry "NodeKernel.leiosDeadlinePruner" $
+        leiosDeadlinePruner systemTime leiosNotifyLog leiosVoteState
 
     void $
       forkLinkedThread registry "NodeKernel.txCountersThreadV2" $
         txCountersThreadV2
-          (txDecisionPolicy miniProtocolParameters)
+          txDecisionPolicy
           (txCountersTracer tracers)
           (txLogicTracer tracers)
           txCountersVar
           sharedTxStateVar
           peerTxRegistry
-
-    void $
-      whenPerasFlagEnabled featureFlags $ do
-        forkLinkedWatcher registry "NodeKernel.perasVoteForging" $
-          knownSlotWatcher btime $ \currentSlot ->
-            void . whenPerasEnabledInSlot chainDB currentSlot $ \roundInfo ->
-              withEarlyExit_ $
-                perasVoteForgingController
-                  (perasVoteForgingTracer tracers)
-                  chainDB
-                  systemTime
-                  roundInfo
 
     return
       NodeKernel
@@ -529,9 +479,11 @@ initNodeKernel
         , getPeerTxRegistry = peerTxRegistry
         , getSharedTxStateVar = sharedTxStateVar
         , getTxCountersVar = txCountersVar
-        , getTxDecisionPolicy = txDecisionPolicy miniProtocolParameters
+        , getTxDecisionPolicy = txDecisionPolicy
+        , getTxSubmissionConfig = (`txSubmissionConfigForVersion` miniProtocolParameters)
         , getLeiosNotifyClientStates = leiosNotifyClientStates
         , getLeiosAnnounceState = leiosAnnounceState
+        , getLeiosVoteState = leiosVoteState
         , getLeiosNotifyLog = leiosNotifyLog
         }
    where
@@ -571,15 +523,26 @@ data InternalState m addrNTN addrNTC blk = IS
   , registry :: ResourceRegistry m
   , btime :: BlockchainTime m
   , chainDB :: ChainDB m blk
+  , leiosDB :: LeiosDbHandle m
   , blockFetchInterface ::
-      BlockFetchConsensusInterface (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
-  , fetchClientRegistry :: FetchClientRegistry (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+      BlockFetchConsensusInterface
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
+  , fetchClientRegistry ::
+      FetchClientRegistry
+        (ConnectionId addrNTN)
+        (HeaderWithTime blk)
+        blk
+        (BlockFetchClientInterface.MatchedBlock blk)
+        m
   , keepAliveRegistry :: KeepAliveRegistry (ConnectionId addrNTN) m
   , varChainSyncHandles :: ChainSyncClientHandleCollection (ConnectionId addrNTN) m blk
   , varGsmState :: StrictTVar m GSM.GsmState
   , mempool :: Mempool m blk
   , peerSharingRegistry :: PeerSharingRegistry addrNTN m
-  , featureFlags :: Set CardanoFeatureFlag
   }
 
 initInternalState ::
@@ -596,6 +559,7 @@ initInternalState
   NodeKernelArgs
     { tracers
     , chainDB
+    , leiosDB
     , registry
     , cfg
     , blockFetchSize
@@ -606,7 +570,6 @@ initInternalState
     , getUseBootstrapPeers
     , getDiffusionPipeliningSupport
     , genesisArgs
-    , featureFlags
     } = do
     varGsmState <- do
       let GsmNodeKernelArgs{..} = gsmArgs
@@ -638,7 +601,12 @@ initInternalState
             getUseBootstrapPeers
             (GSM.gsmStateToLedgerJudgement <$> readTVar varGsmState)
         blockFetchInterface ::
-          BlockFetchConsensusInterface (ConnectionId addrNTN) (HeaderWithTime blk) blk blk m
+          BlockFetchConsensusInterface
+            (ConnectionId addrNTN)
+            (HeaderWithTime blk)
+            blk
+            (BlockFetchClientInterface.MatchedBlock blk)
+            m
         blockFetchInterface =
           BlockFetchClientInterface.mkBlockFetchConsensusInterface
             (dbfTracer tracers)
@@ -668,9 +636,9 @@ forkBlockForging IS{..} (MkBlockForging blockForgingM) =
   forkLinkedWatcherAllocate
     registry
     label
-    blockForgingMLabel
-    finalize
-    ( \bf -> knownSlotWatcher btime $
+    allocateForging
+    finalizeForging
+    ( \(bf, leiosDbWriter) -> knownSlotWatcher btime $
         \currentSlot ->
           withEarlyExit_ $
             forge
@@ -680,27 +648,48 @@ forkBlockForging IS{..} (MkBlockForging blockForgingM) =
               chainDB
               mempool
               bf
-              includePerasCert
-              (\_ _ -> pure ())
+              (storeForgedEb leiosDbWriter . blockSlot)
               currentSlot
     )
  where
   label :: String
   label = "NodeKernel.blockForging"
 
-  blockForgingMLabel = do
+  allocateForging = do
     bf <- blockForgingM
     labelThisThread $ Text.unpack $ forgeLabel bf
-    pure bf
+    leiosDbWriter <- openWriter leiosDB
+    pure (bf, leiosDbWriter)
 
-  -- Decide if we need to include a Peras certificate in the block we are about
-  -- to forge. This is a no-op unless the Peras feature flag is enabled.
-  includePerasCert =
-    fmap join
-      . whenPerasFlagEnabled featureFlags
-      . perasCertInclusionCheck
-        (perasCertInclusionTracer tracers)
-        chainDB
+  -- 'finalize' erases the KES key, so it runs first: 'closeWriter' waits for
+  -- the LeiosDB write queue.
+  finalizeForging (bf, leiosDbWriter) =
+    finalize bf `finally` closeWriter leiosDbWriter
+
+{-------------------------------------------------------------------------------
+  Leios pruning
+-------------------------------------------------------------------------------}
+
+-- | Prune what the node relays only until a deadline, the notify log and the
+-- votes, every 'leiosDeadlinePrunerInterval'.
+leiosDeadlinePruner ::
+  IOLike m =>
+  SystemTime m ->
+  NotifyLog m blk ->
+  VoteState m blk ->
+  m Void
+leiosDeadlinePruner systemTime notifyLog voteState = forever $ do
+  now <- systemTimeCurrent systemTime
+  -- Votes first, so that 'recordVote' rejects every vote 'appendNotifyLog' would drop.
+  pruneVotes voteState now
+  atomically $ pruneNotifyLog notifyLog now
+  threadDelay (nominalDelay leiosDeadlinePrunerInterval)
+
+-- | How often 'leiosDeadlinePruner' runs, so how long after its deadline the
+-- node may still relay a notification. It must stay far below the grace
+-- period a downstream peer gives before it rejects one.
+leiosDeadlinePrunerInterval :: NominalDiffTime
+leiosDeadlinePrunerInterval = 1
 
 {-------------------------------------------------------------------------------
   TxSubmission integration
@@ -828,186 +817,3 @@ getImmTipSlot ::
 getImmTipSlot kernel =
   getTipSlot
     <$> ChainDB.getImmutableLedger (getChainDB kernel)
-
-{-------------------------------------------------------------------------------
-  Peras
--------------------------------------------------------------------------------}
-
--- | Execute an action only if the Peras feature flag is enabled.
---
--- Returns the action's result wrapped in 'Just' if the Peras feature flag is
--- enabled, otherwise returns 'Nothing'.
-whenPerasFlagEnabled ::
-  IOLike m =>
-  Set CardanoFeatureFlag ->
-  m a ->
-  m (Maybe a)
-whenPerasFlagEnabled featureFlags action =
-  if PerasFlag `Set.member` featureFlags
-    then Just <$> action
-    else pure Nothing
-
--- | Execute an action only if Peras is enabled in a given slot.
---
--- When executed, the action receives the Peras round number corresponding to
--- the given slot, as well as the slot offset within that round.  Returns the
--- action's result wrapped in 'Just' if the action is executed, otherwise
--- returns 'Nothing'.
-whenPerasEnabledInSlot ::
-  ( IOLike m
-  , HasHardForkHistory blk
-  ) =>
-  ChainDB m blk ->
-  SlotNo ->
-  ((PerasRoundNo, Word64) -> m a) ->
-  m (Maybe a)
-whenPerasEnabledInSlot chainDB currentSlot f = do
-  atomically getPerasRoundInfoForSlot >>= traverse f
- where
-  getPerasRoundInfoForSlot =
-    runQueryWithContextHandle
-      (ChainDB.getTimeResolutionContextHandle chainDB)
-      (slotToPerasRoundNo' currentSlot)
-      >>= \case
-        Left err -> throwSTM err
-        -- We don't know whether Peras is enabled at this point. Abort if it isn't.
-        Right NoPerasEnabled -> pure Nothing
-        Right (PerasEnabled roundInfo) -> pure (Just roundInfo)
-
--- | Decide if we need to include a Peras certificate in the block we are
--- forging in the current slot.
-perasCertInclusionCheck ::
-  forall m blk.
-  ( IOLike m
-  , HasHardForkHistory blk
-  ) =>
-  Tracer m (TracePerasCertInclusionEvent blk) ->
-  ChainDB m blk ->
-  SlotNo ->
-  m (Maybe (PerasCert blk))
-perasCertInclusionCheck certInclusionTracer chainDB currentSlot = do
-  (mbPerasCert, traceEvents) <-
-    atomically $ runWriterT $ runMaybeT $ do
-      mbRoundInfo <-
-        lift . lift $
-          runQueryWithContextHandle
-            (ChainDB.getTimeResolutionContextHandle chainDB)
-            (slotToPerasRoundNo' currentSlot)
-      case mbRoundInfo of
-        Left pastHorizon -> do
-          tell [TracePerasCertInclusionPastHorizonException currentSlot (show pastHorizon)]
-          hoistMaybe Nothing
-        Right HF.NoPerasEnabled -> do
-          tell [TracePerasCertInclusionNotEnabledForRound currentSlot]
-          hoistMaybe Nothing
-        Right (HF.PerasEnabled (currentRoundNo, _slotsInRound)) -> do
-          certInclusionDecision <-
-            lift . lift $
-              ChainDB.needCertWithHandle
-                (ChainDB.getPerasCertInclusionViewHandle chainDB)
-                currentRoundNo
-          case certInclusionDecision of
-            Left err -> do
-              tell [TracePerasCertInclusionError currentSlot err]
-              hoistMaybe Nothing
-            Right Nothing -> do
-              tell [TracePerasCertInclusionNoCertToInclude currentSlot]
-              hoistMaybe Nothing
-            Right (Just decision) -> do
-              tell [TracePerasCertInclusionRulesDecision currentSlot currentRoundNo decision]
-              case decision of
-                DoNotIncludeCert _evidence ->
-                  hoistMaybe Nothing
-                IncludeCert _evidence cert ->
-                  pure $ vpcCert (forgetArrivalTime cert)
-
-  traverse_ (traceWith certInclusionTracer) traceEvents
-  pure mbPerasCert
-
--- | Forge a Peras vote if we are eligible to do so in the current round.
-perasVoteForgingController ::
-  forall m blk.
-  ( IOLike m
-  , BlockSupportsPeras blk
-  ) =>
-  Tracer m (TracePerasVoteForgingEvent blk) ->
-  ChainDB m blk ->
-  SystemTime m ->
-  (PerasRoundNo, Word64) ->
-  WithEarlyExit m ()
-perasVoteForgingController
-  perasVoteForgingTracer
-  chainDB
-  systemTime
-  (roundNo, slotInRound) = do
-    -- Get crypto data from environment variables
-    -- TODO: move the code outside of the vote forging controller once
-    -- they are properly obtained from the ledger/context.
-    poolId <- case readPerasPoolIdFromEnv (Proxy @blk) of
-      Left err -> do
-        lift $ traceWith perasVoteForgingTracer $ TracePerasVotingCantReadEnv err
-        exitEarly
-      Right poolId -> pure poolId
-
-    privateKey <- case readPerasPrivateKeyFromEnv (Proxy @blk) of
-      Left err -> do
-        lift $ traceWith perasVoteForgingTracer $ TracePerasVotingCantReadEnv err
-        exitEarly
-      Right privateKey -> pure privateKey
-
-    -- We run all 3 STM computations in a WriterT monad so that we can have proper logging,
-    -- while keeping everything in the same transaction. We also use MaybeT because there is
-    -- a natural abort/continue logic within the transaction. Unfortunately, we can't leverage
-    -- the outer WithEarlyExit monad, because we _always_ want to get the trace.
-    (mbPerasVote, traceEvents) <-
-      lift $ atomically $ runWriterT $ runMaybeT $ do
-        -- Is this the first slot in the round? If not, we don't forge a vote.
-        when (slotInRound /= 0) $ do
-          tell [TracePerasVotingNoVoteAfterFirstSlotInRound roundNo slotInRound]
-          hoistMaybe Nothing
-        -- Do the voting rules state that we should vote? And if so, for which block?
-        votingDecision <-
-          lift . lift $
-            ChainDB.isPerasVotingAllowedWithHandle
-              (ChainDB.getPerasVotingViewHandle chainDB)
-              roundNo
-        case votingDecision of
-          Left err -> do
-            tell [TracePerasVotingViewError roundNo err]
-            hoistMaybe Nothing
-          Right decision -> do
-            tell [TracePerasVotingRulesDecision roundNo decision]
-            case decision of
-              NoVote _evidence -> do
-                hoistMaybe Nothing
-              Vote _evidence candidateBlock -> do
-                -- Forge the vote if eligible in this round.
-                mbVote <-
-                  lift . lift $
-                    forgePerasVoteIfEligibleWithHandle
-                      (ChainDB.getPerasEpochContextResolverHandle chainDB)
-                      poolId
-                      privateKey
-                      roundNo
-                      candidateBlock
-                case mbVote of
-                  Nothing -> do
-                    tell [TracePerasVotingNotAVoterInRound roundNo]
-                    hoistMaybe Nothing
-                  Just vote ->
-                    pure vote
-
-    lift $ traverse_ (traceWith perasVoteForgingTracer) traceEvents
-
-    -- Forge a vote if we are eligible to do so in this round. If not, exit.
-    vote <- maybe exitEarly pure mbPerasVote
-    tickedVote <- lift $ addArrivalTime systemTime vote
-    lift . traceWith perasVoteForgingTracer $ TracePerasVotingForgedVote roundNo tickedVote
-
-    -- Add the vote (and potential certificate) to their DBs.
-    (addVoteResult, mbAddCertChainSelOutcome) <- lift $ ChainDB.addPerasVoteSync chainDB tickedVote
-    lift $ do
-      traceWith perasVoteForgingTracer $ TracePerasVotingAddVoteResult roundNo addVoteResult
-      traverse_
-        (traceWith perasVoteForgingTracer . TracePerasVotingAddCertChainSelOutcome roundNo)
-        mbAddCertChainSelOutcome

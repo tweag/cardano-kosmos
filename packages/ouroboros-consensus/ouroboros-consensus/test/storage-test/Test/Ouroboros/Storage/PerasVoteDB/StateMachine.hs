@@ -272,7 +272,7 @@ instance RunModel Model (StateT (PerasVoteDB IO TestBlock) IO) where
     case action of
       CreateDB context -> do
         let args = PerasVoteDB.PerasVoteDbArgs nullTracer
-            resolverHandle = mockPerasEpochContextResolverHandle context
+        resolverHandle <- lift $ mockPerasEpochContextResolverHandle context
         voteDB <- lift $ PerasVoteDB.createDB args resolverHandle
         put voteDB
       AddVote vote -> do

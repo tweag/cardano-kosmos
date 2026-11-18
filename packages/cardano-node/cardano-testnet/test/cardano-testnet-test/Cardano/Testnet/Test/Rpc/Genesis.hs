@@ -11,13 +11,13 @@ module Cardano.Testnet.Test.Rpc.Genesis
 where
 
 import           Cardano.Api
-import qualified Cardano.Api.Experimental as Exp
 
 import qualified Cardano.Crypto.Hash.Blake2b as Crypto
 import qualified Cardano.Crypto.Hash.Class as Crypto
 import qualified Cardano.Rpc.Client as Rpc
 import qualified Cardano.Rpc.Proto.Api.UtxoRpc.Query as U5c
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -46,9 +46,9 @@ import qualified Hedgehog.Extras as H
 -- @TASTY_PATTERN='/RPC ReadGenesis/' cabal test cardano-testnet-test@
 hprop_rpc_read_genesis :: H.Property
 hprop_rpc_read_genesis = integrationRetryWorkspace 2 "rpc-read-genesis" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
-  let era = Exp.ConwayEra
+  let era = testEra
       sbe = convert era
       creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
       runtimeOptions = def{runtimeEnableRpc = RpcEnabledHttp def}

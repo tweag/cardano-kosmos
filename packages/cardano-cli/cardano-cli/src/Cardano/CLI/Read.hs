@@ -16,6 +16,7 @@ module Cardano.CLI.Read
     -- * Script
   , ScriptDecodeError (..)
   , readAnyScript
+  , readAnyScriptHash
   , deserialiseScriptInAnyLang
   , readFileScriptInAnyLang
   , PlutusScriptDecodeError (..)
@@ -29,6 +30,12 @@ module Cardano.CLI.Read
   , readFileTx
   , readFileTxBody
   , readTx -- For testing purposes
+
+    -- * Sub-transactions
+  , readFileUnsignedSubTx
+  , readFileSignedSubTx
+  , TxOrSubTx (..)
+  , readFileTxOrSubTx
 
     -- * Tx witnesses
   , ReadWitnessSigningDataError (..)
@@ -75,9 +82,6 @@ module Cardano.CLI.Read
   , readSafeHash
   , scriptHashReader
 
-    -- * Update proposals
-  , readTxUpdateProposal
-
     -- * Vote related
   , readVoteDelegationTarget
   , readVerificationKeySource
@@ -117,6 +121,7 @@ import Cardano.CLI.Type.Governance
 import Cardano.CLI.Type.Key
 import Cardano.Crypto.Hash qualified as Crypto
 import Cardano.Ledger.Api qualified as L
+import Cardano.Ledger.Core qualified as C
 
 import RIO (readFileBinary)
 import Prelude
@@ -138,7 +143,7 @@ import Data.Text.Encoding qualified as Text
 import Data.Text.Encoding.Error qualified as Text
 import Data.Validation (Validation (Failure, Success))
 import GHC.IO.Handle (hClose, hIsSeekable)
-import GHC.IO.Handle.FD (openFileBlocking)
+import GHC.IO.Handle.FD (openFileBlocking, stdin)
 import GHC.Stack
 import Options.Applicative qualified as Opt
 import System.IO (IOMode (ReadMode))
@@ -199,6 +204,15 @@ readVerificationKeySource extractHash = \case
   VksKeyHashFile vKeyOrHashOrFile ->
     L.KeyHashObj . extractHash <$> readVerificationKeyOrHashOrTextEnvFile vKeyOrHashOrFile
 
+-- | Reads the script in cardano-api's newest era, so every script language decodes.
+-- Returns only the era-independent script hash.
+readAnyScriptHash :: MonadIO m => ScriptFile -> m ScriptHash
+readAnyScriptHash scriptFile =
+  case maxBound of
+    Exp.Some (era :: Exp.Era era) ->
+      Exp.obtainCommonConstraints era $
+        fromShelleyScriptHash . Exp.hashAnyScript <$> readAnyScript @_ @era (unFile scriptFile)
+
 readAnyScript
   :: forall m era
    . (MonadIO m, Exp.IsEra era)
@@ -215,7 +229,8 @@ readAnyScript anyScriptFp = do
         Left err -> throwCliError err
         Right script ->
           case Exp.useEra @era of
-            Exp.DijkstraEra -> error "TODO Dijkstra: Simple script not supported"
+            Exp.DijkstraEra ->
+              pure . Exp.AnySimpleScript . Exp.SimpleScript $ toDijkstraNativeScript script
             era@Exp.ConwayEra -> Exp.obtainConwayConstraints era $ do
               let s :: L.NativeScript (Exp.LedgerEra era) = toAllegraTimelock script
               return . Exp.AnySimpleScript $ Exp.SimpleScript s
@@ -333,6 +348,35 @@ fromSomeShelleyTx =
  where
   makeTxProxy :: HasTypeProxy era => ShelleyBasedEra era -> AsType (Tx era)
   makeTxProxy _ = AsTx (proxyToAsType (Proxy :: Proxy era))
+
+-- Sub-transactions
+
+-- Sub-transactions only exist in Dijkstra, so the envelope type fixes the era.
+
+readFileUnsignedSubTx :: FileOrPipe -> IO (Either (FileError TextEnvelopeError) Exp.UnsignedSubTx)
+readFileUnsignedSubTx =
+  readFileOrPipeTextEnvelopeAnyOf [FromSomeType Exp.AsUnsignedSubTx id]
+
+readFileSignedSubTx :: FileOrPipe -> IO (Either (FileError TextEnvelopeError) Exp.SignedSubTx)
+readFileSignedSubTx =
+  readFileOrPipeTextEnvelopeAnyOf [FromSomeType Exp.AsSignedSubTx id]
+
+-- | A transaction or a sub-transaction, as read by 'readFileTxOrSubTx'.
+data TxOrSubTx
+  = -- | A top-level transaction, from any Shelley-based era.
+    TopTx (InAnyShelleyBasedEra Tx)
+  | -- | A signed or unsigned sub-transaction. The era is fixed to Dijkstra,
+    -- because only Dijkstra has sub-transactions.
+    SubTx (L.Tx C.SubTx (Exp.LedgerEra Exp.DijkstraEra))
+
+-- | A transaction, or a signed or unsigned sub-transaction.
+readFileTxOrSubTx :: FileOrPipe -> IO (Either (FileError TextEnvelopeError) TxOrSubTx)
+readFileTxOrSubTx =
+  readFileOrPipeTextEnvelopeAnyOf $
+    [FromSomeType asTx (TopTx . f) | FromSomeType asTx f <- fromSomeShelleyTx]
+      <> [ FromSomeType Exp.AsSignedSubTx (\(Exp.SignedSubTx subTx) -> SubTx subTx)
+         , FromSomeType Exp.AsUnsignedSubTx (\(Exp.UnsignedSubTx subTx) -> SubTx subTx)
+         ]
 
 -- Tx witnesses
 
@@ -569,15 +613,6 @@ instance Error VoteError where
     VoteErrorFile e ->
       prettyError e
 
-readTxUpdateProposal
-  :: ()
-  => ShelleyToBabbageEra era
-  -> UpdateProposalFile
-  -> ExceptT (FileError TextEnvelopeError) IO (TxUpdateProposal era)
-readTxUpdateProposal w (UpdateProposalFile upFp) = do
-  TxUpdateProposal w
-    <$> newExceptT (shelleyBasedEraConstraints (convert w) $ readFileTextEnvelope (File upFp))
-
 newtype ConstitutionError
   = ConstitutionNotUnicodeError Text.UnicodeException
   deriving Show
@@ -649,11 +684,17 @@ fileOrPipeCache (FileOrPipe _ c) = readIORef c
 
 -- | Get the contents of a file or pipe. This function reads the entire
 -- contents of the file or pipe, and is blocking.
+-- The path @-@ reads standard input.
 readFileOrPipe :: FileOrPipe -> IO LBS.ByteString
 readFileOrPipe (FileOrPipe fp cacheRef) = do
   cached <- readIORef cacheRef
   case cached of
     Just dat -> pure dat
+    Nothing
+      | fp == "-" -> do
+          dat <- LBS.fromStrict <$> BS.hGetContents stdin
+          writeIORef cacheRef (Just dat)
+          pure dat
     Nothing ->
       bracket
         (openFileBlocking fp ReadMode)

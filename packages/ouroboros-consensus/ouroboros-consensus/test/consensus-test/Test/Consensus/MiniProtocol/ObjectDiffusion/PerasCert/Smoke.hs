@@ -83,7 +83,7 @@ prop_smoke =
                 , m [PerasCert TestBlock]
                 )
             mkPoolInterfaces = do
-              let epochContextResolverHandle = mockPerasEpochContextResolverHandle epochContext
+              epochContextResolverHandle <- mockPerasEpochContextResolverHandle epochContext
 
               outboundPool <- newCertDB watValidatedCerts
               inboundPool <- newCertDB []

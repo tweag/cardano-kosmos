@@ -16,8 +16,6 @@ module Ouroboros.Consensus.Shelley.Ledger.Block
   ( GetHeader (..)
   , Header (..)
   , IsShelleyBlock
-  , ShelleyPerasCertCompatibleWithLedger (..)
-  , LedgerPerasCertError
   , NestedCtxt_ (..)
   , ShelleyBasedEra
   , ShelleyBlock (..)
@@ -42,6 +40,7 @@ module Ouroboros.Consensus.Shelley.Ledger.Block
   ) where
 
 import qualified Cardano.Crypto.Hash as Crypto
+import Cardano.Crypto.Leios (LeiosCert)
 import Cardano.Ledger.Binary
   ( Annotator (..)
   , DecCBOR (..)
@@ -52,18 +51,24 @@ import Cardano.Ledger.Binary
 import qualified Cardano.Ledger.Binary.Plain as Plain
 import qualified Cardano.Ledger.Block as SL (EraBlockHeader)
 import Cardano.Ledger.Core as SL
-  ( EraBlockBody (..)
-  , eraDecoder
+  ( eraDecoder
   , eraProtVerLow
   , toEraCBOR
   )
-import qualified Cardano.Ledger.Core as SL (TranslationContext)
+import qualified Cardano.Ledger.Core as SL
+  ( BlockBody
+  , TranslationContext
+  , hashBlockBody
+  , txSeqBlockBodyL
+  )
+import Cardano.Ledger.Dijkstra.BlockBody (leiosCertBlockBodyL)
 import Cardano.Ledger.Hashes (HASH)
 import qualified Cardano.Ledger.Shelley.API as SL
 import Cardano.Protocol.Crypto (Crypto)
 import qualified Cardano.Protocol.TPraos.BlockHeader as SL
 import qualified Data.ByteString.Lazy as Lazy
 import Data.Coerce (coerce)
+import Data.Maybe.Strict (StrictMaybe (..), isSJust, strictMaybeToMaybe)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import Lens.Micro ((^.))
@@ -143,7 +148,6 @@ class
     StateSupportsPerasEpochContext (ShelleyBlock proto era)
   , BlockSupportsPeras (ShelleyBlock proto era)
   , MaybeEraIndexedEpochToPerasRoundInfo (ShelleyBlock proto era) ~ EpochToPerasRoundInfo
-  , ShelleyPerasCertCompatibleWithLedger proto era
   ) =>
   ShelleyCompatible proto era
 
@@ -232,10 +236,21 @@ instance ShelleyCompatible proto era => GetHeader (ShelleyBlock proto era) where
    where
     ShelleyHeader{shelleyHeaderRaw = shelleyHdr} = hdr
     ShelleyBlock{shelleyBlockRaw = SL.Block _ blockBody} = blk
-    bodyContainsCert = blockBodyContainsLeiosCert blockBody
+    bodyContainsCert = isSJust (bodyLeiosCert blockBody)
     bodyContainsTxs = not (null (blockBody ^. SL.txSeqBlockBodyL))
 
   headerIsEBB = const Nothing
+
+instance ShelleyCompatible proto era => BlockSupportsLeios (ShelleyBlock proto era) where
+  blockLeiosCert ShelleyBlock{shelleyBlockRaw = SL.Block _ blockBody} =
+    strictMaybeToMaybe (bodyLeiosCert blockBody)
+
+-- | The Leios certificate of a block body. Only an era with a 'LeiosEraDict'
+-- has a certificate field.
+bodyLeiosCert :: forall era. ShelleyBasedEra era => SL.BlockBody era -> StrictMaybe LeiosCert
+bodyLeiosCert blockBody = case getLeiosEraDict (Proxy @era) of
+  Just LeiosEraDict -> blockBody ^. leiosCertBlockBodyL
+  Nothing -> SNothing
 
 mkShelleyHeader ::
   ShelleyCompatible proto era =>
@@ -271,32 +286,6 @@ instance ShelleyCompatible proto era => HasAnnTip (ShelleyBlock proto era)
 -- The 'ValidateEnvelope' instance lives in the
 -- "Ouroboros.Consensus.Shelley.Ledger.Ledger" module because of the
 -- dependency on the 'LedgerConfig'.
-
-{-------------------------------------------------------------------------------
-  Conversion between Peras certificates type between Ledger and Consensus
--------------------------------------------------------------------------------}
-
--- | Error type for Ledger <=> Consensus Peras certificate conversions.
---
--- NOTE: this will disappear once we have a proper type for Peras certificates
--- in the Ledger.
-type LedgerPerasCertError = String
-
--- | Bridge between the Peras certificates types between Consensus and Ledger
---
--- NOTE: this will disappear once we have a proper type for Peras certificates
--- in the Ledger.
-class ShelleyPerasCertCompatibleWithLedger proto era where
-  -- | Extract a Peras certificate from a Shelley block body, if present
-  extractPerasCertFromShelleyBlockBody ::
-    BlockBody era ->
-    Either LedgerPerasCertError (Maybe (PerasCert (ShelleyBlock proto era)))
-
-  -- | Inject a Peras certificate into a Shelley block body
-  injectPerasCertIntoShelleyBlockBody ::
-    PerasCert (ShelleyBlock proto era) ->
-    BlockBody era ->
-    BlockBody era
 
 {-------------------------------------------------------------------------------
   Conversions

@@ -19,6 +19,7 @@ module Ouroboros.Consensus.Shelley.Eras
 
     -- * Shelley-based era
   , ConwayEraGovDict (..)
+  , LeiosEraDict (..)
   , ShelleyBasedEra (..)
 
     -- * Convenience functions
@@ -38,7 +39,7 @@ import qualified Cardano.Ledger.Api as L
 import Cardano.Ledger.Babbage (ApplyTxError (BabbageApplyTxError), BabbageEra)
 import qualified Cardano.Ledger.Babbage.Rules as Babbage
 import Cardano.Ledger.BaseTypes
-import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
+import Cardano.Ledger.Binary (Annotator, DecCBOR, EncCBOR)
 import Cardano.Ledger.Conway (ApplyTxError (ConwayApplyTxError), ConwayEra)
 import qualified Cardano.Ledger.Conway.Governance as CG
 import qualified Cardano.Ledger.Conway.Rules as Conway
@@ -47,7 +48,7 @@ import qualified Cardano.Ledger.Conway.Rules as SL
   )
 import qualified Cardano.Ledger.Conway.State as CG
 import Cardano.Ledger.Dijkstra (ApplyTxError (DijkstraApplyTxError), DijkstraEra)
-import Cardano.Ledger.Dijkstra.BlockBody (leiosCertBlockBodyL)
+import Cardano.Ledger.Dijkstra.BlockBody (DijkstraEraBlockBody)
 import qualified Cardano.Ledger.Dijkstra.Rules as Dijkstra
 import qualified Cardano.Ledger.Dijkstra.Rules as SL
   ( DijkstraLedgerPredFailure (..)
@@ -59,7 +60,7 @@ import qualified Cardano.Ledger.Shelley.LedgerState as SL
 import qualified Cardano.Ledger.Shelley.Rules as SL
 import qualified Cardano.Ledger.Shelley.Transition as SL
 import Control.Monad.Except
-import Control.State.Transition (PredicateFailure)
+import Control.State.Transition (PredicateFailure, ValidationPolicy (ValidateAll))
 import Data.Data (Proxy (Proxy))
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
@@ -74,7 +75,6 @@ import Ouroboros.Consensus.Peras.Params
   , PerasRoundLength
   , dijkstraPerasRoundLength
   , pattern NoPerasEnabled
-  , pattern PerasEnabled
   )
 import Ouroboros.Consensus.Protocol.TPraos (StandardCrypto)
 
@@ -119,6 +119,8 @@ class
   , NoThunks (Core.TranslationContext era)
   , ToCBOR (Core.TranslationContext era)
   , FromCBOR (Core.TranslationContext era)
+  , EncCBOR (SL.MempoolTx era)
+  , DecCBOR (Annotator (SL.MempoolTx era))
   ) =>
   ShelleyBasedEra era
   where
@@ -127,7 +129,7 @@ class
     SL.LedgerEnv era ->
     SL.LedgerState era ->
     WhetherToIntervene ->
-    Core.Tx TopTx era ->
+    SL.MempoolTx era ->
     Except
       (SL.ApplyTxError era)
       ( SL.LedgerState era
@@ -136,6 +138,9 @@ class
 
   -- | Whether the era has an instance of 'CG.ConwayEraGov'
   getConwayEraGovDict :: proxy era -> Maybe (ConwayEraGovDict era)
+
+  -- | The 'LeiosEraDict' of the era, if the era supports Leios.
+  getLeiosEraDict :: proxy era -> Maybe (LeiosEraDict era)
 
   mkEraMkMempoolApplyTxError ::
     proxy era -> Maybe (Text -> SL.ApplyTxError era)
@@ -146,14 +151,13 @@ class
   getShelleyEraPerasRoundLength :: proxy era -> PerasEnabled PerasRoundLength
   getShelleyEraPerasRoundLength _ = NoPerasEnabled
 
-  -- | Whether this block body carries a Leios certificate.
-  --
-  -- Eras that don't support Leios define this as
-  -- 'defaultBlockBodyContainsLeiosCert'.
-  blockBodyContainsLeiosCert :: Core.BlockBody era -> Bool
-
 data ConwayEraGovDict era where
   ConwayEraGovDict :: (CG.ConwayEraGov era, CG.ConwayEraCertState era) => ConwayEraGovDict era
+
+-- | What the Leios protocol needs to know about an era. Only an era that
+-- supports Leios has one.
+data LeiosEraDict era where
+  LeiosEraDict :: (SafeToHash (Core.Tx TopTx era), DijkstraEraBlockBody era) => LeiosEraDict era
 
 isBeforeConway :: forall era. L.Era era => Proxy era -> Bool
 isBeforeConway _ =
@@ -167,7 +171,7 @@ defaultApplyShelleyBasedTx ::
   SL.LedgerEnv era ->
   SL.LedgerState era ->
   WhetherToIntervene ->
-  Core.Tx TopTx era ->
+  SL.MempoolTx era ->
   Except
     (SL.ApplyTxError era)
     ( SL.LedgerState era
@@ -184,77 +188,77 @@ defaultApplyShelleyBasedTx globals ledgerEnv mempoolState _wti tx =
 defaultGetConwayEraGovDict :: proxy era -> Maybe (ConwayEraGovDict era)
 defaultGetConwayEraGovDict _ = Nothing
 
-defaultBlockBodyContainsLeiosCert :: Core.BlockBody era -> Bool
-defaultBlockBodyContainsLeiosCert _ = False
+defaultGetLeiosEraDict :: proxy era -> Maybe (LeiosEraDict era)
+defaultGetLeiosEraDict _ = Nothing
 
 instance ShelleyBasedEra ShelleyEra where
   applyShelleyBasedTx = defaultApplyShelleyBasedTx
 
   getConwayEraGovDict = defaultGetConwayEraGovDict
 
-  mkEraMkMempoolApplyTxError _prx = Nothing
+  getLeiosEraDict = defaultGetLeiosEraDict
 
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
+  mkEraMkMempoolApplyTxError _prx = Nothing
 
 instance ShelleyBasedEra AllegraEra where
   applyShelleyBasedTx = defaultApplyShelleyBasedTx
 
   getConwayEraGovDict = defaultGetConwayEraGovDict
 
-  mkEraMkMempoolApplyTxError _prx = Nothing
+  getLeiosEraDict = defaultGetLeiosEraDict
 
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
+  mkEraMkMempoolApplyTxError _prx = Nothing
 
 instance ShelleyBasedEra MaryEra where
   applyShelleyBasedTx = defaultApplyShelleyBasedTx
 
   getConwayEraGovDict = defaultGetConwayEraGovDict
 
-  mkEraMkMempoolApplyTxError _prx = Nothing
+  getLeiosEraDict = defaultGetLeiosEraDict
 
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
+  mkEraMkMempoolApplyTxError _prx = Nothing
 
 instance ShelleyBasedEra AlonzoEra where
   applyShelleyBasedTx = applyAlonzoBasedTx
 
   getConwayEraGovDict = defaultGetConwayEraGovDict
 
-  mkEraMkMempoolApplyTxError _prx = Nothing
+  getLeiosEraDict = defaultGetLeiosEraDict
 
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
+  mkEraMkMempoolApplyTxError _prx = Nothing
 
 instance ShelleyBasedEra BabbageEra where
   applyShelleyBasedTx = applyAlonzoBasedTx
 
   getConwayEraGovDict = defaultGetConwayEraGovDict
 
-  mkEraMkMempoolApplyTxError _prx = Nothing
+  getLeiosEraDict = defaultGetLeiosEraDict
 
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
+  mkEraMkMempoolApplyTxError _prx = Nothing
 
 instance ShelleyBasedEra ConwayEra where
   applyShelleyBasedTx = applyAlonzoBasedTx
 
   getConwayEraGovDict _ = Just ConwayEraGovDict
 
+  getLeiosEraDict = defaultGetLeiosEraDict
+
   mkEraMkMempoolApplyTxError _prx =
     Just $ \txt -> ConwayApplyTxError (NE.singleton (Conway.ConwayMempoolFailure txt))
-
-  blockBodyContainsLeiosCert = defaultBlockBodyContainsLeiosCert
 
 instance ShelleyBasedEra DijkstraEra where
   applyShelleyBasedTx = applyAlonzoBasedTx
 
   getConwayEraGovDict _ = Just ConwayEraGovDict
 
+  getLeiosEraDict _ = Just LeiosEraDict
+
   -- TODO we'll need to change the mini protocol (backwards-incompatibly?) to
   -- use MempoolFailure type family instead of just PredicateFailure type
   -- family
   mkEraMkMempoolApplyTxError _prx = Nothing
 
-  getShelleyEraPerasRoundLength _ = PerasEnabled dijkstraPerasRoundLength
-
-  blockBodyContainsLeiosCert bb = isSJust (bb ^. leiosCertBlockBodyL)
+  getShelleyEraPerasRoundLength _ = dijkstraPerasRoundLength
 
 applyAlonzoBasedTx ::
   forall era.
@@ -266,7 +270,7 @@ applyAlonzoBasedTx ::
   SL.LedgerEnv era ->
   SL.LedgerState era ->
   WhetherToIntervene ->
-  Core.Tx TopTx era ->
+  SL.MempoolTx era ->
   Except
     (SL.ApplyTxError era)
     ( SL.LedgerState era
@@ -274,18 +278,21 @@ applyAlonzoBasedTx ::
     )
 applyAlonzoBasedTx globals ledgerEnv mempoolState wti tx = do
   (mempoolState', vtx) <-
-    (`catchError` handler) $
-      defaultApplyShelleyBasedTx
-        globals
-        ledgerEnv
-        mempoolState
-        wti
-        intervenedTx
+    applyWithFullValidation intervenedTx
+      `catchError` handler
   pure (mempoolState', vtx)
  where
+  -- A corrected flag makes it a transaction the mempool cannot receive, so
+  -- it is applied as a plain transaction rather than a 'MempoolTx'.
+  applyWithFullValidation =
+    liftEither . SL.internalApplyTxWithValidation ValidateAll globals ledgerEnv mempoolState
+
   intervenedTx = case wti of
-    DoNotIntervene -> tx & Core.isPhase2ValidTxL .~ L.Phase2Valid
-    Intervene -> tx
+    DoNotIntervene -> withPhase2Validity L.Phase2Valid
+    Intervene -> SL.unwrapMempoolTx tx
+
+  withPhase2Validity validity =
+    SL.unwrapMempoolTx tx & Core.isPhase2ValidTxL .~ validity
 
   handler e = case (wti, e) of
     (DoNotIntervene, err)
@@ -299,12 +306,7 @@ applyAlonzoBasedTx globals ledgerEnv mempoolState wti tx = do
           -- TODO 'applyTx' et al needs to include a return value indicating
           -- whether we took this branch; it's a reason to disconnect from
           -- the peer who sent us the incorrect flag (ie Issue #3276)
-          defaultApplyShelleyBasedTx
-            globals
-            ledgerEnv
-            mempoolState
-            wti
-            (tx & Core.isPhase2ValidTxL .~ L.Phase2Invalid)
+          applyWithFullValidation (withPhase2Validity L.Phase2Invalid)
     _ -> throwError e
 
 -- reject the transaction, protecting the local wallet

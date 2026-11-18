@@ -362,7 +362,7 @@ instance ToJSON TPraosState where
       , "chainDepState" .= Consensus.tpraosStateChainDepState s
       ]
 
-instance ToJSON (PolyPraosState pext) where
+instance ToJSON (PolyPraosState proto) where
   toJSON s =
     Aeson.object
       [ "lastSlot" .= Consensus.praosStateLastSlot s

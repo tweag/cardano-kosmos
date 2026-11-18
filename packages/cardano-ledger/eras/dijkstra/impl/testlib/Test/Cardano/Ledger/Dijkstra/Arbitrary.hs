@@ -44,6 +44,7 @@ import Cardano.Ledger.Dijkstra.TxBody (TxBody (..))
 import Cardano.Ledger.Dijkstra.TxCert
 import Cardano.Ledger.Dijkstra.TxInfo (DijkstraContextError)
 import Cardano.Ledger.MemoBytes (mkMemoizedEra)
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (UnsafeMkMempoolTx))
 import Cardano.Ledger.Plutus (Language (..))
 import Cardano.Ledger.Shelley.Scripts (pattern RequireSignature)
 import Data.Functor.Identity (Identity)
@@ -175,12 +176,17 @@ sizedDijkstraNativeScript n =
 instance (Arbitrary (TxBody l DijkstraEra), Typeable l) => Arbitrary (Tx l DijkstraEra) where
   arbitrary =
     fmap MkDijkstraTx . withSTxBothLevels @l $ \case
-      -- Per CIP-0167, Dijkstra transactions should always have isPhase2Valid = Phase2Valid
-      -- The isPhase2Valid flag is omitted in serialization and defaults to Phase2Valid
       STopTx ->
         DijkstraTopTx . mkMemoizedEra @DijkstraEra
-          <$> (DijkstraTopTxRaw <$> arbitrary <*> arbitrary <*> pure Phase2Valid <*> arbitrary)
+          <$> (DijkstraTopTxRaw <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary)
       SSubTx -> DijkstraSubTx <$> arbitrary <*> arbitrary <*> arbitrary
+
+instance Arbitrary (MempoolTx DijkstraEra) where
+  arbitrary =
+    -- Per CIP-0167, Dijkstra mempool transactions should always have
+    -- isPhase2Valid = Phase2Valid. The isPhase2Valid flag is omitted in
+    -- serialization and defaults to Phase2Valid.
+    UnsafeMkMempoolTx . (isPhase2ValidTxL .~ Phase2Valid) <$> arbitrary
 
 instance Era era => Arbitrary (DijkstraTxCert era) where
   arbitrary =
@@ -210,10 +216,38 @@ instance
 instance
   ( Era era
   , Arbitrary (PredicateFailure (EraRule "LEDGERS" era))
+  , Arbitrary (PredicateFailure (EraRule "LEIOSCERT" era))
   ) =>
   Arbitrary (DijkstraBbodyPredFailure era)
   where
   arbitrary = genericArbitraryU
+
+instance Arbitrary (DijkstraLeiosCertPredFailure era) where
+  arbitrary = genericArbitraryU
+
+instance
+  Arbitrary (PredicateFailure (EraRule "EBLEDGERS" era)) =>
+  Arbitrary (EbPredFailure era)
+  where
+  arbitrary = genericArbitraryU
+
+instance
+  Arbitrary (PredicateFailure (EraRule "LEDGER" era)) =>
+  Arbitrary (EbLedgersPredFailure era)
+  where
+  arbitrary = LedgerFailureInEBLEDGERS <$> arbitrary
+
+deriving newtype instance Arbitrary (EbWasNotAnnounced era)
+
+deriving newtype instance Arbitrary (EbReferencesSizeTooBig era)
+
+deriving newtype instance Arbitrary (EbAnnouncementSlotMismatch era)
+
+deriving newtype instance Arbitrary (EbAnnouncementHashMismatch era)
+
+deriving newtype instance Arbitrary (EbAnnouncementSizeMismatch era)
+
+deriving newtype instance Arbitrary (EbAlreadyApplied era)
 
 instance
   ( Era era
@@ -420,11 +454,6 @@ instance Arbitrary (AccountBalanceInterval era) where
   arbitrary = genericArbitraryU
   shrink = genericShrink
 
-instance Arbitrary EbReferences where
-  arbitrary =
-    mkEbReferences (eraProtVerLow @DijkstraEra) . SimpleOMap.fromFoldable <$> listOf1 arbitrary
-  shrink =
-    map (mkEbReferences (eraProtVerLow @DijkstraEra))
-      . filter (not . SimpleOMap.null)
-      . shrink
-      . getEbReferences
+instance Arbitrary (DijkstraEbReferences DijkstraEra) where
+  arbitrary = EbReferences . SimpleOMap.fromFoldable <$> listOf1 arbitrary
+  shrink (EbReferences refs) = EbReferences <$> filter (not . SimpleOMap.null) (shrink refs)

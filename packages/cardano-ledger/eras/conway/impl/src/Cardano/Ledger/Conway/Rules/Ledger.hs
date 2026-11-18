@@ -37,7 +37,7 @@ import Cardano.Ledger.Address (accountAddressCredentialL)
 import qualified Cardano.Ledger.Allegra.Rules as Allegra
 import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
 import Cardano.Ledger.Alonzo.Scripts (AlonzoScript)
-import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded (..))
+import Cardano.Ledger.Alonzo.UTxO
 import qualified Cardano.Ledger.Babbage.Rules as Babbage
 import Cardano.Ledger.Babbage.TxBody (BabbageTxOut (..))
 import Cardano.Ledger.BaseTypes (
@@ -51,6 +51,7 @@ import Cardano.Ledger.BaseTypes (
 import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
 import Cardano.Ledger.Binary.Coders
 import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Conway.BlockBody (ConwayBlockBodyLimits (..))
 import Cardano.Ledger.Conway.Core
 import Cardano.Ledger.Conway.Era (
   CERTS,
@@ -89,7 +90,6 @@ import Cardano.Ledger.Conway.Rules.Utxo (ConwayUtxoPredFailure)
 import Cardano.Ledger.Conway.Rules.Utxos (ConwayUtxosPredFailure)
 import Cardano.Ledger.Conway.Rules.Utxow (ConwayUtxowPredFailure)
 import Cardano.Ledger.Conway.State
-import Cardano.Ledger.Conway.UTxO (txNonDistinctRefScriptsSize)
 import Cardano.Ledger.Credential (Credential (..), credKeyHash)
 import Cardano.Ledger.Rules.ValidationMode (
   Test,
@@ -97,6 +97,7 @@ import Cardano.Ledger.Rules.ValidationMode (
  )
 import Cardano.Ledger.Shelley.LedgerState (
   LedgerState (..),
+  LedgerStateWithLimits (..),
   UTxOState (..),
   utxosGovStateL,
  )
@@ -296,6 +297,7 @@ instance
 
 instance
   ( AlonzoEraTx era
+  , AlonzoEraUTxO era
   , ConwayEraTxBody era
   , ConwayEraGov era
   , GovState era ~ ConwayGovState era
@@ -315,10 +317,12 @@ instance
   , EraRule "LEDGER" era ~ LEDGER era
   , InjectRuleFailure "LEDGER" Shelley.ShelleyLedgerPredFailure era
   , InjectRuleFailure "LEDGER" ConwayLedgerPredFailure era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (TxWits era)
   ) =>
   STS (LEDGER era)
   where
-  type State (LEDGER era) = LedgerState era
+  type State (LEDGER era) = LedgerStateWithLimits era
   type Signal (LEDGER era) = StAnnTx TopTx era
   type Environment (LEDGER era) = Shelley.LedgerEnv era
   type BaseM (LEDGER era) = ShelleyBase
@@ -335,11 +339,12 @@ instance
 conwayLedgerTransitionTRC ::
   forall (someLEDGER :: Type -> Type) era.
   ( AlonzoEraTx era
+  , AlonzoEraUTxO era
   , ConwayEraTxBody era
   , ConwayEraGov era
   , GovState era ~ ConwayGovState era
   , Signal (someLEDGER era) ~ StAnnTx TopTx era
-  , State (someLEDGER era) ~ LedgerState era
+  , State (someLEDGER era) ~ LedgerStateWithLimits era
   , Environment (someLEDGER era) ~ Shelley.LedgerEnv era
   , Embed (EraRule "UTXOW" era) (someLEDGER era)
   , Embed (EraRule "GOV" era) (someLEDGER era)
@@ -359,25 +364,28 @@ conwayLedgerTransitionTRC ::
   , EraRule "LEDGER" era ~ someLEDGER era
   , InjectRuleFailure "LEDGER" Shelley.ShelleyLedgerPredFailure era
   , InjectRuleFailure "LEDGER" ConwayLedgerPredFailure era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (TxWits era)
   ) =>
   TRC (someLEDGER era) ->
   TransitionRule (someLEDGER era)
 conwayLedgerTransitionTRC
   ( TRC
       ( Shelley.LedgerEnv slot mbCurEpochNo _txIx pp chainAccountState
-        , LedgerState utxoState certState lastEbAnnouncement
+        , LedgerStateWithLimits (LedgerState utxoState certState lastEbAnnouncement) blockBodyLimits
         , stAnnTx
         )
     ) = do
     let tx = stAnnTx ^. txStAnnTxG
     curEpochNo <- maybe (liftSTS $ epochFromSlot slot) pure mbCurEpochNo
+    let refScriptsSize = refScriptsSizeStAnnTx stAnnTx
 
     (utxoState', certStateAfterCERTS) <-
       if tx ^. isPhase2ValidTxL == Phase2Valid
         then do
           let txBody = tx ^. bodyTxL
           runTest $ validateTreasuryValue txBody (chainAccountState ^. casTreasuryL)
-          runTest $ validateRefScriptSize pp (utxoState ^. utxoL) tx
+          runTest $ validateRefScriptSize pp refScriptsSize
 
           let govState = utxoState ^. utxosGovStateL
               committee = govState ^. committeeGovStateL
@@ -448,7 +456,17 @@ conwayLedgerTransitionTRC
           , utxoState'
           , stAnnTx
           )
-    pure $ LedgerState utxoState'' certStateAfterCERTS lastEbAnnouncement
+    pure $
+      LedgerStateWithLimits
+        (LedgerState utxoState'' certStateAfterCERTS lastEbAnnouncement)
+        ( blockBodyLimits
+            <> ConwayBlockBodyLimits
+              { cbblTxsSize = sizeTxForFeeCalculation tx
+              , cbblExUnits = exUnitsStAnnTx stAnnTx
+              , -- Check before using for pv <= 10, see `totalRefScriptSizeInBlock`
+                cbblRefScriptsSize = refScriptsSize
+              }
+        )
 
 validateTreasuryValue ::
   ConwayEraTxBody era => TxBody l era -> Coin -> Test (ConwayLedgerPredFailure era)
@@ -465,18 +483,14 @@ validateTreasuryValue txBody actualTreasuryValue =
           )
 
 validateRefScriptSize ::
-  ( EraTx era
-  , BabbageEraTxBody era
-  , ConwayEraPParams era
-  ) =>
-  PParams era -> UTxO era -> Tx l era -> Test (ConwayLedgerPredFailure era)
-validateRefScriptSize pp utxo tx =
-  let totalRefScriptSize = txNonDistinctRefScriptsSize utxo tx
-      maxRefScriptSizePerTx = fromIntegral @Word32 @Int $ pp ^. ppMaxRefScriptSizePerTxG
-   in failureUnless (totalRefScriptSize <= maxRefScriptSizePerTx) $
+  ConwayEraPParams era =>
+  PParams era -> Int -> Test (ConwayLedgerPredFailure era)
+validateRefScriptSize pp refScriptsSize =
+  let maxRefScriptSizePerTx = fromIntegral @Word32 @Int $ pp ^. ppMaxRefScriptSizePerTxG
+   in failureUnless (refScriptsSize <= maxRefScriptSizePerTx) $
         ConwayTxRefScriptsSizeTooBig
           Mismatch
-            { mismatchSupplied = totalRefScriptSize
+            { mismatchSupplied = refScriptsSize
             , mismatchExpected = maxRefScriptSizePerTx
             }
 
@@ -500,11 +514,12 @@ validateWithdrawalsDelegated accounts tx =
 conwayLedgerTransition ::
   forall (someLEDGER :: Type -> Type) era.
   ( AlonzoEraTx era
+  , AlonzoEraUTxO era
   , ConwayEraTxBody era
   , ConwayEraGov era
   , GovState era ~ ConwayGovState era
   , Signal (someLEDGER era) ~ StAnnTx TopTx era
-  , State (someLEDGER era) ~ LedgerState era
+  , State (someLEDGER era) ~ LedgerStateWithLimits era
   , Environment (someLEDGER era) ~ Shelley.LedgerEnv era
   , Embed (EraRule "UTXOW" era) (someLEDGER era)
   , Embed (EraRule "GOV" era) (someLEDGER era)
@@ -524,6 +539,8 @@ conwayLedgerTransition ::
   , EraRule "LEDGER" era ~ someLEDGER era
   , InjectRuleFailure "LEDGER" Shelley.ShelleyLedgerPredFailure era
   , InjectRuleFailure "LEDGER" ConwayLedgerPredFailure era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (TxWits era)
   ) =>
   TransitionRule (someLEDGER era)
 conwayLedgerTransition = judgmentContext >>= conwayLedgerTransitionTRC
@@ -575,6 +592,7 @@ instance
   , Embed (EraRule "GOV" era) (LEDGER era)
   , ConwayEraGov era
   , AlonzoEraTx era
+  , AlonzoEraUTxO era
   , ConwayEraTxBody era
   , ConwayEraPParams era
   , GovState era ~ ConwayGovState era
@@ -590,6 +608,8 @@ instance
   , InjectRuleFailure "LEDGER" Shelley.ShelleyLedgerPredFailure era
   , InjectRuleFailure "LEDGER" ConwayLedgerPredFailure era
   , InjectRuleFailure "LEDGER" ConwayCertsPredFailure era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (TxWits era)
   ) =>
   Embed (LEDGER era) (Babbage.LEDGERS era)
   where

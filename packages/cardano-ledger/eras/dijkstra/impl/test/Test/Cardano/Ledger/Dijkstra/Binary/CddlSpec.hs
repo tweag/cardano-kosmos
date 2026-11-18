@@ -18,10 +18,11 @@ import Cardano.Ledger.Conway.Governance (
  )
 import Cardano.Ledger.Core
 import Cardano.Ledger.Dijkstra (DijkstraEra)
-import Cardano.Ledger.Dijkstra.Block.Endorser (EbReferences)
+import Cardano.Ledger.Dijkstra.Block.Endorser (EraEndorserBlock (EbReferences))
 import Cardano.Ledger.Dijkstra.HuddleSpec (dijkstraCDDL)
 import Cardano.Ledger.Dijkstra.Scripts (AccountBalanceInterval, AccountBalanceIntervals)
 import Cardano.Ledger.Dijkstra.Tx (Tx (..))
+import Cardano.Ledger.MempoolTx (MempoolTx)
 import Cardano.Ledger.Plutus.Data (Data, Datum)
 import Cardano.Protocol.Crypto (StandardCrypto)
 import qualified Cardano.Protocol.Leios.BlockHeader as Leios
@@ -81,7 +82,9 @@ spec = do
       fullCddlSpec @(PParamsUpdate DijkstraEra) v "protocol_param_update"
       fullCddlSpec @CostModels v "cost_models"
       fullAnnGenCddlSpec @(Redeemers DijkstraEra) genNonEmptyRedeemers v "redeemers"
-      fullAnnCddlSpec @(Tx TopTx DijkstraEra) v "mempool_transaction"
+      fullAnnCddlSpec @(MempoolTx DijkstraEra) v "mempool_transaction"
+      fullAnnCddlSpec @(Tx TopTx DijkstraEra) v "block_transaction"
+      fullAnnCddlSpec @(Tx SubTx DijkstraEra) v "sub_transaction"
       fullCddlSpec @(VotingProcedure DijkstraEra) v "voting_procedure"
       fullCddlSpec @(ProposalProcedure DijkstraEra) v "proposal_procedure"
       fullCddlSpec @(GovAction DijkstraEra) v "gov_action"
@@ -100,5 +103,5 @@ spec = do
         genLeiosBlock
         v
         "block"
-      fullCddlSpec @EbReferences v "eb_references"
+      fullCddlSpec @(EbReferences DijkstraEra) v "eb_references"
       fullCddlSpec @EbReferencesAnnouncement v "eb_references_announcement"

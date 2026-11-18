@@ -267,7 +267,7 @@ class EraTx era => EraUTxO era where
     -- | For some era it is necessary to look into the UTxO to find all of the available
     -- scripts for the transaction
     UTxO era ->
-    Tx t era ->
+    Tx TopTx era ->
     ScriptsProvided era
 
   -- | Produce all the information required for figuring out which scripts are required
@@ -283,3 +283,10 @@ class EraTx era => EraUTxO era where
 
   -- | Minimum fee computation, excluding witnesses and including ref scripts size
   getMinFeeTxUtxo :: PParams era -> Tx t era -> UTxO era -> Coin
+
+  -- | Minimum fee computation for the ledger rules, with reference scripts size
+  -- and the execution units from the annotation instead of recomputing them.
+  --
+  -- Must agree with `getMinFeeTxUtxo` on the same transaction. That one is reserved for
+  -- tooling and testing, where no annotation is available.
+  calcMinFeeStAnnTx :: PParams era -> StAnnTx TopTx era -> Coin

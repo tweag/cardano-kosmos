@@ -14,11 +14,13 @@ module Cardano.Ledger.Dijkstra.UTxO (
   dijkstraConsumed,
   getDijkstraScriptsNeeded,
   getDijkstraScriptsProvided,
+  getRefScriptsFromCreatedTxOuts,
   getDijkstraSupplementalDataHashes,
   getDijkstraMinFeeTxUtxo,
   scriptsProvidedDijkstraStAnnTx,
   batchNonDistinctRefScriptsSize,
   localProducedValue,
+  poolOwnersWitnessRequired,
 ) where
 
 import Cardano.Ledger.Alonzo.Plutus.Context (CollectError)
@@ -28,17 +30,19 @@ import Cardano.Ledger.Alonzo.UTxO (
   getAlonzoScriptsHashesNeeded,
   zipAsIxItem,
  )
+import Cardano.Ledger.Babbage.TxOut (getTxOutsReferenceScripts)
 import Cardano.Ledger.Babbage.UTxO (
   getBabbageScriptsProvided,
   getBabbageSpendingDatum,
   getBabbageSupplementalDataHashes,
  )
-import Cardano.Ledger.BaseTypes (inject)
+import Cardano.Ledger.BaseTypes (StrictMaybe (..), inject)
 import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Conway.Tx (getConwayMinFeeTx)
 import Cardano.Ledger.Conway.TxBody (conwayProposalsDeposits)
 import Cardano.Ledger.Conway.UTxO (
   getConwayScriptsNeeded,
-  getConwayWitsVKeyNeeded,
+  getConwayWitsVKeyNeededWith,
   txNonDistinctRefScriptsSize,
  )
 import Cardano.Ledger.Credential (Credential, credScriptHash)
@@ -46,14 +50,19 @@ import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.Era (DijkstraEra)
 import Cardano.Ledger.Dijkstra.Scripts (DijkstraEraScript (..))
 import Cardano.Ledger.Dijkstra.State
-import Cardano.Ledger.Dijkstra.Tx (DijkstraStAnnTx (..))
+import Cardano.Ledger.Dijkstra.Tx (
+  DijkstraStAnnTx (..),
+  exUnitsDijkstraStAnnTx,
+  refScriptsSizeDijkstraStAnnTx,
+ )
 import Cardano.Ledger.Mary.UTxO (burnedMultiAssets, getConsumedMaryValue)
 import Cardano.Ledger.Mary.Value (MaryValue (..))
 import Cardano.Ledger.Plutus (Language, PlutusWithContext)
+import Control.Exception (assert)
 import Data.Foldable (Foldable (..))
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Monoid (Sum (..))
 import qualified Data.OMap.Strict as OMap
 import Data.Set (Set)
@@ -158,32 +167,70 @@ instance EraUTxO DijkstraEra where
 
   getScriptsHashesNeeded = getAlonzoScriptsHashesNeeded
 
-  getWitsVKeyNeeded _ = getConwayWitsVKeyNeeded
+  getWitsVKeyNeeded certState =
+    getConwayWitsVKeyNeededWith (poolOwnersWitnessRequired (certState ^. certPStateL))
 
   getMinFeeTxUtxo = getDijkstraMinFeeTxUtxo
 
--- | Like 'getBabbageScriptsProvided', but for 'TopTx' also aggregates
--- scripts from all subtransactions.
+  calcMinFeeStAnnTx pp DijkstraStAnnTopTx {dsattTx, dsattRefScriptsSize, dsattExUnits, dsattUTxO} =
+    assert (getMinFeeTxUtxo pp dsattTx dsattUTxO == minFee) minFee
+    where
+      minFee = getConwayMinFeeTx pp dsattTx dsattRefScriptsSize dsattExUnits
+
+-- | The pool owners are required to witness a transaction, unless the certificate
+-- is re-registering an already registered pool and matches the latest params
+-- (that includes future updates that are signed and pending) for everything
+-- except the BLS key.
+-- That is, the owners are not required to sign if only the BLS key is being updated.
+-- Note: this predicate will also exempt owners from signing either (a) re-registrations
+-- where all params match since they are no-op, and (b) unretiring a pool
+poolOwnersWitnessRequired :: PState era -> StakePoolParams era -> Bool
+poolOwnersWitnessRequired PState {psStakePools, psFutureStakePoolParams} stakePoolParams =
+  case Map.lookup poolId psStakePools of
+    -- new pool
+    Nothing -> True
+    Just stakePoolState ->
+      let activeParams =
+            stakePoolStateToStakePoolParams
+              (aaNetworkId (sppAccountAddress stakePoolParams))
+              poolId
+              stakePoolState
+          -- if there are params that are pending then we select those instead
+          latestParams = fromMaybe activeParams $ Map.lookup poolId psFutureStakePoolParams
+       in withoutBlsKey stakePoolParams /= withoutBlsKey latestParams
+  where
+    poolId = sppId stakePoolParams
+    withoutBlsKey params = params {sppBlsKey = SNothing}
+
+-- | Like 'getBabbageScriptsProvided', but also aggregates scripts from all subtransactions, and
+-- includes the reference scripts of all the outputs created by the batch (CIP-0172).
 getDijkstraScriptsProvided ::
-  ( EraTx era
-  , DijkstraEraTxBody era
-  , STxLevel l era ~ STxBothLevels l era
-  ) =>
+  (EraTx era, DijkstraEraTxBody era) =>
   UTxO era ->
-  Tx l era ->
+  Tx TopTx era ->
   ScriptsProvided era
 getDijkstraScriptsProvided utxo tx =
-  withBothTxLevels
-    tx
-    ( \topTx ->
-        ScriptsProvided $
-          Map.unions $
-            unScriptsProvided (getBabbageScriptsProvided utxo topTx)
-              : [ unScriptsProvided (getBabbageScriptsProvided utxo subTx)
-                | subTx <- OMap.elems (topTx ^. bodyTxL . subTransactionsTxBodyL)
-                ]
-    )
-    (getBabbageScriptsProvided utxo)
+  ScriptsProvided $
+    Map.unions $
+      getRefScriptsFromCreatedTxOuts (tx ^. bodyTxL)
+        : unScriptsProvided (getBabbageScriptsProvided utxo tx)
+        : [ unScriptsProvided (getBabbageScriptsProvided utxo subTx)
+          | subTx <- OMap.elems (tx ^. bodyTxL . subTransactionsTxBodyL)
+          ]
+
+-- | Collect the reference scripts of all the outputs created by the batch, which can be used by
+-- any transaction of the batch (CIP-0172). This includes the collateral return output, since its
+-- script is part of the transaction, whether the output is created or not.
+getRefScriptsFromCreatedTxOuts ::
+  (EraTx era, DijkstraEraTxBody era) =>
+  TxBody TopTx era ->
+  Map.Map ScriptHash (Script era)
+getRefScriptsFromCreatedTxOuts txBody =
+  getTxOutsReferenceScripts (txBody ^. outputsTxBodyL)
+    <> getTxOutsReferenceScripts (txBody ^. collateralReturnTxBodyL)
+    <> foldMap
+      (getTxOutsReferenceScripts . (^. bodyTxL . outputsTxBodyL))
+      (txBody ^. subTransactionsTxBodyL)
 
 getDijkstraScriptsNeeded ::
   (DijkstraEraTxBody era, DijkstraEraScript era) =>
@@ -209,6 +256,9 @@ instance AlonzoEraUTxO DijkstraEra where
   plutusScriptsWithContextStAnnTx = plutusScriptsWithContextDijkstraStAnnTx
 
   plutusLanguagesUsedStAnnTx = plutusLanguagesUsedDijkstraStAnnTx
+
+  refScriptsSizeStAnnTx = refScriptsSizeDijkstraStAnnTx
+  exUnitsStAnnTx = exUnitsDijkstraStAnnTx
 
 getDijkstraSupplementalDataHashes ::
   ( EraTx era

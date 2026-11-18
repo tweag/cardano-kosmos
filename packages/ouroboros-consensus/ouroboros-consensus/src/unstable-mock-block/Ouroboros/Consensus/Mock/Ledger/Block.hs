@@ -102,6 +102,7 @@ import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.Query
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsPeerSelection
+import Ouroboros.Consensus.Ledger.SupportsPeras (LedgerStateSupportsPeras)
 import Ouroboros.Consensus.Ledger.Tables.Utils
 import Ouroboros.Consensus.Mock.Ledger.Address
 import Ouroboros.Consensus.Mock.Ledger.State
@@ -248,7 +249,7 @@ matchesSimpleHeader SimpleHeader{..} SimpleBlock{..} =
   SimpleStdHeader{..} = simpleHeaderStd
 
 countSimpleGenTxs :: SimpleBlock c ext -> Word64
-countSimpleGenTxs = fromIntegral . length . extractTxs
+countSimpleGenTxs = fromIntegral . length . extractAsMempoolTxs
 
 {-------------------------------------------------------------------------------
   HasHeader instance for SimpleHeader
@@ -521,6 +522,10 @@ instance MockProtocolSpecific c ext => CommonProtocolParams (SimpleBlock c ext) 
 instance LedgerSupportsPeerSelection (SimpleBlock c ext) where
   getPeers = const []
 
+instance LedgerStateSupportsPeras (LedgerState (SimpleBlock c ext))
+
+instance LedgerStateSupportsPeras (Ticked LedgerState (SimpleBlock c ext))
+
 {-------------------------------------------------------------------------------
   LedgerTables
 -------------------------------------------------------------------------------}
@@ -677,7 +682,7 @@ instance (Typeable p, Typeable c) => NoThunks (Validated (GenTx (SimpleBlock p c
   showTypeOf _ = show $ typeRep (Proxy @(Validated (GenTx (SimpleBlock p c))))
 
 instance HasTxs (SimpleBlock c ext) where
-  extractTxs = map mkSimpleGenTx . simpleTxs . simpleBody
+  extractAsMempoolTxs = map mkSimpleGenTx . simpleTxs . simpleBody
 
 instance Mock.HasMockTxs (GenTx (SimpleBlock p c)) where
   getMockTxs = Mock.getMockTxs . simpleGenTx

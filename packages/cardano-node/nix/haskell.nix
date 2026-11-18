@@ -65,8 +65,8 @@ let
           actionlint
           shellcheck
           stylish-haskell
-        ]
-        ++ lib.optional (herald != null) herald;
+          config.hsPkgs.generate-release-changelog-links.components.exes.generate-release-changelog-links
+        ] ++ lib.optional (herald != null) herald;
 
         withHoogle = true;
 
@@ -225,6 +225,10 @@ let
             #  export PROXY_ARGS=-v
             #'';
 
+            # Tests broken under Wine: System.IO.Temp file operations fail
+            packages.cardano-profile.components.tests.cardano-profile-test.buildable = lib.mkForce false;
+            packages.cardano-topology.components.tests.cardano-topology-test.buildable = lib.mkForce false;
+            packages.trace-schema-gen.components.tests.trace-schema-gen-test.buildable = lib.mkForce false;
           })
           ({ lib, pkgs, config, ... }: lib.mkIf (builtins.compareVersions config.compiler.version "9.4" >= 0) {
             # lib:ghc is a bit annoying in that it comes with it's own build-type:Custom, and then tries
@@ -281,6 +285,16 @@ let
                 "configuration/defaults/byron-mainnet"
                 "cardano-testnet/test/cardano-testnet-golden/files/golden/manifest.json"
                 "cardano-testnet/test/cardano-testnet-golden/files/golden/node_default_config.json"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status.json"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_no_testnet.json"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_no_testnet.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_no_testnet_not_a_testnet_dir.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_no_testnet_not_ready.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_running.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_stalled.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_stalled_no_blocks.txt"
+                "cardano-testnet/test/cardano-testnet-golden/files/golden/status_stopped.txt"
                 "cardano-testnet/test/cardano-testnet-test/files/golden/tx.failed.response.json.golden"
                 "cardano-testnet/test/cardano-testnet-test/files/input/sample-constitution.txt"
                 "cardano-testnet/files/data/alonzo/genesis.alonzo.spec.json"

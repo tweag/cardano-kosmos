@@ -40,6 +40,7 @@ library
   exposed-modules:
     Cardano.Crypto.Peras
     Cardano.Crypto.Peras.Cert
+    Cardano.Crypto.Peras.Cert.WFALS
     Cardano.Crypto.Peras.Committee.Base
     Cardano.Crypto.Peras.Committee.Class
     Cardano.Crypto.Peras.Committee.Crypto
@@ -51,6 +52,7 @@ library
     Cardano.Crypto.Peras.Committee.WFA
     Cardano.Crypto.Peras.Committee.WFALS
     Cardano.Crypto.Peras.Crypto.BLS
+    Cardano.Crypto.Peras.Validation
     Cardano.Crypto.Peras.Vote
 
   build-depends:
@@ -89,13 +91,16 @@ test-suite tests
   main-is: Main.hs
   other-modules:
     Test.Cardano.Crypto.Peras
+    Test.Cardano.Crypto.Peras.Validation
 
   build-depends:
     QuickCheck,
     bytestring,
+    cardano-binary,
     cardano-crypto-class,
     cardano-crypto-peras:{cardano-crypto-peras, testlib},
     cardano-slotting,
+    containers,
     hspec,
 
   ghc-options:

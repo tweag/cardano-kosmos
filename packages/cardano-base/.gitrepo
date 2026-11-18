@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:gdeest/cardano-base.git
-	branch = 4ab1bf14f5f6ce0581b98daa8f4ebc91a92e0a39
-	commit = 4ab1bf14f5f6ce0581b98daa8f4ebc91a92e0a39
-	parent = 95db0db246f5d04a12c2a6a0e677f3abdda41078
+	branch = 09e8cd5558c3efa6f542bb68fae332d6b672bac1
+	commit = 09e8cd5558c3efa6f542bb68fae332d6b672bac1
+	parent = 217b7283d0ba89044d7b0cc8af3b57eb6601accd
 	method = merge
 	cmdver = 0.4.9

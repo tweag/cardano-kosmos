@@ -82,6 +82,7 @@ read -r \
   proxy_mode \
   ip \
   node_ports_base \
+  peras_genesis \
   < <(echo $testnet_config | jq -r '[
     .nodes_arg,
     .testnet_magic,
@@ -95,7 +96,8 @@ read -r \
     
     .proxy,
     .ip,
-    .node_ports_base
+    .node_ports_base,
+    (.genesis.peras | tojson)
   ] | @tsv')
 
 echo "Running cardano_testnet create-env"
@@ -127,6 +129,8 @@ jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGene
 # Dijkstra genesis decoder only accepts the initial 251 parameters.
 dijkstraGenesisFile="${DEVENV_PATH}/dijkstra-genesis.json"
 jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
+jq --argjson peras "$peras_genesis" '. * $peras' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
 
 echo "Changing configuration params"
 

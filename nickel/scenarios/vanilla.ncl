@@ -40,7 +40,12 @@ in {
   },
   genesis = {
     max_lovelace_supply = 100000020000000,
-    num_dreps = count_dreps topology.nodes
+    num_dreps = count_dreps topology.nodes,
+    peras = {
+      perasMinCandidateBlockAge = 30,
+      perasQuorumThresholdSafetyMargin = 0.02,
+      perasTargetCommitteeSize = 5,
+    },
   },
 } | Scenario
 

@@ -25,6 +25,7 @@ module Test.Cardano.Network.Diffusion.Testnet.Simulation
   , prop_diffusionScript_commandScript_valid
   , fixupCommands
   , diffusionSimulation
+  , diffusionSimulationWithCounters
   , diffusionSimulation'
   , DiffSimResult
   , Command (..)
@@ -126,9 +127,11 @@ import Ouroboros.Network.Protocol.TxSubmission2.Codec (byteLimitsTxSubmission2,
            timeLimitsTxSubmission2)
 import Ouroboros.Network.Server qualified as Server
 import Ouroboros.Network.Snocket (Snocket, TestAddress (..))
-import Ouroboros.Network.TxSubmission.Inbound.V2.Policy (TxDecisionPolicy)
+import Ouroboros.Network.TxSubmission.Inbound.V2.Policy (TxDecisionPolicy,
+           TxSubmissionConfig)
 import Ouroboros.Network.TxSubmission.Inbound.V2.Types (TraceTxLogic,
            TraceTxSubmissionInbound)
+import Ouroboros.Network.TxSubmission.Outbound (TxOutboundVersion (..))
 import Ouroboros.Network.Util (PrettyShow (..))
 
 import Ouroboros.Network.Mock.ConcreteBlock (Block (..), BlockHeader (..))
@@ -150,7 +153,8 @@ import Test.Ouroboros.Network.PeerSelection.RootPeersDNS qualified as PeerSelect
            (tests)
 import Test.Ouroboros.Network.TxSubmission.Impaired (Impairment, noImpairment)
 import Test.Ouroboros.Network.TxSubmission.TxLogic (ArbTxDecisionPolicy (..))
-import Test.Ouroboros.Network.TxSubmission.Types (Tx (..))
+import Test.Ouroboros.Network.TxSubmission.Types (ArbTxOutboundVersion (..),
+           ArbTxSubmissionConfig (..), Tx (..))
 import Test.Ouroboros.Network.Utils
 
 import Test.Cardano.Network.Diffusion.Testnet.MiniProtocols qualified as Node
@@ -165,27 +169,36 @@ import Test.QuickCheck
 --
 data SimArgs =
   SimArgs
-    { saSlot             :: DiffTime
+    { saSlot              :: DiffTime
       -- ^ 'randomBlockGenerationArgs' slot duration argument
-    , saQuota            :: Int
+    , saQuota             :: Int
       -- ^ 'randomBlockGenerationArgs' quota value
-    , saTxDecisionPolicy :: TxDecisionPolicy
+    , saTxDecisionPolicy  :: TxDecisionPolicy
       -- ^ Decision policy for tx submission protocol
+    , saTxOutboundVersion :: TxOutboundVersion
+      -- ^ Tx submission outbound version.  All simulations nodes run the same
+      -- `TxOutboundVersion`, since we use `UnversionedProtocol`.  With
+      -- `TxOutboundV_1` all nodes must use the same `naTxSubmissionConfig`.
     }
 
--- | Render `SimArgs`, ignores `saTxDecisionPolicy`; useful for quickcheck
--- coverage checking.
+-- | Render `SimArgs`, ignores the tx submission arguments; useful for
+-- quickcheck coverage checking.
 --
 renderSimArgs :: SimArgs -> String
 renderSimArgs SimArgs { saSlot, saQuota } =
     "slotDuration: " ++ show saSlot ++ " quota: " ++ show saQuota
 
 instance Show SimArgs where
-    show SimArgs { saSlot, saQuota, saTxDecisionPolicy } =
+    show SimArgs { saSlot,
+                   saQuota,
+                   saTxDecisionPolicy,
+                   saTxOutboundVersion
+                 } =
       unwords [ "SimArgs"
               , show saSlot
               , show saQuota
               , "(" ++ show saTxDecisionPolicy ++ ")"
+              , show saTxOutboundVersion
               ]
 
 data ServiceDomainName =
@@ -244,6 +257,10 @@ data NodeArgs =
     , naTxImpairment           :: Impairment
       -- ^ behavioural fault injection on this node's outbound
       -- 'TxSubmissionClient' (default: 'noImpairment')
+    , naTxSubmissionConfig     :: TxSubmissionConfig
+      -- ^ tx submission configuration of this node, used by its inbound and
+      -- outbound sides.  Nodes can use different configurations only with
+      -- `TxOutboundV_2`.
     }
 
 instance Show NodeArgs where
@@ -252,7 +269,7 @@ instance Show NodeArgs where
                     naLocalRootPeers, naPeerTargets, naDNSTimeoutScript,
                     naDNSLookupDelayScript, naChainSyncExitOnBlockNo,
                     naChainSyncEarlyExit, naFetchModeScript, naConsensusMode,
-                    naTxs, naTxImpairment } =
+                    naTxs, naTxImpairment, naTxSubmissionConfig } =
       unwords [ "NodeArgs"
               , "(" ++ show naSeed ++ ")"
               , show naDiffusionMode
@@ -271,6 +288,7 @@ instance Show NodeArgs where
               , "(" ++ show naFetchModeScript ++ ")"
               , show naTxs
               , "(" ++ show naTxImpairment ++ ")"
+              , "(" ++ show naTxSubmissionConfig ++ ")"
               ]
 
 data Command = JoinNetwork DiffTime
@@ -349,14 +367,16 @@ fixupCommands (_:t) = fixupCommands t
 --
 mainnetSimArgs :: Int
                -> TxDecisionPolicy
+               -> TxOutboundVersion
                -> SimArgs
-mainnetSimArgs numberOfNodes txDecisionPolicy =
+mainnetSimArgs numberOfNodes txDecisionPolicy txOutboundVersion =
   SimArgs {
       saSlot  = secondsToDiffTime 1,
       saQuota = if numberOfNodes > 0
                 then 20 `div` numberOfNodes
                 else 100,
-      saTxDecisionPolicy = txDecisionPolicy
+      saTxDecisionPolicy   = txDecisionPolicy,
+      saTxOutboundVersion  = txOutboundVersion
     }
 
 
@@ -401,8 +421,12 @@ genNodeArgs :: [TestnetRelayInfo]
             -> [(HotValency, WarmValency, Map RelayAccessPoint (LocalRootConfig PeerTrustable))]
             -> TestnetRelayInfo
             -> [Tx Int]
+            -> TxSubmissionConfig
+            -- ^ TxSubmissionConfig; for `TxOutboundV_1` all nodes share the same
+            -- config, thus generated in `genDiffusionScript`
             -> Gen NodeArgs
-genNodeArgs relays minConnected localRootPeers self txs = flip suchThat hasUpstream $ do
+genNodeArgs relays minConnected localRootPeers self txs txSubmissionConfig =
+  flip suchThat hasUpstream $ do
   -- Slot length needs to be greater than 0 else we get a livelock on
   -- the IOSim.
   --
@@ -486,6 +510,7 @@ genNodeArgs relays minConnected localRootPeers self txs = flip suchThat hasUpstr
       , naFetchModeScript        = fetchModeScript
       , naTxs                    = txs
       , naTxImpairment           = noImpairment
+      , naTxSubmissionConfig     = txSubmissionConfig
       }
   where
     makeRelayAccessPoint (relay, _, _, _) = relay
@@ -654,11 +679,23 @@ genDiffusionScript genLocalRootPeers
                    relays
                    = do
     ArbTxDecisionPolicy txDecisionPolicy <- arbitrary
-    let simArgs = mainnetSimArgs (length relays') txDecisionPolicy
+    ArbTxOutboundVersion txOutboundVersion <- arbitrary
+    let simArgs = mainnetSimArgs (length relays')
+                                 txDecisionPolicy
+                                 txOutboundVersion
+    -- With `TxOutboundV_1` the tx submission configuration is a protocol
+    -- parameter, so all nodes share it.  With `TxOutboundV_2` it's a local
+    -- setting, so each node gets its own, e.g. a different
+    -- `maxNumUnacknowledgedTxIds` window.
+    txSubmissionConfigs <-
+      map (\(ArbTxSubmissionConfig config) -> config) <$>
+      case txOutboundVersion of
+        TxOutboundV_1 -> replicate (length relays') <$> arbitrary
+        TxOutboundV_2 -> vectorOf (length relays') arbitrary
     dnsMapScript <- genDomainMapScript relays
     txs <- makeUniqueIds 0
        <$> vectorOf (length relays') (choose (10, 100) >>= \c -> vectorOf c arbitrary)
-    nodesWithCommands <- mapM go (zip relays' txs)
+    nodesWithCommands <- mapM go (zip3 relays' txs txSubmissionConfigs)
     return (simArgs, dnsMapScript, nodesWithCommands)
   where
     relays' = unTestnetRelays relays
@@ -674,13 +711,15 @@ genDiffusionScript genLocalRootPeers
                          , i + length l + 1
                          )
 
-    go :: (TestnetRelayInfo, [Tx Int]) -> Gen (NodeArgs, [Command])
-    go (relay, txs) = do
+    go :: (TestnetRelayInfo, [Tx Int], TxSubmissionConfig)
+       -> Gen (NodeArgs, [Command])
+    go (relay, txs, txSubmissionConfig) = do
       let otherRelays  = relay `delete` relays'
           minConnected = 3 `max` (length relays' - 1) -- ^ TODO is this ever different from 3?
                                                       -- since we generate {2,3} relays?
       localRts <- genLocalRootPeers otherRelays relay
       nodeArgs <- genNodeArgs relays' minConnected localRts relay txs
+                              txSubmissionConfig
       commands <- genCommands localRts
       return (nodeArgs, commands)
 
@@ -983,6 +1022,7 @@ data DiffusionTestTrace =
     | DiffusionDebugTrace String
     | DiffusionDNSTrace DNSTrace
     | DiffusionMuxTrace (Mux.WithBearer (ConnectionId NtNAddr) Mux.Trace)
+    | DiffusionMuxCountersTrace Mux.CountersTrace
     deriving Show
 
 
@@ -1006,18 +1046,30 @@ ppDiffusionTestTrace (DiffusionTxLogic tr)                          = show tr
 ppDiffusionTestTrace (DiffusionDebugTrace tr)                       =      tr
 ppDiffusionTestTrace (DiffusionDNSTrace tr)                         = show tr
 ppDiffusionTestTrace (DiffusionMuxTrace tr)                         = show tr
+ppDiffusionTestTrace (DiffusionMuxCountersTrace tr)                 = show tr
 
 
 type DiffSimResult = Void
 
 -- | Run an arbitrary topology in `IOSim`.
--- This runs the simulator with the Cardano churn mechanism.
+-- This runs the simulator with the Cardano churn mechanism and no mux
+-- counters; `diffusionSimulationWithCounters` keeps and traces them.
 diffusionSimulation
   :: BearerInfo
   -> DiffusionScript
   -> IOSim s DiffSimResult
 diffusionSimulation bearerInfo diffusionScript =
-  diffusionSimulationM bearerInfo diffusionScript dynamicTracer CardanoChurn
+  diffusionSimulationM bearerInfo diffusionScript dynamicTracer CardanoChurn 0
+
+-- | As 'diffusionSimulation', with every node tracing its node-to-node mux
+-- counters at the interval given, or keeping none at zero.
+diffusionSimulationWithCounters
+  :: DiffTime
+  -> BearerInfo
+  -> DiffusionScript
+  -> IOSim s DiffSimResult
+diffusionSimulationWithCounters interval bearerInfo diffusionScript =
+  diffusionSimulationM bearerInfo diffusionScript dynamicTracer CardanoChurn interval
 
 -- | Run an arbitrary topology in `IOSim`.
 -- This runs the simulator with the Ouroboros churn mechanism.
@@ -1026,7 +1078,7 @@ diffusionSimulation'
   -> DiffusionScript
   -> IOSim s Void
 diffusionSimulation' bearerInfo diffusionScript =
-    diffusionSimulationM bearerInfo diffusionScript' dynamicTracer OuroborosChurn
+    diffusionSimulationM bearerInfo diffusionScript' dynamicTracer OuroborosChurn 0
   where
     diffusionScript' = case diffusionScript of
       DiffusionScript sa dm nodes ->
@@ -1062,11 +1114,14 @@ diffusionSimulationM
   -> Tracer m (WithTime (WithName NtNAddr DiffusionTestTrace))
   -- ^ timed trace of nodes in the system
   -> Churn
+  -> DiffTime
+  -- ^ how often the nodes trace their node-to-node mux counters; zero, and
+  -- they keep none
   -> m DiffSimResult
 diffusionSimulationM
   defaultBearerInfo
   (DiffusionScript simArgs dnsMapScript nodeArgs)
-  nodeTracer churn = do
+  nodeTracer churn muxCountersInterval = do
     connStateIdSupply <- atomically $ CM.newConnStateIdSupply Proxy
     -- TODO: we should use `snocket` per node, this will allow us to set up
     -- bearer info per node
@@ -1174,6 +1229,7 @@ diffusionSimulationM
             { saSlot                  = bgaSlotDuration
             , saQuota                 = quota
             , saTxDecisionPolicy      = txDecisionPolicy
+            , saTxOutboundVersion     = txOutboundVersion
             }
             NodeArgs
             { naSeed                   = seed
@@ -1191,6 +1247,7 @@ diffusionSimulationM
             , naDiffusionMode          = diffusionMode
             , naTxs                    = txs
             , naTxImpairment           = txImpairment
+            , naTxSubmissionConfig     = txSubmissionConfig
             }
             ntnSnocket
             ntcSnocket
@@ -1343,6 +1400,7 @@ diffusionSimulationM
               , Node.aExtraChurnArgs       = cardanoChurnArgs
               , Node.aTxDecisionPolicy     = txDecisionPolicy
               , Node.aTxs                  = txs
+              , Node.aMuxCountersInterval  = muxCountersInterval
               }
 
           tracers = mkTracers addr nodeId
@@ -1397,6 +1455,8 @@ diffusionSimulationM
                 , Node.aaPeerSharing         = Node.aPeerSharing arguments
                 , Node.aaPeerMetrics         = peerMetrics
                 , Node.aaTxDecisionPolicy    = Node.aTxDecisionPolicy arguments
+                , Node.aaTxSubmissionConfig  = txSubmissionConfig
+                , Node.aaTxOutboundVersion   = txOutboundVersion
                 , Node.aaTxImpairment        = txImpairment
                 }
 
@@ -1573,6 +1633,11 @@ diffusionSimulationM
                                                    . tracerWithName ntnAddr
                                                    . tracerWithTime
                                                    $ nodeTracer' -- <> sayTracer'
+        , Diffusion.dtMuxCountersTracer            = contramap
+                                                     DiffusionMuxCountersTrace
+                                                 . tracerWithName ntnAddr
+                                                 . tracerWithTime
+                                                 $ nodeTracer' -- <> sayTracer'
       }
 
 

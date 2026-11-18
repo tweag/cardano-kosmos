@@ -69,22 +69,22 @@ import Ouroboros.Consensus.HardFork.Abstract (HasHardForkHistory)
 import Ouroboros.Consensus.HeaderValidation (HeaderWithTime)
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsProtocol
-import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
 import Ouroboros.Consensus.Leios.Types
   ( EndorserBlock
   , LeiosPoint
   , LeiosTx
   , LeiosVote
-  , decodeEndorserBlock
   , decodeLeiosPoint
   , decodeLeiosTx
   , decodeLeiosVote
-  , encodeEndorserBlock
+  , decodeSerialisedEndorserBlock
   , encodeLeiosPoint
   , encodeLeiosTx
   , encodeLeiosVote
+  , encodeSerialisedEndorserBlock
   , maxTxsPerEndorserBlock
   )
+import Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface (MatchedBlock)
 import Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
   ( ChainSyncStateView (..)
@@ -267,7 +267,7 @@ data Handlers m addr blk = Handlers
       NodeToNodeVersion ->
       ControlMessageSTM m ->
       FetchedMetricsTracer m ->
-      BlockFetchClient (HeaderWithTime blk) blk blk m ()
+      BlockFetchClient (HeaderWithTime blk) blk (MatchedBlock blk) m ()
   , hBlockFetchServer ::
       ConnectionId addr ->
       NodeToNodeVersion ->
@@ -342,12 +342,12 @@ data Handlers m addr blk = Handlers
       NodeToNodeVersion ->
       ControlMessageSTM m ->
       ConnectionId addr ->
-      LeiosFetchClientPeer LeiosPoint EndorserBlock LeiosTx m ()
+      LeiosFetchClientPeer LeiosPoint (Serialised EndorserBlock) LeiosTx m ()
   , hLeiosFetchServer ::
       NodeToNodeVersion ->
       ConnectionId addr ->
       LeiosDbReader m ->
-      LeiosFetchServerPeer LeiosPoint EndorserBlock LeiosTx m ()
+      LeiosFetchServerPeer LeiosPoint (Serialised EndorserBlock) LeiosTx m ()
   }
 
 mkHandlers ::
@@ -359,7 +359,6 @@ mkHandlers ::
   , BlockSupportsPeras blk
   , LedgerSupportsMempool blk
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , ConvertRawHash blk
   , HasHardForkHistory blk
   , Ord addrNTN
@@ -385,10 +384,13 @@ mkHandlers
     , getMempool
     , getTopLevelConfig
     , getTracers = tracers
+    , getTxDecisionPolicy
+    , getTxSubmissionConfig
     , getPeerSharingAPI
     , getGsmState
     , getBlockchainTime
     , getLeiosAnnounceState
+    , getLeiosVoteState
     , getLeiosNotifyLog
     }
   txSubmissionLogicVersion =
@@ -424,14 +426,9 @@ mkHandlers
       , hTxSubmissionClient = \version controlMessageSTM peer ->
           txSubmissionOutbound
             (contramap (TraceLabelPeer peer) (Node.txOutboundTracer tracers))
-            ( NumTxIdsToAck $
-                getNumTxIdsToReq $
-                  maxUnacknowledgedTxIds $
-                    txDecisionPolicy $
-                      miniProtocolParameters
-            )
+            (getTxSubmissionConfig version)
             (mapTxSubmissionMempoolReader txForgetValidated $ getMempoolReader getMempool)
-            version
+            (txOutboundVersion version)
             controlMessageSTM
       , hTxSubmissionServer = \version peer ->
           case txSubmissionLogicVersion of
@@ -443,7 +440,7 @@ mkHandlers
                       (Node.txInboundTracer tracers)
                   )
                   txSubmissionInitDelay
-                  (txDecisionPolicy miniProtocolParameters)
+                  getTxDecisionPolicy
                   (getMempoolWriter getMempool)
                   txWireSize
                   api
@@ -452,15 +449,10 @@ mkHandlers
                 txSubmissionInbound
                   (contramap (TraceLabelPeer peer) (Node.txInboundTracer tracers))
                   txSubmissionInitDelay
-                  ( NumTxIdsToAck $
-                      getNumTxIdsToReq $
-                        maxUnacknowledgedTxIds $
-                          txDecisionPolicy $
-                            miniProtocolParameters
-                  )
+                  (getTxSubmissionConfig version)
+                  defaultMaxNumTxsToRequest
                   (mapTxSubmissionMempoolReader txForgetValidated $ getMempoolReader getMempool)
                   (getMempoolWriter getMempool)
-                  version
       , hPerasCertDiffusionClient = \version controlMessageSTM peer ->
           objectDiffusionInbound
             (contramap (TraceLabelPeer peer) (Node.perasCertDiffusionInboundTracer tracers))
@@ -497,11 +489,13 @@ mkHandlers
       , hKeepAliveServer = \_version _peer -> keepAliveServer
       , hPeerSharingClient = \_version controlMessageSTM _peer -> peerSharingClient controlMessageSTM
       , hPeerSharingServer = \_version _peer -> peerSharingServer getPeerSharingAPI
-      , hLeiosNotifyClient = \_version controlMessageSTM _peer ->
+      , hLeiosNotifyClient = \_version controlMessageSTM peer ->
           leiosNotifyClient
+            (contramap (TraceLabelPeer peer) (Node.leiosNotifyClientTracer tracers))
             getTopLevelConfig
             getChainDB
             getLeiosAnnounceState
+            getLeiosVoteState
             getBlockchainTime
             systemTime
             chainSyncFutureCheck
@@ -533,7 +527,7 @@ data Codecs blk addr e m bCS bSCS bBF bSBF bTX bPCD bPVD bKA bPS bLN bLF = Codec
   , cKeepAliveCodec :: Codec KeepAlive e m bKA
   , cPeerSharingCodec :: Codec (PeerSharing addr) e m bPS
   , cLeiosNotifyCodec :: Codec (LeiosNotify LeiosPoint (Header blk) LeiosVote) e m bLN
-  , cLeiosFetchCodec :: AnnotatedCodec (LeiosFetch LeiosPoint EndorserBlock LeiosTx) e m bLF
+  , cLeiosFetchCodec :: Codec (LeiosFetch LeiosPoint (Serialised EndorserBlock) LeiosTx) e m bLF
   }
 
 -- | Protocol codecs for the node-to-node protocols
@@ -626,8 +620,8 @@ defaultCodecs ccfg version encAddr decAddr nodeToNodeVersion =
           maxTxsPerEndorserBlock
           encodeLeiosPoint
           decodeLeiosPoint
-          encodeEndorserBlock
-          decodeEndorserBlock
+          encodeSerialisedEndorserBlock
+          decodeSerialisedEndorserBlock
           encodeLeiosTx
           decodeLeiosTx
     }
@@ -656,7 +650,7 @@ identityCodecs ::
     (AnyMessage KeepAlive)
     (AnyMessage (PeerSharing addr))
     (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
-    (AnyMessage (LeiosFetch LeiosPoint EndorserBlock LeiosTx))
+    (AnyMessage (LeiosFetch LeiosPoint (Serialised EndorserBlock) LeiosTx))
 identityCodecs =
   Codecs
     { cChainSyncCodec = codecChainSyncId
@@ -669,7 +663,7 @@ identityCodecs =
     , cKeepAliveCodec = codecKeepAliveId
     , cPeerSharingCodec = codecPeerSharingId
     , cLeiosNotifyCodec = codecLeiosNotifyId
-    , cLeiosFetchCodec = hoistAnnotation (Annotator . const) codecLeiosFetchId
+    , cLeiosFetchCodec = codecLeiosFetchId
     }
 
 {-------------------------------------------------------------------------------
@@ -697,7 +691,7 @@ data Tracers' peer ntnAddr blk e f = Tracers
   , tLeiosNotifyTracer ::
       f (TraceLabelPeer peer (TraceSendRecv (LeiosNotify LeiosPoint (Header blk) LeiosVote)))
   , tLeiosFetchTracer ::
-      f (TraceLabelPeer peer (TraceSendRecv (LeiosFetch LeiosPoint EndorserBlock LeiosTx)))
+      f (TraceLabelPeer peer (TraceSendRecv (LeiosFetch LeiosPoint (Serialised EndorserBlock) LeiosTx)))
   }
 
 instance (forall a. Semigroup (f a)) => Semigroup (Tracers' peer ntnAddr blk e f) where
@@ -933,7 +927,6 @@ mkApps ::
   , Ord addrNTN
   , Exception e
   , NFData e
-  , Monoid bLF
   , LedgerSupportsProtocol blk
   , BlockSupportsPeras blk
   , ShowProxy blk
@@ -1149,6 +1142,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
       Right newTxSubmissionServer ->
         withPeer
           (getTxDecisionPolicy kernel)
+          (getTxSubmissionConfig kernel version)
           ( mapTxSubmissionMempoolReader txForgetValidated $
               getMempoolReader (getMempool kernel)
           )
@@ -1395,7 +1389,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
     channel = do
       labelThisThread "LeiosFetchClient"
       ((), trailing) <-
-        runAnnotatedPeerWithLimits
+        runPeerWithLimits
           (TraceLabelPeer them `contramap` tLeiosFetchTracer)
           (cLeiosFetchCodec (mkCodecs version))
           blLeiosFetch
@@ -1419,7 +1413,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
         (catchAndRethrow tracer TraceLeiosFetchServerOpenReaderDbFailure (openReader getLeiosDB))
         closeReader
         $ \reader ->
-          runAnnotatedPeerWithLimits
+          runPeerWithLimits
             (TraceLabelPeer them `contramap` tLeiosFetchTracer)
             (cLeiosFetchCodec (mkCodecs version))
             blLeiosFetch

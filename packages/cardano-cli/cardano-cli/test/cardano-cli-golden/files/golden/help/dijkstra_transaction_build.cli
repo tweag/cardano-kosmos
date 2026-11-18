@@ -5,14 +5,12 @@ Usage: cardano-cli dijkstra transaction build
                                                 | --testnet-magic NATURAL
                                                 )
                                                 --socket-path SOCKET_PATH
-                                                [ --script-valid
-                                                | --script-invalid
-                                                ]
                                                 [--witness-override WORD]
                                                 (--tx-in TX_IN
                                                   [ --spending-tx-in-reference TX_IN
                                                     ( --spending-plutus-script-v2
                                                     | --spending-plutus-script-v3
+                                                    | --spending-plutus-script-v4
                                                     )
                                                     [ --spending-reference-tx-in-datum-cbor-file CBOR_FILE
                                                     | --spending-reference-tx-in-datum-file JSON_FILE
@@ -39,6 +37,20 @@ Usage: cardano-cli dijkstra transaction build
                                                 [--read-only-tx-in-reference TX_IN]
                                                 [ --required-signer FILEPATH
                                                 | --required-signer-hash HASH
+                                                | --guard-script-file FILEPATH
+                                                  [ --guard-redeemer-cbor-file CBOR_FILE
+                                                  | --guard-redeemer-file JSON_FILE
+                                                  | --guard-redeemer-value JSON_VALUE
+                                                  ]
+                                                | --simple-guard-script-tx-in-reference TX_IN
+                                                  --guard-script-hash HASH
+                                                | --guard-tx-in-reference TX_IN
+                                                  --guard-plutus-script-v4
+                                                  --guard-script-hash HASH
+                                                  ( --guard-redeemer-cbor-file CBOR_FILE
+                                                  | --guard-redeemer-file JSON_FILE
+                                                  | --guard-redeemer-value JSON_VALUE
+                                                  )
                                                 ]
                                                 [--tx-in-collateral TX_IN]
                                                 [--tx-out-return-collateral ADDRESS VALUE]
@@ -68,6 +80,7 @@ Usage: cardano-cli dijkstra transaction build
                                                   | --mint-tx-in-reference TX_IN
                                                     ( --mint-plutus-script-v2
                                                     | --mint-plutus-script-v3
+                                                    | --mint-plutus-script-v4
                                                     )
                                                     ( --mint-reference-tx-in-redeemer-cbor-file CBOR_FILE
                                                     | --mint-reference-tx-in-redeemer-file JSON_FILE
@@ -86,6 +99,7 @@ Usage: cardano-cli dijkstra transaction build
                                                   | --certificate-tx-in-reference TX_IN
                                                     ( --certificate-plutus-script-v2
                                                     | --certificate-plutus-script-v3
+                                                    | --certificate-plutus-script-v4
                                                     )
                                                     ( --certificate-reference-tx-in-redeemer-cbor-file CBOR_FILE
                                                     | --certificate-reference-tx-in-redeemer-file JSON_FILE
@@ -101,12 +115,16 @@ Usage: cardano-cli dijkstra transaction build
                                                   | --withdrawal-tx-in-reference TX_IN
                                                     ( --withdrawal-plutus-script-v2
                                                     | --withdrawal-plutus-script-v3
+                                                    | --withdrawal-plutus-script-v4
                                                     )
                                                     ( --withdrawal-reference-tx-in-redeemer-cbor-file CBOR_FILE
                                                     | --withdrawal-reference-tx-in-redeemer-file JSON_FILE
                                                     | --withdrawal-reference-tx-in-redeemer-value JSON_VALUE
                                                     )
                                                   ]]
+                                                [--direct-deposit STAKE_ADDRESS+LOVELACE]
+                                                [--account-balance-interval STAKE_ADDRESS{=LOVELACE|>=LOWER|<UPPER|>=LOWER,<UPPER}]
+                                                [--starting-account-balance-interval STAKE_ADDRESS{=LOVELACE|>=LOWER|<UPPER|>=LOWER,<UPPER}]
                                                 [ --json-metadata-no-schema
                                                 | --json-metadata-detailed-schema
                                                 ]
@@ -121,7 +139,9 @@ Usage: cardano-cli dijkstra transaction build
                                                     | --vote-redeemer-value JSON_VALUE
                                                     ]
                                                   | --vote-tx-in-reference TX_IN
-                                                    --vote-plutus-script-v3
+                                                    ( --vote-plutus-script-v3
+                                                    | --vote-plutus-script-v4
+                                                    )
                                                     ( --vote-reference-tx-in-redeemer-cbor-file CBOR_FILE
                                                     | --vote-reference-tx-in-redeemer-file JSON_FILE
                                                     | --vote-reference-tx-in-redeemer-value JSON_VALUE
@@ -134,7 +154,9 @@ Usage: cardano-cli dijkstra transaction build
                                                     | --proposal-redeemer-value JSON_VALUE
                                                     ]
                                                   | --proposal-tx-in-reference TX_IN
-                                                    --proposal-plutus-script-v3
+                                                    ( --proposal-plutus-script-v3
+                                                    | --proposal-plutus-script-v4
+                                                    )
                                                     ( --proposal-reference-tx-in-redeemer-cbor-file CBOR_FILE
                                                     | --proposal-reference-tx-in-redeemer-file JSON_FILE
                                                     | --proposal-reference-tx-in-redeemer-value JSON_VALUE
@@ -166,10 +188,6 @@ Available options:
                            CARDANO_NODE_SOCKET_PATH environment variable. The
                            argument is optional if CARDANO_NODE_SOCKET_PATH is
                            defined and mandatory otherwise.
-  --script-valid           Assertion that the script is valid. (default)
-  --script-invalid         Assertion that the script is invalid. If a
-                           transaction is submitted with such a script, the
-                           script will fail and the collateral will be taken.
   --witness-override WORD  Specify and override the number of witnesses the
                            transaction requires.
   --tx-in TX_IN            TxId#TxIx
@@ -180,6 +198,8 @@ Available options:
                            Specify a plutus script v2 reference script.
   --spending-plutus-script-v3
                            Specify a plutus script v3 reference script.
+  --spending-plutus-script-v4
+                           Specify a plutus script v4 reference script.
   --spending-reference-tx-in-datum-cbor-file CBOR_FILE
                            The script datum file. The file has to be in CBOR
                            format.
@@ -240,6 +260,45 @@ Available options:
   --required-signer-hash HASH
                            Hash of the verification key (zero or more) whose
                            signature is required.
+  --guard-script-file FILEPATH
+                           Native or Plutus V4 script whose approval this
+                           transaction requires. Plutus guards require a
+                           redeemer; native guards accept neither redeemers nor
+                           execution units.
+  --guard-redeemer-cbor-file CBOR_FILE
+                           Redeemer file for the preceding Plutus V4 guard. The
+                           file has to be in CBOR format.
+  --guard-redeemer-file JSON_FILE
+                           Redeemer file for the preceding Plutus V4 guard. The
+                           file must follow the detailed JSON schema for script
+                           data.
+  --guard-redeemer-value JSON_VALUE
+                           Redeemer for the preceding Plutus V4 guard. There is
+                           no schema: (almost) any JSON value is supported,
+                           including top-level strings and numbers.
+  --simple-guard-script-tx-in-reference TX_IN
+                           TxId#TxIx - Specify a reference input. The reference
+                           input must have a native reference script attached.
+  --guard-script-hash HASH Hash of the guard script at the preceding reference
+                           input.
+  --guard-tx-in-reference TX_IN
+                           TxId#TxIx - Specify a reference input. The reference
+                           input must have a Plutus V4 reference script
+                           attached.
+  --guard-plutus-script-v4 Specify a plutus script v4 reference script.
+  --guard-script-hash HASH Hash of the guard script at the preceding reference
+                           input.
+  --guard-redeemer-cbor-file CBOR_FILE
+                           Redeemer file for the preceding Plutus V4 guard. The
+                           file has to be in CBOR format.
+  --guard-redeemer-file JSON_FILE
+                           Redeemer file for the preceding Plutus V4 guard. The
+                           file must follow the detailed JSON schema for script
+                           data.
+  --guard-redeemer-value JSON_VALUE
+                           Redeemer for the preceding Plutus V4 guard. There is
+                           no schema: (almost) any JSON value is supported,
+                           including top-level strings and numbers.
   --tx-in-collateral TX_IN TxId#TxIx
   --tx-out-return-collateral ADDRESS VALUE
                            The transaction output as ADDRESS VALUE where ADDRESS
@@ -324,6 +383,7 @@ Available options:
                            input must have a plutus reference script attached.
   --mint-plutus-script-v2  Specify a plutus script v2 reference script.
   --mint-plutus-script-v3  Specify a plutus script v3 reference script.
+  --mint-plutus-script-v4  Specify a plutus script v4 reference script.
   --mint-reference-tx-in-redeemer-cbor-file CBOR_FILE
                            The script redeemer file. The file has to be in CBOR
                            format.
@@ -362,6 +422,8 @@ Available options:
                            Specify a plutus script v2 reference script.
   --certificate-plutus-script-v3
                            Specify a plutus script v3 reference script.
+  --certificate-plutus-script-v4
+                           Specify a plutus script v4 reference script.
   --certificate-reference-tx-in-redeemer-cbor-file CBOR_FILE
                            The script redeemer file. The file has to be in CBOR
                            format.
@@ -396,6 +458,8 @@ Available options:
                            Specify a plutus script v2 reference script.
   --withdrawal-plutus-script-v3
                            Specify a plutus script v3 reference script.
+  --withdrawal-plutus-script-v4
+                           Specify a plutus script v4 reference script.
   --withdrawal-reference-tx-in-redeemer-cbor-file CBOR_FILE
                            The script redeemer file. The file has to be in CBOR
                            format.
@@ -406,6 +470,29 @@ Available options:
                            The script redeemer value. There is no schema:
                            (almost) any JSON value is supported, including
                            top-level strings and numbers.
+  --direct-deposit STAKE_ADDRESS+LOVELACE
+                           Deposit ADA into a registered account. Amount in
+                           lovelace; each account may occur once.
+  --account-balance-interval STAKE_ADDRESS{=LOVELACE|>=LOWER|<UPPER|>=LOWER,<UPPER}
+                           Require the account balance to satisfy this interval
+                           before applying this transaction's withdrawals,
+                           certificates, or direct deposits. Top-level
+                           transactions check the balance after all
+                           sub-transactions; each sub-transaction checks the
+                           balance after any preceding sub-transactions. Amounts
+                           in lovelace; lower bounds inclusive, upper bounds
+                           exclusive. Quote the argument so the shell treats <
+                           and > as literal characters, e.g.
+                           'stake_test1...>=100,<200'. Each account may occur
+                           once per option.
+  --starting-account-balance-interval STAKE_ADDRESS{=LOVELACE|>=LOWER|<UPPER|>=LOWER,<UPPER}
+                           Check the account balance before the entire
+                           transaction, including all sub-transactions.
+                           Top-level only. Amounts in lovelace; lower bounds
+                           inclusive, upper bounds exclusive. Quote the argument
+                           so the shell treats < and > as literal characters,
+                           e.g. 'stake_test1...>=100,<200'. Each account may
+                           occur once per option.
   --json-metadata-no-schema
                            Use the "no schema" conversion from JSON to tx
                            metadata (default).
@@ -435,6 +522,7 @@ Available options:
                            TxId#TxIx - Specify a reference input. The reference
                            input must have a plutus reference script attached.
   --vote-plutus-script-v3  Specify a plutus script v3 reference script.
+  --vote-plutus-script-v4  Specify a plutus script v4 reference script.
   --vote-reference-tx-in-redeemer-cbor-file CBOR_FILE
                            The script redeemer file. The file has to be in CBOR
                            format.
@@ -463,6 +551,8 @@ Available options:
                            input must have a plutus reference script attached.
   --proposal-plutus-script-v3
                            Specify a plutus script v3 reference script.
+  --proposal-plutus-script-v4
+                           Specify a plutus script v4 reference script.
   --proposal-reference-tx-in-redeemer-cbor-file CBOR_FILE
                            The script redeemer file. The file has to be in CBOR
                            format.

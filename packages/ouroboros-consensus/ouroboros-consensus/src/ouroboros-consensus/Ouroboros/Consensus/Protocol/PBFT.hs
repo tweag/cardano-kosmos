@@ -11,8 +11,9 @@
 {-# LANGUAGE TypeFamilyDependencies #-}
 {-# LANGUAGE UndecidableInstances #-}
 -- We have a few orphan instances here: the @Ticked (PBftState c)@ data family
--- instance (whose type lives in Protocol.PBFT.State) and its ticked form.
--- Removing them would force us to reorganize the Protocol.* modules. TODO eventually.
+-- instance, and the Peras @ChainDepStateSupportsPeras@ instances for @PBftState@
+-- (whose type lives in Protocol.PBFT.State) and its ticked form. Removing them
+-- would force us to reorganize the Protocol.* modules. TODO eventually.
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Ouroboros.Consensus.Protocol.PBFT
@@ -294,6 +295,10 @@ data instance Ticked (PBftState c) = TickedPBftState
   { getPBftLedgerView :: LedgerView (PBft c)
   , getTickedPBftState :: PBftState c
   }
+
+instance ChainDepStateSupportsPeras (PBftState c)
+
+instance ChainDepStateSupportsPeras (Ticked (PBftState c))
 
 instance PBftCrypto c => LeiosProtocol (PBft c) where
   getLeiosAnnouncement = defaultGetLeiosAnnouncement

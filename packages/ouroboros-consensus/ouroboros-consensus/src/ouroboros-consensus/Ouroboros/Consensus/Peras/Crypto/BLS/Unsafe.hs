@@ -19,7 +19,7 @@ module Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
   , unsafeExtendPerasStakeDistrWithPublicKeysFromEnv
   , unsafePerasBLSPublicKeysFromEnv
   ) where
-
+ 
 import Cardano.Ledger.State (IndividualPoolStake (..), PoolDistr (..))
 import Data.Aeson (eitherDecodeFileStrict')
 import qualified Data.Aeson as Aeson
@@ -35,10 +35,10 @@ import Ouroboros.Consensus.Committee.Types (LedgerStake (..), PoolId (..))
 import Ouroboros.Consensus.Peras.Crypto.BLS (PerasPrivateKey (..), PerasPublicKey (..))
 import System.Environment (lookupEnv)
 import System.IO.Unsafe (unsafePerformIO)
-
+ 
 keyScope :: BLS.KeyScope
 keyScope = "TESTNET"
-
+ 
 -- | Read a private key from the environment variable 'PERAS_PRIVATE_KEY'
 unsafePerasBLSPrivateKeyFromEnv :: Either String PerasPrivateKey
 unsafePerasBLSPrivateKeyFromEnv =
@@ -91,7 +91,7 @@ unsafeExtendPerasStakeDistrWithPublicKeysFromEnv poolDistr = do
     . Map.mapKeysMonotonic PoolId
     . unPoolDistr
     $ poolDistr
-
+ 
 -- | Retrieve the BLS public keys for the Peras committee members from a JSON
 -- file specified in the environment variable 'PERAS_PRIVATE_KEYS_FILE'.
 --
@@ -110,7 +110,7 @@ unsafePerasBLSPublicKeysFromEnv =
             pure $ Left $ "Failed to parse public keys from file: " <> err
           Right rawObjs -> do
             pure $ traverse decodeKey (Map.mapKeysMonotonic PoolId $ rawObjs)
- where
+  where
   envVar =
     "PERAS_PRIVATE_KEYS_FILE"
 

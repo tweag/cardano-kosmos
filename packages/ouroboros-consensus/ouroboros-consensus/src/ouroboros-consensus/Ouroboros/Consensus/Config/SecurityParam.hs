@@ -5,6 +5,7 @@
 
 module Ouroboros.Consensus.Config.SecurityParam
   ( SecurityParam (..)
+  , maxRollbackWeight
   ) where
 
 import Cardano.Binary
@@ -12,6 +13,7 @@ import Cardano.Ledger.BaseTypes.NonZero
 import Data.Word
 import GHC.Generics (Generic)
 import NoThunks.Class (NoThunks)
+import Ouroboros.Consensus.Block.SupportsPeras (PerasWeight (..))
 import Quiet
 
 -- | Protocol security parameter
@@ -36,3 +38,7 @@ import Quiet
 newtype SecurityParam = SecurityParam {maxRollbacks :: NonZero Word64}
   deriving (Eq, Generic, NoThunks, ToCBOR, FromCBOR)
   deriving Show via Quiet SecurityParam
+
+-- | The maximum amount of weight we can roll back.
+maxRollbackWeight :: SecurityParam -> PerasWeight
+maxRollbackWeight = PerasWeight . unNonZero . maxRollbacks

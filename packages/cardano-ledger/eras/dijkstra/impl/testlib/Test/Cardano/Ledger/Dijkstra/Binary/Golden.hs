@@ -18,6 +18,7 @@ import Cardano.Ledger.Alonzo.TxWits (Redeemers)
 import Cardano.Ledger.BaseTypes (Version)
 import Cardano.Ledger.Binary (
   Annotator,
+  DecCBOR,
   DecoderError (..),
   DeserialiseFailure (..),
   Tokens (..),
@@ -26,45 +27,123 @@ import Cardano.Ledger.Binary (
 import qualified Cardano.Ledger.Binary as Binary
 import qualified Cardano.Ledger.Binary.Plain as Plain
 import Cardano.Ledger.Coin (Coin (..))
+import Cardano.Ledger.Credential (Credential (..))
 import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.Tx (DijkstraTopTx)
+import Cardano.Ledger.Keys (WitVKey (..))
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (..))
 import Cardano.Ledger.Plutus (SLanguage (..))
 import Cardano.Ledger.TxIn (TxIn (..))
+import Control.Monad (forM_)
+import qualified Data.ByteString as BS
 import Data.Data (Proxy (..))
+import Data.List (isSuffixOf)
 import qualified Data.OMap.Strict as OMap
+import qualified Data.OSet.Strict as OSet
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
+import Data.Typeable (Typeable)
 import Lens.Micro
 import Test.Cardano.Ledger.Alonzo.Arbitrary (alwaysSucceedsLang)
 import Test.Cardano.Ledger.Binary.Plain.Golden (Enc (..))
-import Test.Cardano.Ledger.Common (Spec, ToExpr, describe, expectRight, it, shouldBe)
+import Test.Cardano.Ledger.Common (Spec, ToExpr, describe, expectRight, it, shouldBe, shouldSatisfy)
 import Test.Cardano.Ledger.Conway.Binary.Golden hiding (spec)
-import Test.Cardano.Ledger.Core.KeyPair (mkKeyPair, mkWitnessVKey)
+import Test.Cardano.Ledger.Core.KeyPair (mkKeyHash, mkKeyPair, mkWitnessVKey)
 import Test.Cardano.Ledger.Core.Utils (mkDummySafeHash)
 import Test.Cardano.Ledger.Dijkstra.Era (DijkstraEraTest)
 import Test.Cardano.Ledger.Imp.Common (forEachEraVersion)
 
-spec :: forall era. (DijkstraEraTest era, ToExpr (BlockBody era)) => Spec
+spec ::
+  forall era.
+  (DijkstraEraTest era, ToExpr (BlockBody era), DecCBOR (Annotator (Tx TopTx era))) =>
+  Spec
 spec = describe "Golden" . forEachEraVersion @era $ \version -> do
   describe "Redeemers" $ do
     goldenListRedeemersDisallowed @era version
+    goldenMapRedeemers @era version
   describe "TxCert" $ do
     conwayDecodeDuplicateDelegCertFails @era version
   describe "TxWits" $ do
     goldenDuplicateVKeyWitsDisallowed @era version
+    goldenBootstrapDuplicateWitsDisallowed @era version
     goldenDuplicateNativeScriptsDisallowed @era version
     goldenDuplicatePlutusScriptsDisallowed @era version SPlutusV1
     goldenDuplicatePlutusScriptsDisallowed @era version SPlutusV2
     goldenDuplicatePlutusScriptsDisallowed @era version SPlutusV3
     goldenDuplicatePlutusScriptsDisallowed @era version SPlutusV4
     goldenDuplicatePlutusDataDisallowed @era version
+    goldenDuplicateRedeemersDisallowed @era version
     goldenEmptyFields @era version
+  goldenGuards @era version
   describe "Subtransactions" $ do
     goldenSubTransactions @era
   describe "IsPhase2Valid flag" $ do
     goldenIsPhase2ValidFlag @era
   describe "Block transactions" $ do
     goldenBlockTransaction @era
+
+goldenGuards :: forall era. DijkstraEraTest era => Version -> Spec
+goldenGuards version = describe "Guards" $ do
+  describe "TopTx" $ atLevel @TopTx STopTx
+  describe "SubTx" $ atLevel @SubTx SSubTx
+  where
+    atLevel :: forall l. Typeable l => STxBothLevels l era -> Spec
+    atLevel level = do
+      let
+        keyHash = mkKeyHash @Guard 0
+        credential = KeyHashObj keyHash
+        expected = mkBasicTxBody @era @l & guardsTxBodyL .~ OSet.singleton credential
+        txBodyEnc guards =
+          let
+            fields =
+              [ Em [E @Int 0, Ev version $ Set.empty @TxIn]
+              , Em [E @Int 1, E $ TkListLen 0]
+              ]
+                <> (case level of STopTx -> [Em [E @Int 2, E $ Coin 0]]; SSubTx -> [])
+                <> maybe [] (\value -> [Em [E @Int 14, value]]) guards
+           in
+            Em $ E (TkMapLen $ fromIntegral $ length fields) : fields
+        tagForms =
+          [ ("Untagged", id)
+          , ("Tagged", \value -> Em [E $ TkTag 258, value])
+          ]
+        listForms =
+          [ ("Definite", \values -> Em [E $ TkListLen $ fromIntegral $ length values, Em values])
+          , ("Indefinite", \values -> Em [E TkListBegin, Em values, E TkBreak])
+          ]
+        elementForms =
+          [ ("Legacy key hashes", Ev version keyHash)
+          , ("Credentials", Ev version credential)
+          ]
+      it "Omitted guards retain the empty default" $
+        expectDecoderResultOn @(TxBody l era)
+          version
+          (txBodyEnc Nothing)
+          (mkBasicTxBody @era @l)
+          (^. guardsTxBodyL)
+      forM_ tagForms $ \(tagName, tag) ->
+        describe tagName $
+          forM_ listForms $ \(listName, list) ->
+            describe listName $ do
+              it "Explicitly empty guards are rejected" $
+                decodeEnc @(TxBody l era) version (txBodyEnc $ Just $ tag $ list [])
+                  `shouldSatisfy` isFailureWith "TxBody: 'Guards' must be non-empty when supplied"
+              forM_ elementForms $ \(elementName, element) ->
+                describe elementName $ do
+                  it "Nonempty guards decode as expected" $
+                    expectDecoderResultOn @(TxBody l era)
+                      version
+                      (txBodyEnc $ Just $ tag $ list [element])
+                      expected
+                      (^. guardsTxBodyL)
+                  it "Duplicate guards are rejected" $
+                    decodeEnc @(TxBody l era) version (txBodyEnc $ Just $ tag $ list [element, element])
+                      `shouldSatisfy` isFailureWith
+                        "Final number of elements: 1 does not match the total count that was decoded: 2"
+    isFailureWith :: String -> Either DecoderError a -> Bool
+    isFailureWith expected (Left (DecoderErrorDeserialiseFailure _ (DeserialiseFailure _ message))) =
+      expected `isSuffixOf` message
+    isFailureWith _ _ = False
 
 goldenEmptyFields :: forall era. DijkstraEraTest era => Version -> Spec
 goldenEmptyFields version =
@@ -125,6 +204,27 @@ witsDuplicateVKeyWits =
   where
     vkeywit = mkWitnessVKey (mkDummySafeHash 0) (mkKeyPair 0)
 
+bootstrapDuplicateWits :: Enc
+bootstrapDuplicateWits =
+  Em
+    [ E $ TkMapLen 1
+    , E @Int 2
+    , E $ TkTag 258
+    , E $ TkListLen 2
+    , bootstrapWitness
+    , bootstrapWitness
+    ]
+  where
+    WitVKey vkey signature = mkWitnessVKey (mkDummySafeHash 0) (mkKeyPair 0)
+    bootstrapWitness =
+      Em
+        [ E $ TkListLen 4
+        , Ev shelleyProtVer vkey
+        , Ev shelleyProtVer signature
+        , E $ BS.replicate 32 0
+        , E BS.empty
+        ]
+
 witsDuplicateNativeScripts :: Enc
 witsDuplicateNativeScripts =
   mconcat
@@ -177,6 +277,25 @@ witsDuplicatePlutusData =
   where
     dat = E @Int 0
 
+witsDuplicateRedeemers :: Enc
+witsDuplicateRedeemers =
+  mconcat
+    [ E $ TkMapLen 1
+    , E @Int 5
+    , Em
+        [ E $ TkMapLen 2
+        , redeemer
+        , redeemer
+        ]
+    ]
+  where
+    -- [spend, index 10] => [data 20, ex_units [30, 40]]
+    redeemer =
+      mconcat
+        [ Em [E $ TkListLen 2, E @Int 0, E @Int 10]
+        , Em [E $ TkListLen 2, E @Int 20, Em [E $ TkListLen 2, E @Int 30, E @Int 40]]
+        ]
+
 goldenListRedeemersDisallowed :: forall era. DijkstraEraTest era => Version -> Spec
 goldenListRedeemersDisallowed version =
   it "Decoding Redeemers encoded as a list fails" $
@@ -198,6 +317,21 @@ goldenDuplicateVKeyWitsDisallowed version =
           (Binary.label $ Proxy @(Annotator (TxWits era)))
           ( DeserialiseFailure
               208
+              "Final number of elements: 1 does not match the total count that was decoded: 2"
+          )
+      )
+
+goldenBootstrapDuplicateWitsDisallowed :: forall era. DijkstraEraTest era => Version -> Spec
+goldenBootstrapDuplicateWitsDisallowed version =
+  it "Decoding a TxWits with duplicate bootstrap witnesses fails" $
+    expectDecoderFailureAnn @(TxWits era)
+      version
+      bootstrapDuplicateWits
+      ( DecoderErrorDeserialiseFailure
+          (Binary.label $ Proxy @(Annotator (TxWits era)))
+          -- Six bytes of framing followed by two 136-byte witnesses.
+          ( DeserialiseFailure
+              278
               "Final number of elements: 1 does not match the total count that was decoded: 2"
           )
       )
@@ -241,6 +375,20 @@ goldenDuplicatePlutusDataDisallowed version =
       ( DecoderErrorCustom
           "Annotator"
           "Duplicates found, expected no duplicates"
+      )
+
+goldenDuplicateRedeemersDisallowed :: forall era. DijkstraEraTest era => Version -> Spec
+goldenDuplicateRedeemersDisallowed version =
+  it "Decoding a TxWits with duplicate redeemer keys fails" $
+    expectDecoderFailureAnn @(TxWits era)
+      version
+      witsDuplicateRedeemers
+      ( DecoderErrorDeserialiseFailure
+          (Binary.label $ Proxy @(Annotator (TxWits era)))
+          ( DeserialiseFailure
+              23
+              "Final number of elements: 1 does not match the total count that was decoded: 2"
+          )
       )
 
 goldenSubTransactions :: forall era. DijkstraEraTest era => Spec
@@ -297,29 +445,31 @@ goldenSubTransactions = do
 
 goldenIsPhase2ValidFlag :: forall era. DijkstraEraTest era => Spec
 goldenIsPhase2ValidFlag = do
-  it "Deserialize transactions with missing `isPhase2Valid` flag" $
-    expectDecoderResultOn @(Tx TopTx era)
+  it "Deserialize mempool transactions with missing `isPhase2Valid` flag" $
+    expectDecoderResultOn @(MempoolTx era)
       version
       txWithoutFlagEnc
       basicValidTx
       id
-  it "Deserialize transactions with `isPhase2Valid` flag set to true" $
-    expectDecoderResultOn @(Tx TopTx era)
+  it "Deserialize mempool transactions with `isPhase2Valid` flag set to true" $
+    expectDecoderResultOn @(MempoolTx era)
       version
       txWithFlagTrueEnc
       basicValidTx
       id
-  it "Fail to deserialize transactions with `isPhase2Valid` flag set to false" $
-    expectDecoderFailureAnn @(Tx TopTx era)
+  it "Fail to deserialize mempool transactions with `isPhase2Valid` flag set to false" $
+    expectDecoderFailureAnn @(MempoolTx era)
       version
       txWithFlagFalseEnc
       ( DecoderErrorDeserialiseFailure
-          "Annotator (Tx TopTx DijkstraEra)"
+          "Annotator (MempoolTx DijkstraEra)"
           (DeserialiseFailure 13 "Value `false` not allowed for `isPhase2Valid`")
       )
   where
     version = eraProtVerLow @era
-    basicValidTx = mkBasicTx @era @TopTx (mkBasicTxBody @era @TopTx) & isPhase2ValidTxL .~ Phase2Valid
+    basicValidTx =
+      UnsafeMkMempoolTx $
+        mkBasicTx @era @TopTx (mkBasicTxBody @era @TopTx) & isPhase2ValidTxL .~ Phase2Valid
     txWithoutFlagEnc =
       mconcat
         [ E $ TkListLen 3
@@ -352,7 +502,9 @@ goldenIsPhase2ValidFlag = do
         ]
 
 goldenBlockTransaction ::
-  forall era. (DijkstraEraTest era, ToExpr (BlockBody era)) => Spec
+  forall era.
+  (DijkstraEraTest era, ToExpr (BlockBody era), DecCBOR (Annotator (Tx TopTx era))) =>
+  Spec
 goldenBlockTransaction = do
   it "Deserialize a block body with a valid transaction" $
     expectDecoderResultOn @(BlockBody era)
@@ -365,6 +517,12 @@ goldenBlockTransaction = do
       version
       (blockBodyEnc False)
       (blockBodyWithFlag Phase2Invalid)
+      id
+  it "Deserialize a transaction in the block format with `isPhase2Valid` set to false" $
+    expectDecoderResultOn @(Tx TopTx era)
+      version
+      (txInBlockEnc False)
+      (mkBasicTx @era @TopTx (mkBasicTxBody @era @TopTx) & isPhase2ValidTxL .~ Phase2Invalid)
       id
   it "Fail to deserialize a block transaction with `isPhase2Valid` before auxiliary data" $
     expectDecoderFailureAnn @(BlockBody era)

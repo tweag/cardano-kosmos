@@ -1,11 +1,34 @@
 # Version history for `cardano-ledger-alonzo`
 
-## 1.18.0.0
+## 1.19.0.0
 
-*
+* Add `asatUTxO` field to `AlonzoStAnnTx`
+* Replace the `Tx l era` argument of `validateExUnitsTooBigUTxO` with `StAnnTx TopTx era`
+* Add `ExUnits` argument to `alonzoMinFeeTx`
+* Add `asatExUnits` field to `AlonzoStAnnTx`
+* Add `exUnitsStAnnTx` method to `AlonzoEraUTxO`
+* Add `exUnitsAlonzoStAnnTx`
+* Add `asatRefScriptsSize` field to `AlonzoStAnnTx`
+* Add `Int` argument to the signature of `mkAlonzoStAnnTx`
+* Add `refScriptsSizeStAnnTx` method to `AlonzoEraUTxO`
+* Add `refScriptsSizeAlonzoStAnnTx`
+* Replace `TranslateEra AlonzoEra (Tx TopTx)` with `TranslateEra AlonzoEra MempoolTx`
+* Move `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances from `Tx l AlonzoEra` to `MempoolTx AlonzoEra`
+* Generalize the `wireSizeTxF` re-export and remove the `binaryUpgradeTx` re-export from `Cardano.Ledger.Alonzo.Core`
+* Change the `STS` state of `LEDGER` rule to `LedgerStateWithLimits`
+* Add `AlonzoBlockBodyLimits`, `abblTxsSize`, `abblExUnits`
+* Reject duplicate keys in the map encoding of `Redeemers`, starting with protocol version 12
 
 ### `testlib`
 
+* Add `mkTestLedgerTxInfoWithScripts`
+* Restrict `mkTestLedgerTxInfo` to `TopTx` transactions
+* Add `Arbitrary` instance for `MempoolTx AlonzoEra`
+* Replace the `DecCBOR` instance for `Tx TopTx AlonzoEra` with one for `MempoolTx AlonzoEra`
+* Change the CBOR instance constraints of `TranslationInstance` to use `MempoolTx era` instead of `Tx TopTx era`
+* Add an `EncCBOR (MempoolTx era)` constraint to `generateGoldenFile`
+* Replace the `DecCBOR (Tx TopTx era)` constraint on `assertTranslationResultsMatchGolden` and `deserializeTranslationInstances` with `DecCBOR (MempoolTx era)`
+* Add `freshAssetOutput`, `restrictMaxValSizeToAdaOnly` and `outputTooBigEntry`
 * Add `Test.Cardano.Ledger.Alonzo.TxInfoSpec` module with:
   - `genGoodBound`
   - `genBadBound`
@@ -19,6 +42,10 @@
 * Change `mkTxWithPlutusAndBootstrapAddress` and `mkTokenMintingTx` to return `AnyLevelTx`
 * Add `DecCBOR` instances for `PlutusData` and `Data`
 * Add `mkTokenMintingTx`
+
+## 1.18.0.0
+
+* Require `Inject (AlonzoContextError era) (ContextError era)` constraint on `mkAlonzoStAnnTx`, `mkPlutusWithContext`, `collectPlutusScriptsWithContext`, `scriptsWithContextFromLedgerTxInfo`, `scriptsWithContextFromLedgerTxInfoWithResult`, `evalTxExUnits`, `evalTxExUnitsWithLogs`
 
 ## 1.17.0.0
 

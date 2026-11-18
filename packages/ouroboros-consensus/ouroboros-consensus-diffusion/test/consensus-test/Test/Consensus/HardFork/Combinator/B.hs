@@ -35,7 +35,7 @@ module Test.Consensus.HardFork.Combinator.B
   ) where
 
 import Cardano.Binary (DecoderError, FromCBOR (..), ToCBOR (..))
-import Cardano.Ledger.BaseTypes (Nonce (NeutralNonce), unNonZero)
+import Cardano.Ledger.BaseTypes (unNonZero)
 import qualified Codec.CBOR.Decoding as CBOR
 import qualified Codec.CBOR.Encoding as CBOR
 import Codec.Serialise
@@ -67,6 +67,7 @@ import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.Query
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsPeerSelection
+import Ouroboros.Consensus.Ledger.SupportsPeras (LedgerStateSupportsPeras)
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
 import Ouroboros.Consensus.Leios.Protocol
@@ -83,7 +84,6 @@ import Ouroboros.Consensus.Node.Serialisation
 import Ouroboros.Consensus.Peras.Cert.Mock (MockPerasCert)
 import Ouroboros.Consensus.Peras.Context
   ( StateSupportsPerasEpochContext (..)
-  , dummyPoolDistr
   , mkBoundedPerasEpochContextWith
   )
 import Ouroboros.Consensus.Peras.Crypto.Mock
@@ -296,7 +296,12 @@ instance BlockSupportsProtocol BlockB where
 
 instance LedgerSupportsProtocol BlockB where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
+
+instance LedgerStateSupportsPeras (LedgerState BlockB)
+
+instance LedgerStateSupportsPeras (Ticked LedgerState BlockB)
 
 -- NOTE: BlockB is only ever used wrapped in the hard fork combinator (which
 -- implements 'hardForkSummary' directly and never delegates to the underlying
@@ -309,13 +314,7 @@ instance StateSupportsPerasEpochContext BlockB where
   type MaybeEraIndexedEpochToPerasRoundInfo BlockB = EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = mkBoundedPerasEpochContextWith mkMockPerasVotingCommitteeInput
-  mkPerasParamsFromLedger _ _ = Right defaultPerasParams
-  mkPerasParamsFromTickedLedger _ _ = Right defaultPerasParams
 
 instance BlockSupportsPeras BlockB where
   type PerasCrypto BlockB = MockPerasCrypto BlockB
@@ -487,6 +486,9 @@ instance NodeInitStorage BlockB where
 instance BlockSupportsMetrics BlockB where
   isSelfIssued = isSelfIssuedConstUnknown
 
+instance BlockSupportsLeios BlockB where
+  blockLeiosCert = defaultBlockLeiosCert
+
 deriving via
   SelectViewDiffusionPipelining BlockB
   instance
@@ -497,7 +499,7 @@ instance SingleEraBlock BlockB where
   singleEraTransition = \_ _ _ _ -> Nothing
 
 instance HasTxs BlockB where
-  extractTxs = const []
+  extractAsMempoolTxs = const []
 
 {-------------------------------------------------------------------------------
   Condense

@@ -45,6 +45,7 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   passNEpochs,
   passNEpochsChecking,
   passTick,
+  tickToCurSlot,
   freshKeyAddr,
   freshKeyAddr_,
   freshMainnetKeyAddr_,
@@ -142,6 +143,7 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   expectTreasury,
   disableTreasuryExpansion,
   updateAddrTxWits,
+  updateAddrTxWitsWith,
   rederiveAddrTxWits,
   addNativeScriptTxWits,
   addRootTxIn,
@@ -156,12 +158,13 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   impSetSeed,
   shelleyModifyImpInitProtVer,
   modifyImpInitPostSubmitTxHook,
-  disableImpInitPostSubmitTxHook,
   withPostSubmitTxHook,
   withDisabledPostSubmitTxHook,
   modifyImpInitPostEpochBoundaryHook,
-  disableImpInitPostEpochBoundaryHook,
+  enableImpInitRunningInConformance,
   disableInConformanceIt,
+  iteExpectedConformanceFailureL,
+  impConformanceFailureL,
   minorFollow,
   majorFollow,
   genCantFollow,
@@ -179,6 +182,7 @@ module Test.Cardano.Ledger.Shelley.ImpTest (
   shelleyGenUnRegTxCert,
   shelleyDelegStakeTxCert,
   shelleyTopTxFromAnyLevel,
+  runShelleyBase,
 
   -- * Logging
   Doc,
@@ -234,6 +238,7 @@ import Cardano.Ledger.Keys (
   makeBootstrapWitness,
   witVKeyHash,
  )
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (UnsafeMkMempoolTx))
 import Cardano.Ledger.Shelley (ShelleyEra)
 import Cardano.Ledger.Shelley.API.ByronTranslation (translateToShelleyLedgerStateFromUtxo)
 import Cardano.Ledger.Shelley.API.Forecast (EraForecast)
@@ -248,7 +253,7 @@ import Cardano.Ledger.Shelley.API.Mempool (
   reapplyValidatedTx,
  )
 import Cardano.Ledger.Shelley.API.Validation (
-  ApplyBlock,
+  ApplyBlock (..),
   BlockTransitionError (..),
   applyBlockEither,
  )
@@ -264,6 +269,7 @@ import Cardano.Ledger.Shelley.Genesis (
  )
 import Cardano.Ledger.Shelley.LedgerState (
   LedgerState (..),
+  LedgerStateWithLimits (..),
   NewEpochState (..),
   curPParamsEpochStateL,
   esLStateL,
@@ -278,7 +284,6 @@ import Cardano.Ledger.Shelley.LedgerState (
  )
 import Cardano.Ledger.Shelley.Rules (
   AccountAlreadyRegistered,
-  BbodyEnv (..),
   LedgerEnv (..),
   ShelleyBbodyPredFailure,
   ShelleyBbodyState (..),
@@ -392,6 +397,8 @@ instance ShelleyEraImp era => ImpSpec (LedgerSpec era) where
               { iteFixup = fixupTx
               , itePostSubmitTxHook = \_ _ _ -> pure ()
               , itePostEpochBoundaryHook = \_ _ _ -> pure ()
+              , iteRunningInConformance = False
+              , iteExpectedConformanceFailure = False
               }
         , impInitState = initState
         }
@@ -430,6 +437,7 @@ data ImpTestState era = ImpTestState
   , impRecordedTxs :: !(StrictMaybe (StrictSeq (Tx TopTx era)))
   -- ^ When this is set to `SNothing` transactions are not being recorded.
   -- This should never be switched to `Just` outside of simulations.
+  , impConformanceFailure :: Bool
   }
 
 -- | This is a preliminary state that is used to prepare the actual `ImpTestState`
@@ -498,13 +506,16 @@ impEventsL = lens impEvents (\x y -> x {impEvents = y})
 impRecordedTxsL :: Lens' (ImpTestState era) (StrictMaybe (StrictSeq (Tx TopTx era)))
 impRecordedTxsL = lens impRecordedTxs (\x y -> x {impRecordedTxs = y})
 
+impConformanceFailureL :: Lens' (ImpTestState era) Bool
+impConformanceFailureL = lens impConformanceFailure (\x y -> x {impConformanceFailure = y})
+
 class
   ( ShelleyEraTest era
   , ApplyTx era
   , -- For the BBODY rule
     STS (EraRule "BBODY" era)
   , BaseM (EraRule "BBODY" era) ~ ShelleyBase
-  , Environment (EraRule "BBODY" era) ~ BbodyEnv era
+  , Environment (EraRule "BBODY" era) ~ BlockEnv era
   , State (EraRule "BBODY" era) ~ ShelleyBbodyState era
   , Eq (Event (EraRule "BBODY" era))
   , ToExpr (Event (EraRule "BBODY" era))
@@ -524,7 +535,7 @@ class
     STS (EraRule "LEDGER" era)
   , BaseM (EraRule "LEDGER" era) ~ ShelleyBase
   , Signal (EraRule "LEDGER" era) ~ StAnnTx TopTx era
-  , State (EraRule "LEDGER" era) ~ LedgerState era
+  , State (EraRule "LEDGER" era) ~ LedgerStateWithLimits era
   , Environment (EraRule "LEDGER" era) ~ LedgerEnv era
   , Ord (PredicateFailure (EraRule "LEDGER" era))
   , Show (PredicateFailure (EraRule "LEDGER" era))
@@ -659,6 +670,16 @@ class
 
   topTxFromAnyLevel :: (forall l. Typeable l => Tx l era) -> ImpTestM era (Tx TopTx era)
 
+  impWitsPState :: Tx l era -> ImpTestM era (PState era)
+  impWitsPState _ = getPState
+
+  -- | Like `getScriptsProvided`, but for a transaction of either level, so that the fixups can
+  -- also be applied to sub-transactions.
+  impScriptsProvided :: UTxO era -> Tx l era -> ScriptsProvided era
+  default impScriptsProvided ::
+    STxLevel l era ~ STxTopLevel l era => UTxO era -> Tx l era -> ScriptsProvided era
+  impScriptsProvided utxo tx = withTopTxLevelOnly tx (getScriptsProvided utxo)
+
 data AnyLevelTx era = AnyLevelTx (forall l. Typeable l => Tx l era)
 
 impSatisfySignature ::
@@ -775,6 +796,7 @@ defaultInitImpTestState nes = do
       , impGlobals = globals
       , impEvents = mempty
       , impRecordedTxs = mempty
+      , impConformanceFailure = False
       }
 
 withEachEraVersion ::
@@ -813,13 +835,12 @@ shelleyModifyImpInitProtVer ver =
 
 modifyImpInitPostSubmitTxHook ::
   forall era.
-  ( forall t.
-    Globals ->
+  ( Globals ->
     TRC (EraRule "LEDGER" era) ->
     Either
       (NonEmpty (PredicateFailure (EraRule "LEDGER" era)))
       (State (EraRule "LEDGER" era), [Event (EraRule "LEDGER" era)]) ->
-    ImpM t ()
+    ImpTestM era ()
   ) ->
   SpecWith (ImpInit (LedgerSpec era)) ->
   SpecWith (ImpInit (LedgerSpec era))
@@ -832,13 +853,12 @@ modifyImpInitPostSubmitTxHook f =
       }
 
 withPostSubmitTxHook ::
-  ( forall t.
-    Globals ->
+  ( Globals ->
     TRC (EraRule "LEDGER" era) ->
     Either
       (NonEmpty (PredicateFailure (EraRule "LEDGER" era)))
       (State (EraRule "LEDGER" era), [Event (EraRule "LEDGER" era)]) ->
-    ImpM t ()
+    ImpTestM era ()
   ) ->
   ImpTestM era a ->
   ImpTestM era a
@@ -849,19 +869,12 @@ withDisabledPostSubmitTxHook ::
   ImpTestM era a
 withDisabledPostSubmitTxHook = withPostSubmitTxHook $ \_ _ _ -> pure ()
 
-disableImpInitPostSubmitTxHook ::
-  SpecWith (ImpInit (LedgerSpec era)) ->
-  SpecWith (ImpInit (LedgerSpec era))
-disableImpInitPostSubmitTxHook =
-  modifyImpInitPostSubmitTxHook $ \_ _ _ -> pure ()
-
 modifyImpInitPostEpochBoundaryHook ::
   forall era.
-  ( forall t.
-    Globals ->
+  ( Globals ->
     TRC (EraRule "NEWEPOCH" era) ->
     State (EraRule "NEWEPOCH" era) ->
-    ImpM t ()
+    ImpTestM era ()
   ) ->
   SpecWith (ImpInit (LedgerSpec era)) ->
   SpecWith (ImpInit (LedgerSpec era))
@@ -872,21 +885,29 @@ modifyImpInitPostEpochBoundaryHook f = modifyImpInit $ \impInit ->
           & itePostEpochBoundaryHookL .~ f
     }
 
-disableImpInitPostEpochBoundaryHook ::
+enableImpInitRunningInConformance ::
   SpecWith (ImpInit (LedgerSpec era)) ->
   SpecWith (ImpInit (LedgerSpec era))
-disableImpInitPostEpochBoundaryHook =
-  modifyImpInitPostEpochBoundaryHook $ \_ _ _ -> pure ()
+enableImpInitRunningInConformance = modifyImpInit $ \impInit ->
+  impInit
+    { impInitEnv =
+        impInitEnv impInit
+          & iteRunningInConformanceL .~ True
+    }
 
 disableInConformanceIt ::
   ShelleyEraImp era =>
   String ->
   ImpTestM era () ->
   SpecWith (ImpInit (LedgerSpec era))
-disableInConformanceIt s =
-  disableImpInitPostSubmitTxHook
-    . disableImpInitPostEpochBoundaryHook
-    . it (s ++ " [disabled in conformance]")
+disableInConformanceIt s test =
+  it (s ++ " [disabled in conformance]") $ do
+    runningInConformance <- view iteRunningInConformanceL
+    local (iteExpectedConformanceFailureL .~ True) $ do
+      test
+      conformanceFailure <- use impConformanceFailureL
+      when (runningInConformance && not conformanceFailure) $
+        assertFailure "Expected conformance divergence but impl and spec agree"
 
 impLedgerEnv :: EraGov era => NewEpochState era -> ImpTestM era (LedgerEnv era)
 impLedgerEnv nes = do
@@ -996,14 +1017,15 @@ shelleyTopTxFromAnyLevel atx = pure $ atx @TopTx
 -- | Figure out all the Byron Addresses that need witnesses as well as all of the
 -- KeyHashes for Shelley Key witnesses that are required.
 impWitsVKeyNeeded ::
-  EraUTxO era =>
+  (EraUTxO era, EraCertState era) =>
+  PState era ->
   TxBody l era ->
   ImpTestM
     era
     ( Set.Set BootstrapAddress -- Byron Based Addresses
     , Set.Set (KeyHash Witness) -- Shelley Based KeyHashes
     )
-impWitsVKeyNeeded txBody = do
+impWitsVKeyNeeded pState txBody = do
   ls <- getsNES (nesEsL . esLStateL)
   utxo <- getUTxO
   let toBootAddr txIn = do
@@ -1012,25 +1034,25 @@ impWitsVKeyNeeded txBody = do
       bootAddrs = Set.fromList $ mapMaybe toBootAddr $ Set.toList (txBody ^. spendableInputsTxBodyF)
       bootKeyHashes = Set.map (coerceKeyRole . bootstrapKeyHash) bootAddrs
       allKeyHashes =
-        getWitsVKeyNeeded (ls ^. lsCertStateL) (ls ^. utxoL) txBody
+        getWitsVKeyNeeded (ls ^. lsCertStateL & certPStateL .~ pState) (ls ^. utxoL) txBody
   pure (bootAddrs, allKeyHashes Set.\\ bootKeyHashes)
 
 data ImpTestEnv era = ImpTestEnv
   { iteFixup :: Tx TopTx era -> ImpTestM era (Tx TopTx era)
   , itePostSubmitTxHook ::
-      forall t.
       Globals ->
       TRC (EraRule "LEDGER" era) ->
       Either
         (NonEmpty (PredicateFailure (EraRule "LEDGER" era)))
         (State (EraRule "LEDGER" era), [Event (EraRule "LEDGER" era)]) ->
-      ImpM t ()
+      ImpTestM era ()
   , itePostEpochBoundaryHook ::
-      forall t.
       Globals ->
       TRC (EraRule "NEWEPOCH" era) ->
       State (EraRule "NEWEPOCH" era) ->
-      ImpM t ()
+      ImpTestM era ()
+  , iteRunningInConformance :: Bool
+  , iteExpectedConformanceFailure :: Bool
   }
 
 iteFixupL :: Lens' (ImpTestEnv era) (Tx TopTx era -> ImpTestM era (Tx TopTx era))
@@ -1040,13 +1062,12 @@ itePostSubmitTxHookL ::
   forall era.
   Lens'
     (ImpTestEnv era)
-    ( forall t.
-      Globals ->
+    ( Globals ->
       TRC (EraRule "LEDGER" era) ->
       Either
         (NonEmpty (PredicateFailure (EraRule "LEDGER" era)))
         (State (EraRule "LEDGER" era), [Event (EraRule "LEDGER" era)]) ->
-      ImpM t ()
+      ImpTestM era ()
     )
 itePostSubmitTxHookL = lens itePostSubmitTxHook (\x y -> x {itePostSubmitTxHook = y})
 
@@ -1054,13 +1075,18 @@ itePostEpochBoundaryHookL ::
   forall era.
   Lens'
     (ImpTestEnv era)
-    ( forall t.
-      Globals ->
+    ( Globals ->
       TRC (EraRule "NEWEPOCH" era) ->
       State (EraRule "NEWEPOCH" era) ->
-      ImpM t ()
+      ImpTestM era ()
     )
 itePostEpochBoundaryHookL = lens itePostEpochBoundaryHook (\x y -> x {itePostEpochBoundaryHook = y})
+
+iteExpectedConformanceFailureL :: Lens' (ImpTestEnv era) Bool
+iteExpectedConformanceFailureL = lens iteExpectedConformanceFailure (\x y -> x {iteExpectedConformanceFailure = y})
+
+iteRunningInConformanceL :: Lens' (ImpTestEnv era) Bool
+iteRunningInConformanceL = lens iteRunningInConformance (\x y -> x {iteRunningInConformance = y})
 
 instance MonadWriter (Seq (SomeSTSEvent era)) (ImpTestM era) where
   writer (x, evs) = (impEventsL %= (<> evs)) $> x
@@ -1176,7 +1202,7 @@ addNativeScriptTxWits ::
 addNativeScriptTxWits tx = impAnn "addNativeScriptTxWits" $ do
   scriptsRequired <- impNativeScriptsRequired tx
   utxo <- getUTxO
-  let ScriptsProvided provided = getScriptsProvided utxo tx
+  let ScriptsProvided provided = impScriptsProvided utxo tx
       scriptsToAdd = scriptsRequired Map.\\ provided
   pure $
     tx
@@ -1196,10 +1222,21 @@ updateAddrTxWits ::
   ) =>
   Tx l era ->
   ImpTestM era (Tx l era)
-updateAddrTxWits tx = impAnn "updateAddrTxWits" $ do
+updateAddrTxWits tx = do
+  pState <- impWitsPState tx
+  updateAddrTxWitsWith pState tx
+
+updateAddrTxWitsWith ::
+  ( HasCallStack
+  , ShelleyEraImp era
+  ) =>
+  PState era ->
+  Tx l era ->
+  ImpTestM era (Tx l era)
+updateAddrTxWitsWith pState tx = impAnn "updateAddrTxWits" $ do
   let txBody = tx ^. bodyTxL
       txBodyHash = hashAnnotated txBody
-  (bootAddrs, witsVKeyNeeded) <- impWitsVKeyNeeded txBody
+  (bootAddrs, witsVKeyNeeded) <- impWitsVKeyNeeded pState txBody
   -- Shelley Based Addr Witnesses
   let curAddrWitHashes = Set.map witVKeyHash $ tx ^. witsTxL . addrTxWitsL
   extraKeyPairs <- mapM getKeyPair $ Set.toList (witsVKeyNeeded Set.\\ curAddrWitHashes)
@@ -1291,6 +1328,7 @@ fixupFees txOriginal = impAnn "fixupFees" $ do
   pp <- getsNES $ nesEsL . curPParamsEpochStateL
   utxo <- getUTxO
   certState <- getsNES $ nesEsL . esLStateL . lsCertStateL
+  witsPState <- impWitsPState tx
   addr <-
     if eraProtVerLow @era < natVersion @12
       then freshKeyAddr_
@@ -1317,7 +1355,8 @@ fixupFees txOriginal = impAnn "fixupFees" $ do
     outsBeforeFee = tx ^. bodyTxL . outputsTxBodyL
     suppliedFee = txOriginal ^. bodyTxL . feeTxBodyL
     fee0
-      | suppliedFee == zero = calcMinFeeTxNativeScriptWits utxo pp txNoWits nativeScriptKeyWits
+      | suppliedFee == zero =
+          calcMinFeeTxNativeScriptWits utxo pp witsPState txNoWits nativeScriptKeyWits
       | otherwise = suppliedFee
     fee = rationalToCoinViaCeiling $ coinToRational fee0 * (11 % 10)
   logString "Validating change"
@@ -1421,6 +1460,7 @@ trySubmitTx tx = do
   lEnv <- impLedgerEnv st
   globals <- use impGlobalsL
   let lState = st ^. nesEsL . esLStateL
+      lStateWithLimits = LedgerStateWithLimits lState mempty
       stAnnTx =
         mkStAnnTx
           (epochInfo globals)
@@ -1429,10 +1469,11 @@ trySubmitTx tx = do
           (utxosUtxo (lsUTxOState lState))
           mempty
           txFixed
-  res <- tryRunImpRule @"LEDGER" lEnv lState stAnnTx
+
+  res <- tryRunImpRule @"LEDGER" lEnv lStateWithLimits stAnnTx
 
   -- Check for conformance
-  let trc = TRC (lEnv, lState, stAnnTx)
+  let trc = TRC (lEnv, lStateWithLimits, stAnnTx)
   asks itePostSubmitTxHook >>= (\f -> f globals trc res)
 
   case res of
@@ -1440,7 +1481,7 @@ trySubmitTx tx = do
       -- Verify that produced predicate failures are ready for the node-to-client protocol
       liftIO $ forM_ predFailures $ roundTripEraExpectation @era
       pure $ Left (predFailures, txFixed)
-    Right (newState, events) -> do
+    Right (LedgerStateWithLimits newState _, events) -> do
       impNESL . nesEsL . esLStateL .= newState
       tell . Seq.fromList $ SomeSTSEvent @era @"LEDGER" <$> events
 
@@ -1541,7 +1582,7 @@ trySubmitMempoolTx tx = do
   txFixed <- asks iteFixup >>= ($ tx)
   logToExpr txFixed
   withMempoolContext $ \globals mempoolEnv mempoolState ->
-    applyTxWithFullValidation globals mempoolEnv mempoolState txFixed
+    applyTxWithFullValidation globals mempoolEnv mempoolState (UnsafeMkMempoolTx txFixed)
 
 -- | Reapply a transaction that the mempool has already validated.
 tryReapplyMempoolTx ::
@@ -1905,10 +1946,19 @@ passTick ::
   ) =>
   ImpTestM era ()
 passTick = do
+  tickToCurSlot
+  impCurSlotNoL += 1
+
+tickToCurSlot ::
+  forall era.
+  ( HasCallStack
+  , ShelleyEraImp era
+  ) =>
+  ImpTestM era ()
+tickToCurSlot = do
   impCurSlotNo <- gets impCurSlotNo
   curNES <- getsNES id
   nes <- runImpRule @"TICK" () curNES impCurSlotNo
-  impCurSlotNoL += 1
   impNESL .= nes
 
 -- | Win with supplied probability

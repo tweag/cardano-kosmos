@@ -1,11 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
@@ -15,36 +11,14 @@
 -- NOTE: this module exists solely because the orphan module
 -- 'Ouroboros.Consensus.Shelley.Node.Serialisation' needs some of these
 -- instances, but defining them there would be too confusing.
-module Ouroboros.Consensus.Shelley.Node.Peras
-  ( -- * Exported for testing purposes only
-    toOpaqueLedgerPerasCert
-  , fromOpaqueLedgerPerasCert
-  ) where
+module Ouroboros.Consensus.Shelley.Node.Peras () where
 
-import Cardano.Binary (Decoder, Encoding, FromCBOR (..), ToCBOR (..), serialize)
+import Cardano.Binary (serialize)
 import Cardano.Ledger.Api
-import Cardano.Ledger.BaseTypes (Nonce (..))
-import qualified Cardano.Ledger.Binary as CBOR
-import qualified Cardano.Ledger.Dijkstra.BlockBody as SL
-import qualified Cardano.Ledger.Dijkstra.Forecast as Dijkstra
-import qualified Cardano.Ledger.Shelley.API as SL
-import qualified Cardano.Ledger.Shelley.LedgerState as SL
-import qualified Codec.CBOR.Read as CBOR
 import Control.Monad (when)
-import Data.Array.Byte (ByteArray)
-import Data.Bifunctor (Bifunctor (..))
-import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as LazyByteString
-import qualified Data.ByteString.Short as ShortByteString
-import Data.Maybe.Strict (StrictMaybe (..))
 import qualified Data.Measure as Measure
-import Data.MemPack.Buffer
-  ( byteArrayFromShortByteString
-  , byteArrayToShortByteString
-  )
-import Data.Proxy (Proxy (..))
 import Data.Typeable (Typeable)
-import Lens.Micro ((.~), (^.))
 import Ouroboros.Consensus.Block.SupportsPeras
   ( BlockSupportsPeras (..)
   , ValidatedPerasCert (..)
@@ -58,14 +32,8 @@ import Ouroboros.Consensus.Block.SupportsPeras
   , defaultVerifyPerasCert
   , defaultVerifyPerasVote
   )
-import Ouroboros.Consensus.Config.SecurityParam (SecurityParam (..))
 import Ouroboros.Consensus.HardFork.Combinator.AcrossEras (OneEraPerasCert)
 import Ouroboros.Consensus.HardFork.History (EpochToPerasRoundInfo, forgetEraIndex)
-import Ouroboros.Consensus.HeaderValidation
-  ( HeaderState (headerStateChainDep)
-  , Ticked (..)
-  )
-import Ouroboros.Consensus.Ledger.Abstract (LedgerConfig)
 import Ouroboros.Consensus.Ledger.SupportsMempool
   ( ByteSize32 (..)
   , HasSizeForBlockBodyInclusion (..)
@@ -75,44 +43,31 @@ import Ouroboros.Consensus.Ledger.SupportsMempool
 import qualified Ouroboros.Consensus.Peras.Cert.V1 as V1
 import Ouroboros.Consensus.Peras.Context
   ( StateSupportsPerasEpochContext (..)
-  , dummyPoolDistr
   , mkBoundedPerasEpochContextWith
   )
 import qualified Ouroboros.Consensus.Peras.Crypto.BLS as BLS
-import Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
-  ( unsafePerasBLSPrivateKeyFromEnv
-  )
 import qualified Ouroboros.Consensus.Peras.Error.V1 as V1
-import Ouroboros.Consensus.Peras.Params
-  ( PerasParams
-  , dijkstraPerasMaxCertSize
-  , mkPerasParams
-  )
-import Ouroboros.Consensus.Peras.Protocol (PerasProtocol (..))
+import Ouroboros.Consensus.Peras.Params (dijkstraPerasMaxCertSize)
 import qualified Ouroboros.Consensus.Peras.Vote.V1 as V1
 import qualified Ouroboros.Consensus.Peras.Voting.V1 as V1
-import Ouroboros.Consensus.Protocol.PolyPraos (PolyPraosState (..))
-import qualified Ouroboros.Consensus.Protocol.PolyPraos as PolyPraos
-import qualified Ouroboros.Consensus.Protocol.Praos.Views as Praos
-import Ouroboros.Consensus.Protocol.Praos2 (LeiosCrypto, Praos2)
-import Ouroboros.Consensus.Shelley.Ledger.Block
-  ( LedgerPerasCertError
-  , ShelleyBlock (..)
-  , ShelleyPerasCertCompatibleWithLedger (..)
+import Ouroboros.Consensus.Protocol.Abstract
+  ( ChainDepStateSupportsPeras
+  , ConsensusProtocol (..)
   )
-import Ouroboros.Consensus.Shelley.Ledger.Ledger
-  ( LedgerState (..)
-  , Ticked (..)
-  , shelleyLedgerGenesis
-  )
+import Ouroboros.Consensus.Shelley.Ledger.Block (ShelleyBlock (..))
+import Ouroboros.Consensus.Shelley.Ledger.Ledger ()
 import Ouroboros.Consensus.Shelley.Ledger.Mempool (AlonzoMeasure (..))
+import Ouroboros.Consensus.Ticked (Ticked)
 
 {-------------------------------------------------------------------------------
   StateSupportsPerasEpochContext
 -------------------------------------------------------------------------------}
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto ShelleyEra)
   where
   type
@@ -120,16 +75,13 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: ShelleyEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "ShelleyEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "ShelleyEra does not support Peras"
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto AllegraEra)
   where
   type
@@ -137,16 +89,13 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: AllegraEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "AllegraEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "AllegraEra does not support Peras"
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto MaryEra)
   where
   type
@@ -154,16 +103,13 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: MaryEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "MaryEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "MaryEra does not support Peras"
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto AlonzoEra)
   where
   type
@@ -171,16 +117,13 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: AlonzoEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "AlonzoEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "AlonzoEra does not support Peras"
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto BabbageEra)
   where
   type
@@ -188,16 +131,13 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: BabbageEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "BabbageEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "BabbageEra does not support Peras"
 
 instance
-  Typeable proto =>
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
+  ) =>
   StateSupportsPerasEpochContext (ShelleyBlock proto ConwayEra)
   where
   type
@@ -205,69 +145,21 @@ instance
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: ConwayEra does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "ConwayEra does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "ConwayEra does not support Peras"
 
 instance
-  ( Typeable (Praos2 c)
-  , LeiosCrypto c
-  , Dijkstra.DijkstraEraForecast DijkstraEra
-  , SL.EraForecast DijkstraEra
+  ( Typeable proto
+  , ChainDepStateSupportsPeras (ChainDepState proto)
+  , ChainDepStateSupportsPeras (Ticked (ChainDepState proto))
   ) =>
-  StateSupportsPerasEpochContext (ShelleyBlock (Praos2 c) DijkstraEra)
+  StateSupportsPerasEpochContext (ShelleyBlock proto DijkstraEra)
   where
   type
-    MaybeEraIndexedEpochToPerasRoundInfo (ShelleyBlock (Praos2 c) DijkstraEra) =
+    MaybeEraIndexedEpochToPerasRoundInfo (ShelleyBlock proto DijkstraEra) =
       EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger =
-    (^. SL.nesStakePoolDistrG)
-      . shelleyLedgerState
-  getPerasPoolDistrFromTickedLedger =
-    (^. SL.nesStakePoolDistrG)
-      . tickedShelleyLedgerState
-  getPerasNonceFromHeaderState =
-    praosStateEpochNonce
-      . headerStateChainDep
-  getPerasNonceFromTickedHeaderState =
-    praosStateEpochNonce
-      . PolyPraos.tickedPraosStateChainDepState
-      . tickedHeaderStateChainDep
-  mkBoundedPerasEpochContext =
-    mkBoundedPerasEpochContextWith V1.mkPerasVotingCommitteeInput
-  mkPerasParamsFromLedger cfg ShelleyLedgerState{shelleyLedgerState} =
-    mkPerasParamsFromNewEpochState cfg shelleyLedgerState
-  mkPerasParamsFromTickedLedger cfg TickedShelleyLedgerState{tickedShelleyLedgerState} =
-    mkPerasParamsFromNewEpochState cfg tickedShelleyLedgerState
-
--- | Common implementation of 'mkPerasParamsFromLedger' and
--- 'mkPerasParamsFromTickedLedger' for DijkstraEra.
-mkPerasParamsFromNewEpochState ::
-  forall c.
-  LeiosCrypto c =>
-  LedgerConfig (ShelleyBlock (Praos2 c) DijkstraEra) ->
-  SL.NewEpochState DijkstraEra ->
-  Either String (PerasParams (ShelleyBlock (Praos2 c) DijkstraEra))
-mkPerasParamsFromNewEpochState cfg nes =
-  case ( getPerasLedgerView (Proxy @(Praos2 c)) $
-           Praos.forecastToPolyPraosLedgerView $
-             SL.currentForecast nes
-       ) of
-    Nothing ->
-      Left
-        "Dijkstra protocol ledger view does not contain Peras parameters"
-    Just perasLedgerView ->
-      Right $
-        mkPerasParams
-          (SecurityParam (SL.sgSecurityParam (shelleyLedgerGenesis cfg)))
-          (SL.sgActiveSlotCoeff (shelleyLedgerGenesis cfg))
-          perasLedgerView
+  mkBoundedPerasEpochContext = mkBoundedPerasEpochContextWith V1.mkPerasVotingCommitteeInput
 
 {-------------------------------------------------------------------------------
   HasSizeForBlockBodyInclusion
@@ -423,103 +315,4 @@ instance
         V1.PerasCertTooLargeError sizeUpperBound dijkstraPerasMaxCertSize
     pure cert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock blk =
-    bimap V1.PerasTemporaryCertInBlockError id
-      . extractPerasCertFromShelleyBlockBody
-      . SL.blockBody
-      . shelleyBlockRaw
-      $ blk
-  readPerasPrivateKeyFromEnv _ =
-    unsafePerasBLSPrivateKeyFromEnv
-
-{-------------------------------------------------------------------------------
-  ShelleyPerasCertCompatibleWithLedger
--------------------------------------------------------------------------------}
-
--- NOTE: these instances will be removed once we have a proper type for Peras
--- certificates in the ledger.
-
-instance ShelleyPerasCertCompatibleWithLedger proto ShelleyEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance ShelleyPerasCertCompatibleWithLedger proto AllegraEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance ShelleyPerasCertCompatibleWithLedger proto MaryEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance ShelleyPerasCertCompatibleWithLedger proto AlonzoEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance ShelleyPerasCertCompatibleWithLedger proto BabbageEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance ShelleyPerasCertCompatibleWithLedger proto ConwayEra where
-  extractPerasCertFromShelleyBlockBody _ = Right Nothing
-  injectPerasCertIntoShelleyBlockBody _ = id
-
-instance
-  Typeable proto =>
-  ShelleyPerasCertCompatibleWithLedger proto DijkstraEra
-  where
-  extractPerasCertFromShelleyBlockBody blockBody =
-    case blockBody ^. SL.perasCertBlockBodyL of
-      SNothing ->
-        Right Nothing
-      SJust ledgerCert ->
-        case fromOpaqueLedgerPerasCert ledgerCert of
-          Left err -> Left err
-          Right cert -> Right (Just cert)
-
-  injectPerasCertIntoShelleyBlockBody cert =
-    SL.perasCertBlockBodyL .~ SJust (toOpaqueLedgerPerasCert cert)
-
-toOpaqueLedgerPerasCert ::
-  Typeable blk =>
-  V1.PerasCert blk ->
-  SL.PerasCert
-toOpaqueLedgerPerasCert =
-  SL.PerasCert . toByteArray . toCBOR
- where
-  toByteArray :: Encoding -> ByteArray
-  toByteArray =
-    byteArrayFromShortByteString
-      . ShortByteString.toShort
-      . CBOR.toStrictByteString
-
-fromOpaqueLedgerPerasCert ::
-  Typeable blk =>
-  SL.PerasCert ->
-  Either LedgerPerasCertError (V1.PerasCert blk)
-fromOpaqueLedgerPerasCert (SL.PerasCert byteArray) =
-  fromByteArray fromCBOR byteArray
- where
-  fromByteArray ::
-    (forall s. Decoder s (V1.PerasCert blk)) ->
-    ByteArray ->
-    Either LedgerPerasCertError (V1.PerasCert blk)
-  fromByteArray decoder =
-    handleParseErrors
-      . CBOR.deserialiseFromBytes decoder
-      . LazyByteString.fromStrict
-      . ShortByteString.fromShort
-      . byteArrayToShortByteString
-
-  handleParseErrors ::
-    Either CBOR.DeserialiseFailure (ByteString, a) ->
-    Either LedgerPerasCertError a
-  handleParseErrors = \case
-    Left err -> failure err
-    Right (trailing, a)
-      | not (LazyByteString.null trailing) -> failure "trailing bytes"
-      | otherwise -> pure a
-   where
-    failure err =
-      Left $
-        "Failed to deserialize opaque Peras certificate from byte array: "
-          <> show err
+  getPerasCertInBlock _ = Right Nothing

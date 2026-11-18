@@ -27,6 +27,13 @@ module Cardano.Api.Experimental
   , getAnchorDataFromCertificate
   , mkTxCertificates
 
+    -- ** Ordered guard witnesses
+  , TxGuards
+  , ScriptGuardWitness (..)
+  , TxGuardsError (..)
+  , mkTxGuards
+  , emptyTxGuards
+
     -- ** Sub-transactions (Dijkstra era onwards)
   , SubTxBodyContent
   , defaultSubTxBodyContent
@@ -92,6 +99,9 @@ module Cardano.Api.Experimental
     -- ** Plutus related
   , AnyPlutusScriptLanguage (..)
   , PlutusScriptInEra (..)
+  , PlutusLangInEra (..)
+  , plutusLangInEra
+  , plutusLangInShelleyBasedEra
   , PlutusScriptOrReferenceInput (..)
   , serialiseAnyPlutusScriptToTextEnvelope
   , deserialiseAnyPlutusScriptFromTextEnvelope
@@ -99,6 +109,7 @@ module Cardano.Api.Experimental
   , PlutusScriptPurpose (..)
   , PlutusScriptDatum (..)
   , NoScriptDatum
+  , mkSpendingScriptDatum
 
     -- ** Certificate related
   , Certificate (..)

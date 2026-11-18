@@ -35,7 +35,7 @@ import Ouroboros.Consensus.Ledger.Tables.Utils (forgetLedgerTables)
 import Ouroboros.Consensus.Peras.Context
   ( PerasEpochContextResolver
   , StateSupportsPerasEpochContext
-  , initPerasEpochContextResolverFromUntickedState
+  , initPerasEpochContextResolver
   )
 import Ouroboros.Consensus.Peras.Types (PerasRoundNo)
 import Ouroboros.Consensus.Storage.Serialisation
@@ -65,7 +65,7 @@ initPerasState ::
 initPerasState ledgerConfig ledgerState headerState =
   PerasState
     { perasEpochContextResolver =
-        initPerasEpochContextResolverFromUntickedState
+        initPerasEpochContextResolver
           ledgerConfig
           (forgetLedgerTables ledgerState)
           headerState

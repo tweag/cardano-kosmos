@@ -231,8 +231,12 @@ instance
 instance ToExpr (DijkstraGovCertPredFailure era)
 
 instance
-  ToExpr (PredicateFailure (EraRule "LEDGERS" era)) =>
+  ( ToExpr (PredicateFailure (EraRule "LEDGERS" era))
+  , ToExpr (PredicateFailure (EraRule "LEIOSCERT" era))
+  ) =>
   ToExpr (DijkstraBbodyPredFailure era)
+
+instance ToExpr (DijkstraLeiosCertPredFailure era)
 
 instance
   ToExpr (PredicateFailure (EraRule "LEDGER" era)) =>
@@ -334,3 +338,23 @@ instance
 instance ToExpr (AccountBalanceInterval era)
 
 instance ToExpr (AccountBalanceIntervals era)
+
+instance ToExpr (EbWasNotAnnounced era)
+
+instance ToExpr (EbReferencesSizeTooBig era)
+
+instance ToExpr (EbAnnouncementSlotMismatch era)
+
+instance ToExpr (EbAnnouncementHashMismatch era)
+
+instance ToExpr (EbAnnouncementSizeMismatch era)
+
+instance ToExpr (EbAlreadyApplied era)
+
+instance
+  ToExpr (PredicateFailure (EraRule "EBLEDGERS" era)) =>
+  ToExpr (EbPredFailure era)
+
+instance
+  ToExpr (PredicateFailure (EraRule "LEDGER" era)) =>
+  ToExpr (EbLedgersPredFailure era)

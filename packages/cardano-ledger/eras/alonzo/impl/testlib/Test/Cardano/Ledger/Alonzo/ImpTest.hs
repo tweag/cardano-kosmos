@@ -40,6 +40,9 @@ module Test.Cardano.Ledger.Alonzo.ImpTest (
   computeScriptIntegrity,
   mkTxWithPlutusAndBootstrapAddress,
   mkTokenMintingTx,
+  freshAssetOutput,
+  restrictMaxValSizeToAdaOnly,
+  outputTooBigEntry,
   genGoodValidityInterval,
   genBadValidityInterval,
   -- Fixup
@@ -78,10 +81,11 @@ import Cardano.Ledger.Alonzo.Tx (ScriptIntegrity, hashScriptIntegrity, mkScriptI
 import Cardano.Ledger.Alonzo.TxAuxData (AlonzoTxAuxData)
 import Cardano.Ledger.Alonzo.TxWits (unRedeemersL, unTxDatsL)
 import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded (..), plutusScriptsWithContextStAnnTx)
-import Cardano.Ledger.BaseTypes (Globals (..), SlotNo (..), StrictMaybe (..))
+import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (EncCBOR, serialize)
 import Cardano.Ledger.Coin (Coin (..))
 import Cardano.Ledger.Credential (Credential (..), StakeReference (..))
-import Cardano.Ledger.Mary.Value (MaryValue (..), PolicyID (..), multiAssetFromList)
+import Cardano.Ledger.Mary.Value
 import Cardano.Ledger.Plutus (
   Data (..),
   Datum (..),
@@ -105,9 +109,11 @@ import Cardano.Ledger.Shelley.LedgerState (
   nesEsL,
   utxoL,
  )
+import Cardano.Ledger.Shelley.Scripts
 import Cardano.Ledger.Shelley.UTxO (EraUTxO (..), ScriptsProvided (..), UTxO (..), txouts)
 import Cardano.Ledger.TxIn (TxIn)
 import Control.Monad (forM)
+import qualified Data.ByteString.Lazy as BSL
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -116,6 +122,7 @@ import Data.Maybe (catMaybes, isJust, isNothing, mapMaybe)
 import Data.Set ((\\))
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import Data.Word (Word64)
 import Lens.Micro
 import Lens.Micro.Mtl (use)
 import qualified PlutusLedgerApi.Common as P
@@ -272,7 +279,7 @@ fixupScriptWits ::
 fixupScriptWits tx = impAnn "fixupScriptWits" $ do
   contexts <- impGetPlutusContexts tx
   utxo <- getUTxO
-  let ScriptsProvided provided = getScriptsProvided utxo tx
+  let ScriptsProvided provided = impScriptsProvided utxo tx
   let contextsToAdd = filter (\(_, sh, _) -> not (Map.member sh provided)) contexts
   scriptWits <- forM contextsToAdd $ \(_, sh, ScriptTestContext plutus _) ->
     (sh,) . fromPlutusScript <$> mkPlutusScript plutus
@@ -580,7 +587,7 @@ computeScriptIntegrity ::
   StrictMaybe (ScriptIntegrity era)
 computeScriptIntegrity pp utxo tx = mkScriptIntegrity pp tx langs
   where
-    ScriptsProvided scriptsProvided = getScriptsProvided utxo tx
+    ScriptsProvided scriptsProvided = impScriptsProvided utxo tx
     scriptsNeeded = getScriptsHashesNeeded . getScriptsNeeded utxo $ tx ^. bodyTxL
     scriptsUsed = Map.elems $ Map.restrictKeys scriptsProvided scriptsNeeded
     langs = Set.fromList $ plutusScriptLanguage <$> mapMaybe toPlutusScript scriptsUsed
@@ -639,6 +646,31 @@ mkTokenMintingTx sh = do
       mkBasicTx mkBasicTxBody
         & bodyTxL . mintTxBodyL .~ ma
         & bodyTxL . outputsTxBodyL .~ [mkBasicTxOut addr (MaryValue mempty ma)]
+
+freshAssetOutput :: AlonzoEraImp era => ImpTestM era (MultiAsset, TxOut era)
+freshAssetOutput = do
+  policyId <- PolicyID <$> (impAddNativeScript . RequireSignature =<< freshKeyHash)
+  assetName <- arbitrary @AssetName
+  addr <- freshKeyAddr_
+  let multiAsset = multiAssetFromList [(policyId, assetName, 1)]
+  pure (multiAsset, mkBasicTxOut addr $ MaryValue mempty multiAsset)
+
+restrictMaxValSizeToAdaOnly :: forall era. AlonzoEraImp era => ImpTestM era ()
+restrictMaxValSizeToAdaOnly = do
+  protVer <- getProtVer
+  let largestAdaOnlyValue = inject . Coin . toInteger $ (maxBound :: Word64) :: Value era
+      largestAdaOnlyValueSize = serializedValueSize protVer largestAdaOnlyValue
+  modifyPParams $ ppMaxValSizeL .~ fromIntegral largestAdaOnlyValueSize
+
+serializedValueSize :: EncCBOR value => ProtVer -> value -> Int
+serializedValueSize protVer = fromIntegral . BSL.length . serialize (pvMajor protVer)
+
+outputTooBigEntry :: AlonzoEraImp era => PParams era -> TxOut era -> (Int, Int, TxOut era)
+outputTooBigEntry pp txOut =
+  ( serializedValueSize (pp ^. ppProtocolVersionL) $ txOut ^. valueTxOutL
+  , fromIntegral $ pp ^. ppMaxValSizeL
+  , txOut
+  )
 
 genGoodBound :: MonadGen m => SlotNo -> SlotNo -> m (StrictMaybe SlotNo)
 genGoodBound slotLo@(SlotNo lo) slotHi@(SlotNo hi) =

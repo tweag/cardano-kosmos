@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/ouroboros-consensus.git
-	branch = a214a6010a433a73af9cf1b77eee08cd9459282c
-	commit = a214a6010a433a73af9cf1b77eee08cd9459282c
-	parent = 1a2bd3735482c0ebfb52a2a214add920b998716a
+	branch = e01f713e0135c98551e916a0dc0fb4882b3f6490
+	commit = e01f713e0135c98551e916a0dc0fb4882b3f6490
+	parent = dde815c0fa3a31e14717f4da9a09a94d967fd1bb
 	method = merge
 	cmdver = 0.4.9

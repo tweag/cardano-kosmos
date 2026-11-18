@@ -55,7 +55,7 @@ import qualified Cardano.Chain.Update as Update
 import qualified Cardano.Chain.Update.Validation.Endorsement as UPE
 import qualified Cardano.Chain.Update.Validation.Interface as UPI
 import qualified Cardano.Chain.ValidationMode as CC
-import Cardano.Ledger.BaseTypes (Nonce (NeutralNonce), unNonZero)
+import Cardano.Ledger.BaseTypes (unNonZero)
 import Cardano.Ledger.Binary (ToCBOR (..), fromByronCBOR, toByronCBOR)
 import Cardano.Ledger.Binary.Plain (encodeListLen, enforceSize)
 import Codec.CBOR.Decoding (Decoder)
@@ -89,12 +89,10 @@ import Ouroboros.Consensus.Ledger.CommonProtocolParams
 import Ouroboros.Consensus.Ledger.Extended
 import Ouroboros.Consensus.Ledger.Query
 import Ouroboros.Consensus.Ledger.SupportsPeerSelection
+import Ouroboros.Consensus.Ledger.SupportsPeras (LedgerStateSupportsPeras)
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
-import Ouroboros.Consensus.Peras.Context
-  ( StateSupportsPerasEpochContext (..)
-  , dummyPoolDistr
-  )
+import Ouroboros.Consensus.Peras.Context (StateSupportsPerasEpochContext (..))
 import Ouroboros.Consensus.Util (ShowProxy (..))
 import Ouroboros.Consensus.Util.CBOR (decodeWithOrigin, encodeWithOrigin)
 import Ouroboros.Consensus.Util.IndexedMemPack
@@ -284,6 +282,11 @@ instance LedgerSupportsProtocol ByronBlock where
     toPBftLedgerView
       . CC.getDelegationMap
       . tickedByronLedgerState
+
+  ledgerViewAtTip _cfg =
+    toPBftLedgerView
+      . CC.getDelegationMap
+      . byronLedgerState
 
   -- Create a forecast of the delegation state
   --
@@ -585,14 +588,12 @@ instance CanUpgradeLedgerTables LedgerState ByronBlock where
   Peras
 -------------------------------------------------------------------------------}
 
+instance LedgerStateSupportsPeras (LedgerState ByronBlock)
+
+instance LedgerStateSupportsPeras (Ticked LedgerState ByronBlock)
+
 instance StateSupportsPerasEpochContext ByronBlock where
   type MaybeEraIndexedEpochToPerasRoundInfo ByronBlock = EpochToPerasRoundInfo
   toMaybeEraIndexedEpochToPerasRoundInfo _ = forgetEraIndex
   fromMaybeEraIndexedEpochToPerasRoundInfo _ = id
-  getPerasPoolDistrFromLedger _ = dummyPoolDistr
-  getPerasPoolDistrFromTickedLedger _ = dummyPoolDistr
-  getPerasNonceFromHeaderState _ = NeutralNonce
-  getPerasNonceFromTickedHeaderState _ = NeutralNonce
   mkBoundedPerasEpochContext = error "mkBoundedPerasEpochContext: ByronBlock does not support Peras"
-  mkPerasParamsFromLedger _ _ = Left "ByronBlock does not support Peras"
-  mkPerasParamsFromTickedLedger _ _ = Left "ByronBlock does not support Peras"

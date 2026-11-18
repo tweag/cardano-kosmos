@@ -8,11 +8,11 @@ module Cardano.Testnet.Test.Rpc.EraSummary
 where
 
 import           Cardano.Api
-import qualified Cardano.Api.Experimental as Exp
 
 import qualified Cardano.Rpc.Client as Rpc
 import qualified Cardano.Rpc.Proto.Api.UtxoRpc.Query as U5c
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -39,9 +39,9 @@ eraNamesInOrder = ["byron", "shelley", "allegra", "mary", "alonzo", "babbage", "
 -- @TASTY_PATTERN='/RPC ReadEraSummary/' cabal test cardano-testnet-test@
 hprop_rpc_read_era_summary :: H.Property
 hprop_rpc_read_era_summary = integrationRetryWorkspace 2 "rpc-read-era-summary" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
-  let era = Exp.ConwayEra
+  let era = testEra
       sbe = convert era
       creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
       runtimeOptions = def{runtimeEnableRpc = RpcEnabledUnixSocket}

@@ -12,11 +12,17 @@
 module Cardano.Ledger.Conway.UTxO (
   conwayProducedValue,
   getConwayWitsVKeyNeeded,
+  getConwayWitsVKeyNeededWith,
   getConwayScriptsNeeded,
   txNonDistinctRefScriptsSize,
   getConwayMinFeeTxUtxo,
 ) where
 
+import Cardano.Ledger.Alonzo.Tx (
+  AlonzoStAnnTx (..),
+  exUnitsAlonzoStAnnTx,
+  refScriptsSizeAlonzoStAnnTx,
+ )
 import Cardano.Ledger.Alonzo.UTxO (
   AlonzoEraUTxO (..),
   AlonzoScriptsNeeded (..),
@@ -47,12 +53,14 @@ import Cardano.Ledger.Conway.Governance.Procedures (
   unVotingProcedures,
  )
 import Cardano.Ledger.Conway.State
+import Cardano.Ledger.Conway.Tx (getConwayMinFeeTx)
 import Cardano.Ledger.Credential (credKeyHashWitness, credScriptHash)
 import Cardano.Ledger.Keys (asWitness)
 import Cardano.Ledger.Mary.UTxO (getConsumedMaryValue, getProducedMaryValue)
 import Cardano.Ledger.Mary.Value (MaryValue)
-import Cardano.Ledger.Shelley.UTxO (getShelleyWitsVKeyNeededNoGov)
+import Cardano.Ledger.Shelley.UTxO (getShelleyWitsVKeyNeededNoGovWith)
 import Cardano.Ledger.Val (Val (..), inject)
+import Control.Exception (assert)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Monoid (Sum (..))
@@ -133,6 +141,11 @@ instance EraUTxO ConwayEra where
 
   getMinFeeTxUtxo = getConwayMinFeeTxUtxo
 
+  calcMinFeeStAnnTx pp AlonzoStAnnTx {asatTx, asatRefScriptsSize, asatExUnits, asatUTxO} =
+    assert (getMinFeeTxUtxo pp asatTx asatUTxO == minFee) minFee
+    where
+      minFee = getConwayMinFeeTx pp asatTx asatRefScriptsSize asatExUnits
+
 instance AlonzoEraUTxO ConwayEra where
   getSupplementalDataHashes = getBabbageSupplementalDataHashes
 
@@ -145,6 +158,10 @@ instance AlonzoEraUTxO ConwayEra where
   plutusScriptsWithContextStAnnTx = plutusScriptsWithContextAlonzoStAnnTx
 
   plutusLanguagesUsedStAnnTx = plutusLanguagesUsedAlonzoStAnnTx
+
+  refScriptsSizeStAnnTx = refScriptsSizeAlonzoStAnnTx
+
+  exUnitsStAnnTx = exUnitsAlonzoStAnnTx
 
 getConwayMinFeeTxUtxo ::
   ( EraTx era
@@ -174,8 +191,18 @@ getConwayWitsVKeyNeeded ::
   UTxO era ->
   TxBody l era ->
   Set.Set (KeyHash Witness)
-getConwayWitsVKeyNeeded utxo txBody =
-  getShelleyWitsVKeyNeededNoGov utxo txBody
+getConwayWitsVKeyNeeded = getConwayWitsVKeyNeededWith (const True)
+
+getConwayWitsVKeyNeededWith ::
+  (EraTx era, ConwayEraTxBody era) =>
+  -- | Predicate that decides if the owners listed in a pool registration
+  -- certificate must sign the transaction
+  (StakePoolParams era -> Bool) ->
+  UTxO era ->
+  TxBody l era ->
+  Set.Set (KeyHash Witness)
+getConwayWitsVKeyNeededWith ownersWitnessRequired utxo txBody =
+  getShelleyWitsVKeyNeededNoGovWith ownersWitnessRequired utxo txBody
     `Set.union` Set.map asWitness (txBody ^. reqSignerHashesTxBodyG)
     `Set.union` voterWitnesses txBody
 

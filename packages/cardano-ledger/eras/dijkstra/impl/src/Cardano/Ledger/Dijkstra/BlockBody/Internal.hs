@@ -38,7 +38,7 @@ module Cardano.Ledger.Dijkstra.BlockBody.Internal (
 
 import Cardano.Crypto.Leios (LeiosCert)
 import Cardano.Ledger.Alonzo.Tx (AlonzoEraTx (..))
-import Cardano.Ledger.BaseTypes (Nonce, ProtVer (..))
+import Cardano.Ledger.BaseTypes (Nonce)
 import Cardano.Ledger.Binary (
   Annotator (..),
   DecCBOR (..),
@@ -50,9 +50,9 @@ import Cardano.Ledger.Binary (
   encodeFoldableEncoder,
   encodeListLen,
   encodeNullStrictMaybe,
-  serialize',
  )
 import Cardano.Ledger.Block (LeiosEraBlockHeader)
+import Cardano.Ledger.Conway.BlockBody (ConwayBlockBodyLimits)
 import Cardano.Ledger.Core
 import Cardano.Ledger.Dijkstra.Era
 import Cardano.Ledger.Dijkstra.Tx (
@@ -75,7 +75,6 @@ import Cardano.Ledger.MemoBytes (
 import Cardano.Ledger.Orphans ()
 import Control.DeepSeq (NFData)
 import Data.Array.Byte (ByteArray)
-import qualified Data.ByteString as BS
 import Data.Coerce (Coercible, coerce)
 import Data.Maybe.Strict (StrictMaybe (..))
 import Data.Sequence.Strict (StrictSeq)
@@ -114,11 +113,13 @@ type instance MemoHashIndex (DijkstraBlockBodyRaw era) = EraIndependentBlockBody
 
 instance EraBlockBody DijkstraEra where
   type BlockBody DijkstraEra = DijkstraBlockBody DijkstraEra
+  type BlockBodyLimits DijkstraEra = ConwayBlockBodyLimits DijkstraEra
   type ProtocolEraBlockHeader h DijkstraEra = LeiosEraBlockHeader h DijkstraEra
   mkBasicBlockBody = mkBasicBlockBodyDijkstra
   txSeqBlockBodyL = lensMemoRawType @DijkstraEra dbbrTxs (\bb p -> bb {dbbrTxs = p})
   hashBlockBody (MkDijkstraBlockBody m) = extractHash $ getMemoBytesHash m
-  blockBodySize (ProtVer v _) = BS.length . serialize' v . encCBOR
+
+deriving newtype instance SafeToHash (DijkstraBlockBody era)
 
 mkBasicBlockBodyDijkstra ::
   forall era. (Era era, SafeToHash (Tx TopTx era)) => DijkstraBlockBody era
@@ -241,11 +242,7 @@ data PerasKey = PerasKey
 -- NOTE: this function will be replaced with the real implementation from
 -- 'cardano-base' once it's ready.
 --
--- IMPORTANT: Until Peras is implemented this function must return False, which
--- effectively disables Peras certificate additon to the block body, hence
--- disables Peras all together
---
--- WARNING: re-enabled for Peras testnet. All validation still happens on the
--- Consensus side.
+-- IMPORTANT: Until Peras is implemented this function must return False, which effectively disables
+-- Peras certificate additon to the block body, hence disables Peras all together
 validatePerasCert :: Nonce -> PerasKey -> PerasCert -> Bool
-validatePerasCert _ _ _ = True
+validatePerasCert _ _ _ = False

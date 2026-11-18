@@ -14,6 +14,7 @@ import qualified Cardano.Api.Ledger as L
 import           Cardano.CLI.Type.Common
 import           Cardano.Crypto.Hash.Class (hashToStringAsHex)
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -45,12 +46,12 @@ import qualified Hedgehog.Extras.Test.TestWatchdog as H
 hprop_transaction :: Property
 hprop_transaction = integrationRetryWorkspace 2 "simple transaction build" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
   let
-    sbe = ShelleyBasedEraConway
+    sbe = convert testEra
     era = toCardanoEra sbe
     cEra = AnyCardanoEra era
     tempBaseAbsPath = makeTmpBaseAbsPath $ TmpAbsolutePath tempAbsPath'

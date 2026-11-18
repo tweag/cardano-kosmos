@@ -105,16 +105,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1786562343,
-        "narHash": "sha256-re8yseMIJtHkIz1/VxJydirm/vJMTCqj5t7fHidcvP8=",
+        "lastModified": 1793121766,
+        "narHash": "sha256-/7O057pj8QEvHMsj1AIDG/RJMzYfsKjwM+PpdTTqrjM=",
         "owner": "input-output-hk",
         "repo": "cardano-ledger-release-tool",
-        "rev": "e79252d2dfedb196ae455d0c092cb31db904412a",
+        "rev": "1ef72ca5bd7559f25b3fb7bee83ada350bae0850",
         "type": "github"
       },
       "original": {
         "owner": "input-output-hk",
-        "ref": "0.5.2.0",
+        "ref": "0.5.2.1",
         "repo": "cardano-ledger-release-tool",
         "type": "github"
       }
@@ -222,11 +222,11 @@
     "formal-ledger-specifications": {
       "flake": false,
       "locked": {
-        "lastModified": 1792423956,
-        "narHash": "sha256-8AW1MlNNG1bLfxqm1DZmu0SOOMXq4CbDWjAQJcDxNOE=",
+        "lastModified": 1793979198,
+        "narHash": "sha256-jReR1yrLSiwKjL6DyoCNGaABtvn491puUC1RdoSjjsw=",
         "owner": "IntersectMBO",
         "repo": "formal-ledger-specifications",
-        "rev": "2e4cf0e869c7761c7d11cfba3516f9fe8019190d",
+        "rev": "fc41b0f836b5d33a3c83312d19fd30c7e9b2d3b2",
         "type": "github"
       },
       "original": {

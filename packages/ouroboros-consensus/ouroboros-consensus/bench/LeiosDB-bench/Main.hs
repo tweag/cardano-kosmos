@@ -54,6 +54,7 @@ import Control.Concurrent.Async (async, cancel, wait)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSemN (newQSemN, signalQSemN, waitQSemN)
+import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Control.Monad (forM, forM_, forever, replicateM, void, when)
 import Control.Monad.Class.MonadTime.SI (Time, addTime, diffTime, getMonotonicTime)
@@ -67,8 +68,9 @@ import qualified Data.ByteString.Short as SBS
 import Data.Functor ((<&>))
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (sort, sortOn)
-import qualified Data.List as List
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isNothing)
+import qualified Data.Set as Set
 import Data.Time.Clock (DiffTime)
 import GHC.RTS.Flags (GCFlags (..), getGCFlags)
 import Ouroboros.Consensus.Leios.Types
@@ -76,10 +78,10 @@ import Ouroboros.Consensus.Leios.Types
   , EndorserBlock
   , EndorserBlockHash
   , LeiosPoint (..)
+  , Serialised (..)
   , TxHash
   , TxOffset
   , encodeEndorserBlockSize
-  , endorserBlockReferences
   , mkEndorserBlock
   )
 import Ouroboros.Consensus.Storage.LeiosDB
@@ -88,7 +90,6 @@ import Ouroboros.Consensus.Storage.LeiosDB
   , LeiosDbWriter (..)
   , Promise (..)
   , allocateReader
-  , awaitAll
   , newLeiosDBSQLite
   , withWriter
   )
@@ -247,19 +248,21 @@ runBench mLoad BenchEnv{beDb, beVoter, bePeers, beApplier} = do
     async $ withWriter beDb $ \w -> drainWith q $ \(point, batch, done) -> do
       writeChunk w point batch
       putMVar done ()
-  voter <- async $ drainWith voteQ $ \(eb, _, onDone) ->
-    closureRead beVoter eb VoteRead record missing >> onDone
+  voter <- async $ drainWith voteQ $ \(point, eb, _, onDone) ->
+    closureRead beVoter point eb VoteRead record missing >> onDone
   peers <- forM (zip3 [1 ..] bePeers peerQs) $ \(seed, r, q) ->
-    async $ drainWith q $ \(eb, completed, onDone) ->
-      servePeer seed r eb completed record missing >> onDone
+    async $ drainWith q $ \(point, eb, completed, onDone) ->
+      servePeer seed r point eb completed record missing >> onDone
   let
     -- Fetch an EB as the fetch logic does, in the next slot: its point and
     -- body, then its Tx chunks from the upstream peers. Then hand it to the
     -- voter and the downstream peers, each calling the given action when done.
+    -- Returns its point.
     fetchEb eb onDone = do
       slot <- atomicModifyIORef' slotVar $ \n -> (n + 1, n)
-      when (slot `mod` gcEvery == 0) $
-        leiosDbGarbageCollect beDb (SlotNo (fromIntegral (slot + 1 - numVolatileEbs)))
+      when (slot `mod` gcEvery == 0) $ do
+        leiosDbPromoteToImmutable beDb (SlotNo (fromIntegral (slot + 1 - numVolatileEbs))) []
+        garbageCollect beDb
       let point = MkLeiosPoint (SlotNo (fromIntegral slot)) (beHash eb)
       started <- getMonotonicTime
       withWriter beDb $ \w -> writeBody w point eb record
@@ -273,7 +276,8 @@ runBench mLoad BenchEnv{beDb, beVoter, bePeers, beApplier} = do
       when (beMeasured eb) $ do
         record FetchTotal (diffTime completed started)
         record FetchTxs (diffTime completed bodyDone)
-      forM_ (voteQ : peerQs) $ \q -> writeChan q (Just (eb, completed, onDone))
+      forM_ (voteQ : peerQs) $ \q -> writeChan q (Just (point, eb, completed, onDone))
+      pure point
   fetchedVar <- newIORef (0 :: Int)
   stopVar <- newIORef False
   t0 <- getMonotonicTime
@@ -292,12 +296,12 @@ runBench mLoad BenchEnv{beDb, beVoter, bePeers, beApplier} = do
         <> (if stopped then ", draining   " else "   ")
     hFlush stdout
     threadDelay 1
-  bursts <- forM mLoad $ \load -> async $ burstLoad load (`fetchEb` pure ()) stopVar t0
+  bursts <- forM mLoad $ \load -> async $ burstLoad load (void . (`fetchEb` pure ())) stopVar t0
   forM_ signal $ \eb -> do
     readers <- newQSemN 0
-    fetchEb eb (signalQSemN readers 1)
+    point <- fetchEb eb (signalQSemN readers 1)
     waitQSemN readers (1 + numDownstreamPeers)
-    closureRead beApplier eb ApplyRead record missing
+    closureRead beApplier point eb ApplyRead record missing
     atomicModifyIORef' fetchedVar $ \n -> (n + 1, ())
   atomicModifyIORef' stopVar $ \_ -> (True, ())
   mapM_ wait bursts
@@ -334,17 +338,15 @@ drainWith q k = loop
       Nothing -> pure ()
       Just x -> k x >> loop
 
--- | Write an EB's point and body, as the fetch logic does on receiving it.
+-- | Write an EB's body at its point, as the fetch logic does on receiving it.
 writeBody :: LeiosDbWriter IO -> LeiosPoint -> BenchEb -> Record -> IO ()
 writeBody w point eb@BenchEb{beEb} record =
-  timedStep eb FetchBody record $ do
-    pointWritten <- writeEbPoint w point (encodeEndorserBlockSize beEb)
-    bodyWritten <- writeEbBody w point beEb
-    awaitAll [pointWritten, void bodyWritten]
+  timedStep eb FetchBody record $
+    void . await =<< writeEbBody w point beEb mempty
 
 -- | Write a chunk of an EB's Txs, as the fetch logic does on receiving it.
 writeChunk :: LeiosDbWriter IO -> LeiosPoint -> [(TxOffset, BS.ByteString)] -> IO ()
-writeChunk w point batch = void . await =<< writeTxs w point batch
+writeChunk w point batch = void . await =<< writeTxs w point (Map.fromList batch)
 
 -- | Write an EB in full on one writer: its body, then its Tx chunks.
 ingest :: LeiosDbWriter IO -> LeiosPoint -> BenchEb -> Record -> IO ()
@@ -360,10 +362,10 @@ timedStep BenchEb{beMeasured} metric record action = do
   when beMeasured $ record metric (diffTime t' t)
 
 -- | Resolve a completed EB's closure, as the voter and block application do.
-closureRead :: LeiosDbReader IO -> BenchEb -> Metric -> Record -> IO () -> IO ()
-closureRead r BenchEb{beHash, beMeasured} metric record missing = do
+closureRead :: LeiosDbReader IO -> LeiosPoint -> BenchEb -> Metric -> Record -> IO () -> IO ()
+closureRead r point BenchEb{beMeasured} metric record missing = do
   t <- getMonotonicTime
-  mClosure <- lookupEbClosure r beHash
+  mClosure <- evaluate . force =<< lookupEbClosure r point
   t' <- getMonotonicTime
   case mClosure of
     Nothing -> missing
@@ -371,19 +373,19 @@ closureRead r BenchEb{beHash, beMeasured} metric record missing = do
 
 -- | A downstream peer fetching a completed EB in full, one request at a time:
 -- its body, then its TX chunks in the order of its seed.
-servePeer :: Int -> LeiosDbReader IO -> BenchEb -> Time -> Record -> IO () -> IO ()
-servePeer seed r BenchEb{beIdx, beHash, beMeasured} completed record missing = do
+servePeer :: Int -> LeiosDbReader IO -> LeiosPoint -> BenchEb -> Time -> Record -> IO () -> IO ()
+servePeer seed r point BenchEb{beIdx, beMeasured} completed record missing = do
   t <- getMonotonicTime
-  body <- lookupEbBody r beHash
+  body <- evaluate . force . fmap unSerialised =<< lookupEbBody r point
   t' <- getMonotonicTime
-  if length body /= txsPerEb
+  if isNothing body
     then missing
     else when beMeasured $ record ServeBody (diffTime t' t)
   forM_ (requests seed beIdx) $ \offsets -> do
     u <- getMonotonicTime
-    txs <- batchRetrieveTxs r beHash offsets
+    txs <- evaluate . force =<< batchRetrieveTxs r point (Set.fromList offsets)
     u' <- getMonotonicTime
-    if length [() | (_, _, Just _) <- txs] /= length offsets
+    if Map.size txs /= length offsets
       then missing
       else when beMeasured $ record ServeTxs (diffTime u' u)
   done <- getMonotonicTime
@@ -514,8 +516,7 @@ sleepUntil t = do
 -- | Generate the EB of the given index, fully evaluated.
 genBenchEb :: Int -> Bool -> IO BenchEb
 genBenchEb ebIdx measured = do
-  _ <-
-    evaluate $ List.foldl' (\n (h, _) -> n + BS.length (hashToBytes h)) 0 (endorserBlockReferences eb)
+  _ <- evaluate $ force eb
   _ <- evaluate $ sum [BS.length tx | batch <- batches, (_, tx) <- batch]
   pure
     BenchEb

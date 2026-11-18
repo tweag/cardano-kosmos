@@ -9,7 +9,6 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TypeOperators #-}
 
 module Cardano.Api.Experimental.Tx.Internal.BodyContent
   ( TxCertificates (..)
@@ -115,6 +114,9 @@ module Cardano.Api.Experimental.Tx.Internal.BodyContent
   , setTxVotingProcedures
   , setTxWithdrawals
   , setTxGuards
+  , bodyGuardCredentials
+  , bodyGuardEntries
+  , extractWitnessableGuards
   , setTxRequiredTopLevelGuards
   , setTxDirectDeposits
   , setTxAccountBalanceIntervals
@@ -166,6 +168,7 @@ import Cardano.Api.Experimental.Tx.Internal.AnyWitness
   , anyScriptWitnessToAnyWitness
   )
 import Cardano.Api.Experimental.Tx.Internal.Certificate.Compatible (getTxCertWitness)
+import Cardano.Api.Experimental.Tx.Internal.Guard
 import Cardano.Api.Experimental.Tx.Internal.TxScriptWitnessRequirements
   ( TxScriptWitnessRequirements (..)
   , getTxScriptWitnessesRequirements
@@ -186,6 +189,7 @@ import Cardano.Api.Plutus.Internal.Script
   , ScriptLanguage (..)
   , fromAllegraTimelock
   , toAllegraTimelock
+  , toDijkstraNativeScript
   )
 import Cardano.Api.Plutus.Internal.Script qualified as OldScript
 import Cardano.Api.Plutus.Internal.ScriptData qualified as Api
@@ -210,7 +214,6 @@ import Cardano.Api.Value.Internal
   )
 
 import Cardano.Binary qualified as CBOR
-import Cardano.Ledger.Allegra.Scripts (Timelock)
 import Cardano.Ledger.Alonzo.Scripts qualified as L
 import Cardano.Ledger.Alonzo.Tx qualified as L
 import Cardano.Ledger.Alonzo.TxBody qualified as L
@@ -470,7 +473,7 @@ eraSpecificLedgerTxBody era ledgerbody bc =
       Right $
         ledgerbody
           & L.guardsTxBodyL
-            .~ (txGuards bc <> OSet.fromSet (Set.map L.KeyHashObj reqSignerHashes))
+            .~ bodyGuardCredentials bc
           & L.subTransactionsTxBodyL .~ txSubTransactions bc
           & L.requiredTopLevelGuardsTxBodyL .~ txRequiredTopLevelGuards bc
           & L.directDepositsTxBodyL .~ txDirectDeposits bc
@@ -484,7 +487,7 @@ eraSpecificLedgerTxBody era ledgerbody bc =
   dijkstraOnlyFieldsSet =
     [ name
     | (name, isPresent) <-
-        [ ("txGuards", present (txGuards bc))
+        [ ("txGuards", present (toList (txGuards bc)))
         , ("txSubTransactions", present (txSubTransactions bc))
         , ("txRequiredTopLevelGuards", present (txRequiredTopLevelGuards bc))
         , ("txDirectDeposits", present (L.unDirectDeposits (txDirectDeposits bc)))
@@ -620,14 +623,14 @@ ledgerScriptToScriptInAnyLang script =
 -- | Convert a 'ScriptInAnyLang' to a ledger 'L.Script'. Reverse of 'ledgerScriptToScriptInAnyLang'.
 scriptInAnyLangToLedgerScript
   :: forall era
-   . ( L.AlonzoEraScript era
-     , L.NativeScript era ~ Timelock era
-     )
-  => ScriptInAnyLang -> Parser (L.Script era)
-scriptInAnyLangToLedgerScript (ScriptInAnyLang lang script) =
+   . L.AlonzoEraScript era
+  => (OldScript.SimpleScript -> L.NativeScript era)
+  -> ScriptInAnyLang
+  -> Parser (L.Script era)
+scriptInAnyLangToLedgerScript toNativeScript (ScriptInAnyLang lang script) =
   case (lang, script) of
     (SimpleScriptLanguage, OldScript.SimpleScript ss) ->
-      pure $ Ledger.fromNativeScript (toAllegraTimelock ss)
+      pure $ Ledger.fromNativeScript (toNativeScript ss)
     (PlutusScriptLanguage PlutusScriptV1, OldScript.PlutusScript _ (PlutusScriptSerialised sbs)) ->
       L.fromPlutusScript
         <$> L.mkPlutusScript (Plutus.Plutus (PlutusBinary sbs) :: Plutus.Plutus 'Plutus.PlutusV1)
@@ -664,6 +667,9 @@ instance FromJSON (TxOut L.BabbageEra) where
 instance FromJSON (TxOut L.ConwayEra) where
   parseJSON = Aeson.withObject "TxOut" (txOutParseJson ShelleyBasedEraConway)
 
+instance FromJSON (TxOut L.DijkstraEra) where
+  parseJSON = Aeson.withObject "TxOut" (txOutParseJson ShelleyBasedEraDijkstra)
+
 txOutParseJson
   :: ShelleyBasedEra era -> Aeson.Object -> Parser (TxOut (ShelleyLedgerEra era))
 txOutParseJson sbe o = do
@@ -689,10 +695,11 @@ txOutParseJson sbe o = do
         Nothing -> base
         Just dh -> base & L.dataHashTxOutL .~ SJust dh
     ShelleyBasedEraBabbage ->
-      babbageOnwardsTxOutParseJson (L.mkBasicTxOut addr mv) o
+      babbageOnwardsTxOutParseJson toAllegraTimelock (L.mkBasicTxOut addr mv) o
     ShelleyBasedEraConway ->
-      babbageOnwardsTxOutParseJson (L.mkBasicTxOut addr mv) o
-    ShelleyBasedEraDijkstra -> error "TODO Dijkstra: txOutParseJson: era not supported"
+      babbageOnwardsTxOutParseJson toAllegraTimelock (L.mkBasicTxOut addr mv) o
+    ShelleyBasedEraDijkstra ->
+      babbageOnwardsTxOutParseJson toDijkstraNativeScript (L.mkBasicTxOut addr mv) o
 
 -- | Parse a ledger 'L.Addr' from JSON. Reverse of 'addrToJson'.
 addrFromJson :: Aeson.Value -> Parser L.Addr
@@ -706,11 +713,12 @@ addrFromJson = Aeson.withText "Address" $ \txt ->
 -- | Parse a Babbage+ TxOut with datum and reference script support.
 babbageOnwardsTxOutParseJson
   :: forall era
-   . ( L.BabbageEraTxOut era
-     , L.NativeScript era ~ Timelock era
-     )
-  => L.TxOut era -> Aeson.Object -> Parser (TxOut era)
-babbageOnwardsTxOutParseJson baseTxOut o = do
+   . L.BabbageEraTxOut era
+  => (OldScript.SimpleScript -> L.NativeScript era)
+  -> L.TxOut era
+  -> Aeson.Object
+  -> Parser (TxOut era)
+babbageOnwardsTxOutParseJson toNativeScript baseTxOut o = do
   -- Parse datum fields
   mDatumHash <- o .:? "datumhash"
   mInlineDatumRaw <- o .:? "inlineDatumRaw"
@@ -748,7 +756,7 @@ babbageOnwardsTxOutParseJson baseTxOut o = do
         fail "babbageOnwardsTxOutParseJson: inlineDatumhash present without inlineDatumRaw"
       pure $ maybe L.NoDatum L.DatumHash mDatumHash
   -- Determine reference script
-  refScript <- L.maybeToStrictMaybe <$> forM mRefScript scriptInAnyLangToLedgerScript
+  refScript <- L.maybeToStrictMaybe <$> forM mRefScript (scriptInAnyLangToLedgerScript toNativeScript)
   -- Construct TxOut
   pure . TxOut $
     baseTxOut
@@ -936,7 +944,7 @@ data BodyContent (l :: L.TxLevel) era
   -- ------------------------------------------------------------
   -- Fields below are new in the Dijkstra era.
   -- ------------------------------------------------------------
-  , bcGuards :: OSet (L.Credential L.Guard)
+  , bcGuards :: TxGuards era
   , bcRequiredTopLevelGuards :: Map (L.Credential L.Guard) (StrictMaybe (L.Data era))
   , bcDirectDeposits :: L.DirectDeposits
   , bcAccountBalanceIntervals :: L.AccountBalanceIntervals era
@@ -995,7 +1003,7 @@ pattern TxBodyContent
   -> Maybe L.Coin
   -> Maybe L.Coin
   -> Map L.DataHash (L.Data era)
-  -> OSet (L.Credential L.Guard)
+  -> TxGuards era
   -> LOMap.OMap L.TxId (L.Tx L.SubTx era)
   -> Map (L.Credential L.Guard) (StrictMaybe (L.Data era))
   -> L.DirectDeposits
@@ -1086,7 +1094,7 @@ pattern SubTxBodyContent
   -> Maybe L.Coin
   -> Maybe L.Coin
   -> Map L.DataHash (L.Data era)
-  -> OSet (L.Credential L.Guard)
+  -> TxGuards era
   -> Map (L.Credential L.Guard) (StrictMaybe (L.Data era))
   -> L.DirectDeposits
   -> L.AccountBalanceIntervals era
@@ -1176,7 +1184,7 @@ defaultBodyContent topTxOnlyFields =
     , bcCurrentTreasuryValue = Nothing
     , bcTreasuryDonation = Nothing
     , bcSupplementalDatums = mempty
-    , bcGuards = OSet.empty
+    , bcGuards = emptyTxGuards
     , bcRequiredTopLevelGuards = mempty
     , bcDirectDeposits = L.DirectDeposits mempty
     , bcAccountBalanceIntervals = L.AccountBalanceIntervals mempty
@@ -1212,6 +1220,7 @@ extractAllIndexedPlutusScriptWitnesses era b = obtainCommonConstraints era $ do
       , indexedWithdrawalScriptWits
       , indexedProposalScriptWits
       , indexedVoteScriptWits
+      , createIndexedPlutusScriptWitnesses (extractWitnessableGuards b)
       ]
 
 extractWitnessableTxIns
@@ -1333,7 +1342,7 @@ collectTxBodyScriptWitnessRequirements
   => BodyContent l (LedgerEra era)
   -> TxScriptWitnessRequirements (LedgerEra era)
 collectTxBodyScriptWitnessRequirements
-  BodyContent
+  body@BodyContent
     { bcIns
     , bcInsReference
     , bcCertificates
@@ -1378,6 +1387,7 @@ collectTxBodyScriptWitnessRequirements
         , txMintWits
         , txVotingWits
         , txProposalWits
+        , getTxScriptWitnessesRequirements (extractWitnessableGuards body)
         ]
 
 obtainMonoidConstraint
@@ -1469,8 +1479,45 @@ setTxTreasuryDonation v bc = bc{bcTreasuryDonation = Just v}
 setTxSupplementalDatums :: Map L.DataHash (L.Data era) -> BodyContent l era -> BodyContent l era
 setTxSupplementalDatums v bc = bc{bcSupplementalDatums = v}
 
-setTxGuards :: OSet (L.Credential L.Guard) -> BodyContent l era -> BodyContent l era
-setTxGuards v bc = bc{bcGuards = v}
+-- | All guard credentials in ledger order. Redeemer indices refer to positions
+-- in this full sequence, including guards without a Plutus redeemer.
+bodyGuardCredentials :: BodyContent l era -> OSet (L.Credential L.Guard)
+bodyGuardCredentials = OSet.fromList . map fst . bodyGuardEntries
+
+-- | This body's explicit key and script guards, for either transaction level.
+-- Only top-level bodies append extra required signers not already present;
+-- sub-transactions have no separate extra-signers field. Use this same order
+-- for the ledger body and redeemer indices.
+bodyGuardEntries :: BodyContent l era -> [(L.Credential L.Guard, Maybe (ScriptGuardWitness era))]
+bodyGuardEntries bc =
+  explicit
+    <> [(credential, Nothing) | credential <- Set.toList extraKeys, Set.notMember credential present]
+ where
+  explicit = toList (bcGuards bc)
+  present = Set.fromList (map fst explicit)
+  extraKeys = case bcTopTxOnlyFields bc of
+    AbsentInSubTx -> mempty
+    TopTxFields{tlExtraKeyWits} -> Set.map L.KeyHashObj (convExtraKeyWitnesses tlExtraKeyWits)
+
+extractWitnessableGuards
+  :: forall l era
+   . IsEra era
+  => BodyContent l (LedgerEra era)
+  -> [(Witnessable GuardItem (LedgerEra era), AnyWitness (LedgerEra era))]
+extractWitnessableGuards bc = case useEra @era of
+  ConwayEra -> []
+  DijkstraEra ->
+    -- Placeholders reserve the position of entries without a supplied script
+    -- witness; the credential itself still determines whether a key is needed.
+    [ (WitGuard credential, maybe AnyKeyWitnessPlaceholder scriptGuardWitnessToAnyWitness witness)
+    | (credential, witness) <- bodyGuardEntries bc
+    ]
+
+-- | Replace the ordered guards and their optional witnesses together.
+-- Build the collection with 'mkTxGuards'. Reference-script inputs must also
+-- be included with 'setTxInsReference', as for other witnesses.
+setTxGuards :: TxGuards era -> BodyContent l era -> BodyContent l era
+setTxGuards guards bc = bc{bcGuards = guards}
 
 setTxRequiredTopLevelGuards
   :: Map (L.Credential L.Guard) (StrictMaybe (L.Data era)) -> BodyContent l era -> BodyContent l era

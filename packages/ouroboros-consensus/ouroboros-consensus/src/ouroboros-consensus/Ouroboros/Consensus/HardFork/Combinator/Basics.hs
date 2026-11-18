@@ -6,7 +6,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -105,6 +104,7 @@ import Ouroboros.Consensus.HardFork.Combinator.Abstract.SingleEraBlock
   )
 import Ouroboros.Consensus.HardFork.Combinator.AcrossEras
 import Ouroboros.Consensus.HardFork.Combinator.PartialConfig
+import qualified Ouroboros.Consensus.HardFork.Combinator.State.Infra as State
 import Ouroboros.Consensus.HardFork.Combinator.State.Instances ()
 import Ouroboros.Consensus.HardFork.Combinator.State.Types
 import qualified Ouroboros.Consensus.HardFork.History as History
@@ -113,6 +113,7 @@ import Ouroboros.Consensus.Ledger.SupportsMempool
   ( HasSizeForBlockBodyInclusion (..)
   , TxLimits (..)
   )
+import Ouroboros.Consensus.Ledger.SupportsPeras (LedgerStateSupportsPeras (..))
 import Ouroboros.Consensus.Peras.Context
   ( BoundedPerasEpochContext (..)
   , PerasEpochContextResolver (..)
@@ -750,17 +751,13 @@ instance
         )
       $ nsBlock
 
-  readPerasPrivateKeyFromEnv _proxy =
-    fmap PerEraPerasPrivateKey $
-      hsequence' $
-        hcpure proxySingle dispatchReadKey
-   where
-    dispatchReadKey ::
-      forall blk.
-      SingleEraBlock blk =>
-      (Either String :.: WrapPerasPrivateKey) blk
-    dispatchReadKey =
-      Comp
-        . fmap WrapPerasPrivateKey
-        . readPerasPrivateKeyFromEnv
-        $ Proxy @blk
+{-------------------------------------------------------------------------------
+  LedgerSupportsPeras
+-------------------------------------------------------------------------------}
+
+instance CanHardFork xs => LedgerStateSupportsPeras (LedgerState (HardForkBlock xs)) where
+  getPoolDistr =
+    hcollapse
+      . hcmap proxySingle (K . getPoolDistr . unFlip)
+      . State.tip
+      . hardForkLedgerStatePerEra

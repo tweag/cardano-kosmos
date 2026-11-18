@@ -17,6 +17,7 @@ import           Cardano.Api.Ledger (EpochInterval (EpochInterval))
 import           Cardano.Ledger.Conway.Governance (RatifyState (..))
 import qualified Cardano.Ledger.Conway.Governance as L
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -54,14 +55,16 @@ hprop_ledger_events_info_action :: Property
 hprop_ledger_events_info_action = integrationRetryWorkspace 2 "info-hash" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
 
 
-  conf@Conf { tempAbsPath } <- H.noteShowM $ mkConf tempAbsBasePath'
+  conf@Conf { tempAbsPath } <- H.noteShow $ mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
+  let era = testEra
+
+      ceo = convert era
+      sbe = convert era
       asbe = AnyShelleyBasedEra sbe
       eraName = eraToString sbe
       creationOptions = def

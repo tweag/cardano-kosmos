@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -15,6 +14,7 @@ module Ouroboros.Consensus.Tracing.ChainDB
   , fragmentChainDensity
   ) where
 
+import qualified Cardano.Crypto.Hash.Class as Crypto
 import Cardano.Ledger.BaseTypes (unNonZero)
 import Cardano.Logging
 import Cardano.Slotting.Time (getSlotLength)
@@ -22,7 +22,6 @@ import Data.Aeson (Object, ToJSON, Value (Object, String), object, toJSON, (.=))
 import qualified Data.ByteString.Base16 as B16
 import Data.Int (Int64)
 import qualified Data.List.NonEmpty as NonEmpty
-import Data.Functor ((<&>))
 import Data.SOP (All, K (..), hcmap, hcollapse)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -647,6 +646,12 @@ instance
         "Added request to queue to reprocess blocks postponed by LoE" <> ", queue size " <> condenseT sz
   forHuman ChainDB.PoppedReprocessLoEBlocksFromQueue =
     "Poppped request from queue to reprocess blocks postponed by LoE."
+  forHuman (ChainDB.ReconsideredParkedBlocks ebHash n) =
+    "Reconsidering "
+      <> condenseT n
+      <> " blocks parked on endorser block "
+      <> Crypto.hashToTextAsHex ebHash
+      <> ", whose closure is now acquired."
   forHuman ChainDB.ChainSelectionLoEDebug{} =
     "ChainDB LoE debug event"
   forMachine dtal (ChainDB.IgnoreBlockOlderThanImmTip pt) =
@@ -798,6 +803,12 @@ instance
       ]
   forMachine _dtal ChainDB.PoppedReprocessLoEBlocksFromQueue =
     mconcat ["kind" .= String "PoppedReprocessLoEBlocksFromQueue"]
+  forMachine _dtal (ChainDB.ReconsideredParkedBlocks ebHash n) =
+    mconcat
+      [ "kind" .= String "ReconsideredParkedBlocks"
+      , "ebHash" .= String (Crypto.hashToTextAsHex ebHash)
+      , "blocks" .= n
+      ]
   forMachine dtal (ChainDB.ChainSelectionLoEDebug curChain loeFrag) =
     case loeFrag of
       ChainDB.LoEEnabled loeF ->
@@ -901,6 +912,8 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     Namespace [] ["AddedReprocessLoEBlocksToQueue"]
   namespaceFor ChainDB.PoppedReprocessLoEBlocksFromQueue =
     Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+  namespaceFor ChainDB.ReconsideredParkedBlocks{} =
+    Namespace [] ["ReconsideredParkedBlocks"]
   namespaceFor ChainDB.ChainSelectionLoEDebug{} =
     Namespace [] ["ChainSelectionLoEDebug"]
 
@@ -937,6 +950,7 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     severityFor (Namespace out tl :: Namespace (ChainDB.TracePipeliningEvent blk)) Nothing
   severityFor (Namespace _ ["AddedReprocessLoEBlocksToQueue"]) _ = Just Debug
   severityFor (Namespace _ ["PoppedReprocessLoEBlocksFromQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["ReconsideredParkedBlocks"]) _ = Just Debug
   severityFor (Namespace _ ["ChainSelectionLoEDebug"]) _ = Just Debug
   severityFor _ _ = Nothing
 
@@ -1050,6 +1064,10 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
       "A block was added to the Volatile DB"
   documentFor (Namespace _ ["PoppingFromQueue"]) = Just ""
   documentFor (Namespace _ ["PoppedBlockFromQueue"]) = Just ""
+  documentFor (Namespace _ ["ReconsideredParkedBlocks"]) =
+    Just
+      "ChainSel reconsidered the blocks containing a certificate of an endorser block,\
+      \ which it parked until the closure of that endorser block arrived."
   documentFor (Namespace _ ["TryAddToCurrentChain"]) =
     Just $
       mconcat
@@ -1111,6 +1129,7 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     , Namespace [] ["SwitchedToAFork"]
     , Namespace [] ["AddedReprocessLoEBlocksToQueue"]
     , Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+    , Namespace [] ["ReconsideredParkedBlocks"]
     , Namespace [] ["ChainSelectionLoEDebug"]
     ]
       ++ map
@@ -2037,7 +2056,7 @@ instance
       , "cert" .= String (Text.pack $ show cert)
       , "result" .= String (Text.pack $ show result)
       ]
-  forMachine _dtal (PerasCertDB.GarbageCollected (SlotNo slotNo)) =
+  forMachine _dtal (PerasCertDB.GarbageCollected slotNo) =
     mconcat
       [ "kind" .= String "GarbageCollected"
       , "slot" .= String (Text.pack $ show slotNo)
@@ -3114,6 +3133,12 @@ instance ConvertRawHash blk => LogFormatting (ImmDB.TraceChunkValidation blk Imm
       , "chunkNo" .= String (renderChunkNo chunkNo)
       , "block" .= String (renderPointForDetails dtal pt)
       ]
+  forMachine dtal (ImmDB.InvalidChunkFile chunkNo (ImmDB.ChunkErrIncomplete pt)) =
+    mconcat
+      [ "kind" .= String "TraceImmutableDBEvent.InvalidChunkFile.ChunkErrIncomplete"
+      , "chunkNo" .= String (renderChunkNo chunkNo)
+      , "block" .= String (renderPointForDetails dtal pt)
+      ]
   forMachine _dtal (ImmDB.ValidatedChunk chunkNo _) =
     mconcat
       [ "kind" .= String "TraceImmutableDBEvent.ValidatedChunk"
@@ -3310,6 +3335,16 @@ instance StandardHash blk => LogFormatting (VolDB.TraceEvent blk) where
       ]
   forMachine _dtal VolDB.DBClosed =
     mconcat ["kind" .= String "DBClosed"]
+  forMachine _dtal (VolDB.ForgotLeiosCertBlocks n) =
+    mconcat
+      [ "kind" .= String "ForgotLeiosCertBlocks"
+      , "count" .= n
+      ]
+  forMachine _dtal (VolDB.ReadmittedForgottenBlock blockId) =
+    mconcat
+      [ "kind" .= String "ReadmittedForgottenBlock"
+      , "blockId" .= String (showT blockId)
+      ]
 
 instance MetaTrace (VolDB.TraceEvent blk) where
   namespaceFor VolDB.DBAlreadyClosed{} = Namespace [] ["DBAlreadyClosed"]
@@ -3317,12 +3352,16 @@ instance MetaTrace (VolDB.TraceEvent blk) where
   namespaceFor VolDB.Truncate{} = Namespace [] ["Truncate"]
   namespaceFor VolDB.InvalidFileNames{} = Namespace [] ["InvalidFileNames"]
   namespaceFor VolDB.DBClosed{} = Namespace [] ["DBClosed"]
+  namespaceFor VolDB.ForgotLeiosCertBlocks{} = Namespace [] ["ForgotLeiosCertBlocks"]
+  namespaceFor VolDB.ReadmittedForgottenBlock{} = Namespace [] ["ReadmittedForgottenBlock"]
 
   severityFor (Namespace _ ["DBAlreadyClosed"]) _ = Just Debug
   severityFor (Namespace _ ["BlockAlreadyHere"]) _ = Just Debug
   severityFor (Namespace _ ["Truncate"]) _ = Just Debug
   severityFor (Namespace _ ["InvalidFileNames"]) _ = Just Debug
   severityFor (Namespace _ ["DBClosed"]) _ = Just Debug
+  severityFor (Namespace _ ["ForgotLeiosCertBlocks"]) _ = Just Info
+  severityFor (Namespace _ ["ReadmittedForgottenBlock"]) _ = Just Debug
   severityFor _ _ = Nothing
 
   documentFor (Namespace _ ["DBAlreadyClosed"]) =
@@ -3340,6 +3379,12 @@ instance MetaTrace (VolDB.TraceEvent blk) where
   documentFor (Namespace _ ["DBClosed"]) =
     Just
       "Closing the volatile DB"
+  documentFor (Namespace _ ["ForgotLeiosCertBlocks"]) =
+    Just
+      "How many blocks containing a Leios certificate, not on the initial selection, the DB forgot at start-up."
+  documentFor (Namespace _ ["ReadmittedForgottenBlock"]) =
+    Just
+      "A forgotten block was added again, so the DB knows it once more."
   documentFor _ = Nothing
 
   allNamespaces =
@@ -3348,6 +3393,8 @@ instance MetaTrace (VolDB.TraceEvent blk) where
     , Namespace [] ["Truncate"]
     , Namespace [] ["InvalidFileNames"]
     , Namespace [] ["DBClosed"]
+    , Namespace [] ["ForgotLeiosCertBlocks"]
+    , Namespace [] ["ReadmittedForgottenBlock"]
     ]
 
 --------------------------------------------------------------------------------
@@ -3526,6 +3573,11 @@ instance
       [ "kind" .= String "ExtValidationErrorPerasCertInBlock"
       , "error" .= String (showT err)
       ]
+  forMachine _dtal (ExtValidationErrorLeiosCert err) =
+    mconcat
+      [ "kind" .= String "ExtValidationErrorLeiosCert"
+      , "error" .= String (showT err)
+      ]
 
   forHuman (ExtValidationErrorLedger err) = forHuman err
   forHuman (ExtValidationErrorHeader err) = forHuman err
@@ -3533,11 +3585,14 @@ instance
     "Could not resolve the Peras epoch context: " <> showT err
   forHuman (ExtValidationErrorPerasCertInBlock err) =
     "Invalid Peras certificate in block: " <> showT err
+  forHuman (ExtValidationErrorLeiosCert err) =
+    "Invalid Leios certificate in block: " <> showT err
 
   asMetrics (ExtValidationErrorLedger err) = asMetrics err
   asMetrics (ExtValidationErrorHeader err) = asMetrics err
   asMetrics ExtValidationErrorPerasEpochContextResolver{} = []
   asMetrics ExtValidationErrorPerasCertInBlock{} = []
+  asMetrics ExtValidationErrorLeiosCert{} = []
 
 instance
   Show (PBFT.PBftVerKeyHash c) =>
@@ -3676,14 +3731,14 @@ instance MetaTrace (ChainDB.TraceAddPerasCertEvent blk) where
   namespaceFor (ChainDB.PerasCertBoostsBlockNotYetReceived _ _) = Namespace [] ["PerasCertBoostsBlockNotYetReceived"]
   namespaceFor (ChainDB.ChainSelectionForBoostedBlock _ _) = Namespace [] ["ChainSelectionForBoostedBlock"]
 
-  severityFor _ msg = msg <&> \case
-    ChainDB.AddedPerasCertToQueue{} -> Debug
-    ChainDB.PoppedPerasCertFromQueue{} -> Debug
-    ChainDB.IgnorePerasCertTooOld{} -> Info
-    ChainDB.PerasCertBoostsCurrentChain{} -> Info
-    ChainDB.PerasCertBoostsBlockNotYetReceived{} -> Info
-    ChainDB.ChainSelectionForBoostedBlock{} -> Info
-    ChainDB.PerasCertBoostsGenesis{} -> Info
+  severityFor (Namespace _ ["AddedPerasCertToQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["PoppedPerasCertFromQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["IgnorePerasCertTooOld"]) _ = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsCurrentChain"]) _ = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsGenesis"]) _ = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsBlockNotYetReceived"]) _ = Just Info
+  severityFor (Namespace _ ["ChainSelectionForBoostedBlock"]) _ = Just Info
+  severityFor _ _ = Nothing
 
   privacyFor (Namespace _ ["AddedPerasCertToQueue"]) _ = Just Public
   privacyFor (Namespace _ ["PoppedPerasCertFromQueue"]) _ = Just Public

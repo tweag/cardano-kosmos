@@ -6,10 +6,13 @@
 
 module Cardano.Ledger.Dijkstra.Rules (
   module Cardano.Ledger.Dijkstra.Rules.Bbody,
+  module Cardano.Ledger.Dijkstra.Rules.Eb,
+  module Cardano.Ledger.Dijkstra.Rules.EbLedgers,
   module Cardano.Ledger.Dijkstra.Rules.Entities,
   module Cardano.Ledger.Dijkstra.Rules.Gov,
   module Cardano.Ledger.Dijkstra.Rules.GovCert,
   module Cardano.Ledger.Dijkstra.Rules.Ledger,
+  module Cardano.Ledger.Dijkstra.Rules.LeiosCert,
   module Cardano.Ledger.Dijkstra.Rules.Mempool,
   module Cardano.Ledger.Dijkstra.Rules.Snap,
   module Cardano.Ledger.Dijkstra.Rules.SubCert,
@@ -36,12 +39,15 @@ import Cardano.Ledger.Dijkstra.Rules.Bbody
 import Cardano.Ledger.Dijkstra.Rules.Cert ()
 import Cardano.Ledger.Dijkstra.Rules.Certs ()
 import Cardano.Ledger.Dijkstra.Rules.Deleg ()
+import Cardano.Ledger.Dijkstra.Rules.Eb
+import Cardano.Ledger.Dijkstra.Rules.EbLedgers
 import Cardano.Ledger.Dijkstra.Rules.Entities
 import Cardano.Ledger.Dijkstra.Rules.Epoch ()
 import Cardano.Ledger.Dijkstra.Rules.Gov
 import Cardano.Ledger.Dijkstra.Rules.GovCert
 import Cardano.Ledger.Dijkstra.Rules.Ledger
 import Cardano.Ledger.Dijkstra.Rules.Ledgers ()
+import Cardano.Ledger.Dijkstra.Rules.LeiosCert
 import Cardano.Ledger.Dijkstra.Rules.Mempool
 import Cardano.Ledger.Dijkstra.Rules.Pool
 import Cardano.Ledger.Dijkstra.Rules.Snap (maxKeyAgeEpochs)

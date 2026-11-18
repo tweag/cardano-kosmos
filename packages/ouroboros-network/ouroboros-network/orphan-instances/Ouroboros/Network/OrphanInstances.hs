@@ -639,14 +639,14 @@ instance ToJSON Mux.ChannelTrace where
              , "miniProtocolNum" .= miniProtocolNum
              , "length" .= len
              ]
-    Mux.TraceChannelSendStart miniProtocolNum len ->
+    Mux.TraceChannelSendStart miniProtocolNum ->
       object [ "type" .= String "SendStart"
              , "miniProtocolNum" .= miniProtocolNum
-             , "length" .= len
              ]
-    Mux.TraceChannelSendEnd miniProtocolNum ->
+    Mux.TraceChannelSendEnd miniProtocolNum len ->
       object [ "type" .= String "SendEnd"
              , "miniProtocolNum" .= miniProtocolNum
+             , "length" .= len
              ]
 
 
@@ -1612,6 +1612,10 @@ instance (ToJSON addr, ToJSONKey addr, Show addr)
            , "connectionId" .= toJSON connId
            , "reason" .= show s
            ]
+  toJSON (InboundGovernor.TrStaleMuxFinished connId)           =
+    object [ "kind" .= String "StaleMuxFinished"
+           , "connectionId" .= toJSON connId
+           ]
   toJSON (InboundGovernor.TrInboundGovernorCounters counters) =
     object [ "kind" .= String "InboundGovernorCounters"
            , "idlePeers" .= InboundGovernor.idlePeersRemote counters
@@ -1848,6 +1852,11 @@ instance ( ToJSON txid
   toJSON TraceTxInboundTerminated =
     object
       [ "kind" .= String "TxInboundTerminated"
+      ]
+  toJSON (TraceTxInboundMaxNumTxsToRequestClamped (Tx.NumTxsToReq reqs)) =
+    object
+      [ "kind" .= String "TxInboundMaxNumTxsToRequestClamped"
+      , "numTxsToRequest" .= reqs
       ]
 
 traceSharedTxStateToJSON

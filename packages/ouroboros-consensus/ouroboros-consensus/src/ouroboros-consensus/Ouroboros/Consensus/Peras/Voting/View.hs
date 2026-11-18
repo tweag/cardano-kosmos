@@ -277,19 +277,12 @@ mkPerasVotingView
       -- that it extends any volatile suffix.
       True
     candidateBlockExtendsCert (CertBoostingBlockInVolatileDB cert) =
-      -- FIXME: there is a bug in this code path: the call to
-      -- 'withinFragmentBounds' always returns 'False'. We need to understand if
-      -- this is because 'withinFragmentBounds' is being called on an immutable
-      -- block and that's not being properly reflected on the
-      -- 'WithBoostedBlockStatus' of 'cert', or if something fishy is going on
-      -- between 'chainAtCandidateBlock' and 'withinFragmentBounds'.
-      const True $
-        -- The block boosted by the latest certificate seen is still in the
-        -- VolatileDB, so we can check whether it is within the bounds of the
-        -- anchored fragment leading to the candidate block.
-        AF.withinFragmentBounds
-          (castPoint (getPerasCertPoint cert))
-          chainAtCandidateBlock
+      -- The block boosted by the latest certificate seen is still in the
+      -- VolatileDB, so we can check whether it is within the bounds of the
+      -- anchored fragment leading to the candidate block.
+      AF.withinFragmentBounds
+        (castPoint (getPerasCertPoint cert))
+        chainAtCandidateBlock
 
     candidateBlock =
       AF.anchorToPoint

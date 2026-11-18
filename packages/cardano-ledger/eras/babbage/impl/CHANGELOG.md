@@ -1,8 +1,18 @@
 # Version history for `cardano-ledger-babbage`
 
-## 1.15.0.1
+## 1.16.0.0
 
-*
+* Add `getTxOutsReferenceScripts`
+* Remove `feesOK`
+* Replace `TranslateEra BabbageEra (Tx TopTx)` with `TranslateEra BabbageEra MempoolTx`
+* Move `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances from `Tx l BabbageEra` to `MempoolTx BabbageEra`
+* Generalize the `wireSizeTxF` re-export and remove the `binaryUpgradeTx` re-export from `Cardano.Ledger.Babbage.Core`
+* Change the `STS` state of `LEDGER` rule to `LedgerStateWithLimits`
+
+### `testlib`
+
+* Add `Arbitrary` instance for `MempoolTx BabbageEra`
+* Replace the `DecCBOR` instance for `Tx TopTx BabbageEra` with one for `MempoolTx BabbageEra`
 
 ## 1.15.0.0
 

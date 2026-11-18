@@ -22,7 +22,6 @@ module Cardano.Ledger.Dijkstra.Rules.Pool (
 ) where
 
 import Cardano.Crypto.DSIGN (verifyPossessionProofDSIGN)
-import Cardano.Crypto.DSIGN.BLS12381.Internal (minSigPoPDST)
 import Cardano.Crypto.Hash.Class (hashSize)
 import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Binary (
@@ -48,7 +47,7 @@ import Control.State.Transition (
   tellEvent,
   (?!),
  )
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import Data.Primitive.ByteArray (sizeofByteArray)
 import qualified Data.Set as Set
 import Data.Word (Word8)
@@ -244,7 +243,6 @@ poolTransition = do
             Left _ <-
               pure $
                 verifyPossessionProofDSIGN
-                  minSigPoPDST
                   blsPubKey
                   blsPossessionProof
             pure (sppId, blsKey)

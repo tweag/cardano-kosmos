@@ -19,6 +19,7 @@ import Cardano.Ledger.Babbage.PParams ()
 import Cardano.Ledger.Babbage.State
 import Cardano.Ledger.BaseTypes (StrictMaybe (..))
 import Cardano.Ledger.Binary (DecoderError)
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (UnsafeMkMempoolTx))
 import Cardano.Ledger.Shelley.LedgerState (
   EpochState (..),
   LedgerState (..),
@@ -58,24 +59,22 @@ instance TranslateEra BabbageEra NewEpochState where
         , nesLastTickSlotNo = nesLastTickSlotNo nes
         }
 
-instance TranslateEra BabbageEra (Tx TopTx) where
-  type TranslationError BabbageEra (Tx TopTx) = DecoderError
-  translateEra _ctxt tx =
-    withTopTxLevelOnly tx $ \tx' -> do
-      -- Note that this does not preserve the hidden bytes field of the transaction.
-      -- This is under the premise that this is irrelevant for TxInBlocks, which are
-      -- not transmitted as contiguous chunks.
-      txBody <- translateEraThroughCBOR "TxBody" $ tx' ^. bodyTxL
-      txWits <- translateEraThroughCBOR "TxWitness" $ tx' ^. witsTxL
-      auxData <- case tx' ^. auxDataTxL of
-        SNothing -> pure SNothing
-        SJust auxData -> SJust <$> translateEraThroughCBOR "AuxData" auxData
-      let validating = tx' ^. isPhase2ValidTxL
-      pure . asSTxTopLevel $
-        mkBasicTx txBody
-          & witsTxL .~ txWits
-          & auxDataTxL .~ auxData
-          & isPhase2ValidTxL .~ validating
+instance TranslateEra BabbageEra MempoolTx where
+  type TranslationError BabbageEra MempoolTx = DecoderError
+  translateEra _ctxt (UnsafeMkMempoolTx tx) = do
+    -- Translate the memoized components separately, retaining the bytes used by
+    -- transaction signatures and auxiliary-data hashes.
+    txBody <- translateEraThroughCBOR "TxBody" $ tx ^. bodyTxL
+    txWits <- translateEraThroughCBOR "TxWitness" $ tx ^. witsTxL
+    auxData <- case tx ^. auxDataTxL of
+      SNothing -> pure SNothing
+      SJust auxData -> SJust <$> translateEraThroughCBOR "AuxData" auxData
+    let isPhase2ValidTx = tx ^. isPhase2ValidTxL
+    pure . UnsafeMkMempoolTx $
+      mkBasicTx txBody
+        & witsTxL .~ txWits
+        & auxDataTxL .~ auxData
+        & isPhase2ValidTxL .~ isPhase2ValidTx
 
 --------------------------------------------------------------------------------
 -- Auxiliary instances and functions

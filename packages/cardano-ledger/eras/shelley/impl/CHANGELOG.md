@@ -2,6 +2,17 @@
 
 ## 1.21.0.0
 
+* Replace `Tx TopTx era` and `UTxO era` arguments of `validateFeeTooSmallUTxO` with `StAnnTx TopTx era`
+* Add `mkShelleyBlockEnv`
+* Add `BlockEnv` and `mkBlockEnv` type family to `ApplyBlock`
+* Add `getShelleyWitsVKeyNeededNoGovWith`
+* Change `applyTxWithFullValidation` to accept `MempoolTx era`
+* Export `MempoolTx`, `unwrapMempoolTx` and `getValidatedMempoolTx` from `Cardano.Ledger.Shelley.API.Mempool`
+* Move `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances from `Tx l ShelleyEra` to `MempoolTx ShelleyEra`
+* Generalize the `wireSizeTxF` re-export and remove the `binaryUpgradeTx` re-export from `Cardano.Ledger.Shelley.Core`
+* Change the `STS` state of `LEDGER` rule to `LedgerStateWithLimits`
+* Add `LedgerStateWithLimits`, `lswlLedgerState`, `lswlBlockBodyLimits`, `lswlLedgerStateL`, `lswlBlockBodyLimitsL`
+* Add `ShelleyBlockBodyLimits` and `sbblTxsSize`
 * Add `fvMinPoolCost` and `fvMinPoolMargin` fields to `Cardano.Ledger.Shelley.RewardUpdate.FreeVars`
 * Remove deprecated `leaderRew`, `memberRew` and `nonMyopicMemberRew` functions
 * Add `lsLastEbAnnouncement` field to `LedgerState` and `lsLastEbAnnouncementL`:
@@ -25,6 +36,14 @@
 
 ### `testlib`
 
+* Add `tickToCurSlot`
+* Add `impScriptsProvided` method to `ShelleyEraImp`
+* Add `impWitsPState` method to `ShelleyEraImp`
+* Add `updateAddrTxWitsWith`
+* Add a `PState` argument and the `EraCertState` constraint to `impWitsVKeyNeeded`
+* Add `Arbitrary` instance for `MempoolTx ShelleyEra`
+* Replace the `DecCBOR` instance for `Tx TopTx ShelleyEra` with one for `MempoolTx ShelleyEra`
+* Export `runShelleyBase` from `Test.Cardano.Ledger.Shelley.ImpTest`
 * Add `Test.Cardano.Ledger.Shelley.Imp.TickSpec`
 * Add `withTxsInModifiedBlock`
 * Add `initTransitionConfig` to `ShelleyEraImp`

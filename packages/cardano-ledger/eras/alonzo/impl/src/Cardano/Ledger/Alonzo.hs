@@ -82,7 +82,7 @@ instance ApplyTx AlonzoEra where
     deriving (Eq, Show)
     deriving newtype (EncCBOR, DecCBOR, Semigroup, Generic)
 
-  mkStAnnTx = mkAlonzoStAnnTx
+  mkStAnnTx ei sysStart pp utxo stAnnTxCache = mkAlonzoStAnnTx ei sysStart pp utxo stAnnTxCache 0
 
   internalApplyTxWithValidation validationPolicy globals env state tx =
     let stAnnTx =
@@ -120,6 +120,8 @@ instance ApplyTx AlonzoEra where
 instance ApplyTick AlonzoEra
 
 instance (EraBlockHeader h AlonzoEra, TPraosEraBlockHeader h AlonzoEra) => ApplyBlock h AlonzoEra where
+  type BlockEnv AlonzoEra = Shelley.BbodyEnv AlonzoEra
+  mkBlockEnv = mkShelleyBlockEnv
   wrapBlockSignal = TPraosBbodySignal
 
 mkAlonzoStAnnTx ::
@@ -133,9 +135,11 @@ mkAlonzoStAnnTx ::
   PParams era ->
   UTxO era ->
   Map.Map ScriptHash (SupportedPlutusRunnable era) ->
+  -- | Size in bytes of reference scripts used by this transaction
+  Int ->
   Tx TopTx era ->
   AlonzoStAnnTx TopTx era
-mkAlonzoStAnnTx ei sysStart pp utxo stAnnTxCache tx =
+mkAlonzoStAnnTx ei sysStart pp utxo stAnnTxCache refScriptsSize tx =
   let
     protVer = pp ^. ppProtocolVersionL
     scriptsNeeded = getScriptsNeeded utxo (tx ^. bodyTxL)
@@ -156,6 +160,8 @@ mkAlonzoStAnnTx ei sysStart pp utxo stAnnTxCache tx =
    in
     AlonzoStAnnTx
       { asatTx = tx
+      , asatRefScriptsSize = refScriptsSize
+      , asatExUnits = getTotalExUnits tx
       , asatScriptsNeeded = scriptsNeeded
       , asatScriptsProvided = scriptsProvided
       , asatPlutusRunnableCache = newStAnnTxCache
@@ -163,4 +169,5 @@ mkAlonzoStAnnTx ei sysStart pp utxo stAnnTxCache tx =
           Set.fromList [plutusLanguage spr | (_, SupportedPlutusRunnable spr) <- plutusScriptsUsed]
       , asatPlutusScriptsWithContext =
           scriptsWithContextFromLedgerTxInfo ledgerTxInfo (pp ^. ppCostModelsL)
+      , asatUTxO = utxo
       }

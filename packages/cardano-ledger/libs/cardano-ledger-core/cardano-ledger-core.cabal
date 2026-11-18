@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: cardano-ledger-core
-version: 1.23.0.0
+version: 1.24.0.0
 license: Apache-2.0
 maintainer: operations@iohk.io
 author: IOHK
@@ -71,6 +71,8 @@ library
     Cardano.Ledger.Keys.WitVKey
     Cardano.Ledger.MemoBytes
     Cardano.Ledger.MemoBytes.Internal
+    Cardano.Ledger.MempoolTx
+    Cardano.Ledger.MempoolTx.Internal
     Cardano.Ledger.Metadata
     Cardano.Ledger.Orphans
     Cardano.Ledger.Plutus

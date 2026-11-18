@@ -1,6 +1,6 @@
 cabal-version: 3.0
 name: cardano-ledger-dijkstra
-version: 0.5.0.0
+version: 0.6.0.0
 license: Apache-2.0
 maintainer: operations@iohk.io
 author: IOHK
@@ -59,12 +59,15 @@ library
     Cardano.Ledger.Dijkstra.Rules.Cert
     Cardano.Ledger.Dijkstra.Rules.Certs
     Cardano.Ledger.Dijkstra.Rules.Deleg
+    Cardano.Ledger.Dijkstra.Rules.Eb
+    Cardano.Ledger.Dijkstra.Rules.EbLedgers
     Cardano.Ledger.Dijkstra.Rules.Entities
     Cardano.Ledger.Dijkstra.Rules.Epoch
     Cardano.Ledger.Dijkstra.Rules.Gov
     Cardano.Ledger.Dijkstra.Rules.GovCert
     Cardano.Ledger.Dijkstra.Rules.Ledger
     Cardano.Ledger.Dijkstra.Rules.Ledgers
+    Cardano.Ledger.Dijkstra.Rules.LeiosCert
     Cardano.Ledger.Dijkstra.Rules.Mempool
     Cardano.Ledger.Dijkstra.Rules.Pool
     Cardano.Ledger.Dijkstra.Rules.PoolReap
@@ -118,11 +121,11 @@ library
     cardano-crypto-leios >=0.3,
     cardano-data ^>=1.4.1,
     cardano-ledger-allegra,
-    cardano-ledger-alonzo ^>=1.18,
-    cardano-ledger-babbage ^>=1.15,
+    cardano-ledger-alonzo ^>=1.19,
+    cardano-ledger-babbage ^>=1.16,
     cardano-ledger-binary ^>=1.10.2,
     cardano-ledger-conway ^>=1.25,
-    cardano-ledger-core:{cardano-ledger-core, internal} ^>=1.23,
+    cardano-ledger-core:{cardano-ledger-core, internal} ^>=1.24,
     cardano-ledger-mary,
     cardano-ledger-shelley ^>=1.21,
     cardano-slotting,
@@ -159,19 +162,25 @@ library testlib
     Test.Cardano.Ledger.Dijkstra.Imp
     Test.Cardano.Ledger.Dijkstra.Imp.BbodySpec
     Test.Cardano.Ledger.Dijkstra.Imp.CertSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.EbSpec
     Test.Cardano.Ledger.Dijkstra.Imp.EntitiesSpec
     Test.Cardano.Ledger.Dijkstra.Imp.LedgerSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.LeiosCertSpec
     Test.Cardano.Ledger.Dijkstra.Imp.MempoolSpec
     Test.Cardano.Ledger.Dijkstra.Imp.PoolSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SnapSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.SubDelegSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.SubGovCertSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SubGovSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SubLedgerSpec
+    Test.Cardano.Ledger.Dijkstra.Imp.SubPoolSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SubUtxoSpec
     Test.Cardano.Ledger.Dijkstra.Imp.SubUtxowSpec
     Test.Cardano.Ledger.Dijkstra.Imp.UtxoSpec
     Test.Cardano.Ledger.Dijkstra.Imp.UtxosSpec
     Test.Cardano.Ledger.Dijkstra.Imp.UtxowSpec
     Test.Cardano.Ledger.Dijkstra.ImpTest
+    Test.Cardano.Ledger.Dijkstra.Translation.TranslatableGen
     Test.Cardano.Ledger.Dijkstra.TreeDiff
     Test.Cardano.Ledger.Dijkstra.TxInfoSpec
 
@@ -200,6 +209,7 @@ library testlib
     base,
     bytestring,
     cardano-base,
+    cardano-base:testlib,
     cardano-crypto-class,
     cardano-crypto-leios,
     cardano-data,
@@ -220,6 +230,7 @@ library testlib
     microlens-mtl,
     mtl,
     plutus-ledger-api >=1.71,
+    plutus-tx,
     small-steps,
     tree-diff,
 

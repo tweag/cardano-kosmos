@@ -7,7 +7,4 @@ in
 fun input scenario =>
 {
   command = "%{input.cardano_binaries.cardano_node_chairman} run --config %{input.directory}/configuration.yaml --timeout %{24 * 60 * 60} --require-progress 10" ++ " " ++ mkSocketPaths scenario.topology.num_of_nodes input.directory,
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
 }

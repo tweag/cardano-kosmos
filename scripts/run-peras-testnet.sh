@@ -47,7 +47,11 @@ runTestnet() {
 
     echo "Running: $scenarioFile"
     export PC_DISABLE_TUI
-    ./scripts/mk-process-compose.sh "$scenarioArg" "$DEVENV_PATH"
+
+    pathOutput="$DEVENV_PATH/process-compose.yaml"
+
+    output=$(echo '(import "nickel/mk-process-compose.ncl") (import "nickel/testnet.ncl") (import "'"$DEVENV_PATH"/cardano_binaries.json'") (import "'"$scenarioFile"'") (import "'"$DEVENV_PATH"/topologies.json'")' | nickel export --format yaml)
+    echo "$output" > "$DEVENV_PATH/process-compose.yaml"
     exec process-compose up \
         -f "$DEVENV_PATH"/process-compose.yaml \
         -p 3030 \

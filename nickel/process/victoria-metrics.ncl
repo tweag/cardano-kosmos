@@ -1,7 +1,6 @@
 let { at, map, range, .. } = std.array in
 let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
-fun input scenario portsOfNodes =>
-let label_of = fun idx => at (idx - 1) scenario.topology.node_labels in
+fun input scenario topology =>
 {
   # VictoriaMetrics scrapes the cardano-tracer prometheus endpoint. The
   # scrape config must live in a real file passed via `-promscrape.config`;
@@ -13,14 +12,13 @@ let label_of = fun idx => at (idx - 1) scenario.topology.node_labels in
     let scrape_config = "%{input.directory}/vm-scrape.yml" in
     let node_rules =
       std.string.join "" (map
-        (fun idx =>
-          let port = std.string.from_number (at (idx - 1) portsOfNodes) in
+        (fun n =>
           "      - source_labels: [node_name]\n"
-          ++ "        regex: '.*_%{port}'\n"
+          ++ "        regex: '.*_%{n.port}'\n"
           ++ "        target_label: node\n"
-          ++ "        replacement: '%{label_of idx}'\n"
+          ++ "        replacement: '%{n.label}'\n"
         )
-        (range 1 (std.array.length portsOfNodes + 1))
+        topology
       )
     in
     let scrape_yaml =
@@ -33,9 +31,6 @@ let label_of = fun idx => at (idx - 1) scenario.topology.node_labels in
     in
     "printf '%s' '%{scrape_yaml}' > \"%{scrape_config}\""
     ++ " && victoria-metrics -promscrape.config=\"%{scrape_config}\" -storageDataPath=%{input.directory}/victoria-metrics-data",
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
   readiness_probe = {
     exec = {
       command = "curl -sf http://%{input.ip}:%{input.victoria.metrics_port}/",

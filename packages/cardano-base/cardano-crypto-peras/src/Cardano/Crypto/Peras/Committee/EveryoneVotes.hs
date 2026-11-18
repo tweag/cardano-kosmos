@@ -13,7 +13,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | A simple voting committee where pools with positive stake can vote.
-module Ouroboros.Consensus.Committee.EveryoneVotes
+module Cardano.Crypto.Peras.Committee.EveryoneVotes
   ( -- * Voting committee interface
     EveryoneVotes
   , VotingCommittee -- VotingCommittee internals are not exported
@@ -34,8 +34,8 @@ import Cardano.Binary
   , decodeListLenOf
   , encodeListLen
   )
-import Cardano.Ledger.BaseTypes (NonZero)
-import Cardano.Ledger.BaseTypes.NonZero (NonZero (..), nonZero)
+import Cardano.Crypto.Peras.Committee.Base (NonZero)
+import Cardano.Crypto.Peras.Committee.Base (NonZero (..), nonZero)
 import Control.Exception (Exception, assert)
 import Control.Monad.Zip (MonadZip (..))
 import qualified Data.Array as Array
@@ -50,7 +50,7 @@ import qualified Data.Set.NonEmpty as NESet
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import NoThunks.Class (NoThunks)
-import Ouroboros.Consensus.Committee.Class
+import Cardano.Crypto.Peras.Committee.Class
   ( CryptoSupportsVotingCommittee (..)
   , UniqueVotesWithSameTarget
   , VotingCommittee
@@ -58,7 +58,7 @@ import Ouroboros.Consensus.Committee.Class
   , getRawVotes
   , getVoteCandidateFromVotes
   )
-import Ouroboros.Consensus.Committee.Crypto
+import Cardano.Crypto.Peras.Committee.Crypto
   ( CryptoSupportsAggregateVoteSigning (..)
   , CryptoSupportsVoteSigning (..)
   , ElectionId
@@ -66,13 +66,13 @@ import Ouroboros.Consensus.Committee.Crypto
   , PublicKey
   , VoteCandidate
   )
-import Ouroboros.Consensus.Committee.Types
+import Cardano.Crypto.Peras.Committee.Types
   ( Cumulative (..)
   , LedgerStake (..)
   , PoolId
   , VoteWeight (..)
   )
-import Ouroboros.Consensus.Committee.WFA
+import Cardano.Crypto.Peras.Committee.WFA
   ( ExtWFAStakeDistr (..)
   , NumPoolsWithPositiveStake (..)
   , SeatIndex

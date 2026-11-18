@@ -5,7 +5,7 @@
 -- NOTE: concrete implementations might not need to implement all these
 -- interfaces, especially the ones regarding VRF-based eligibility proofs and
 -- aggregate vote signature verification.
-module Ouroboros.Consensus.Committee.Crypto
+module Cardano.Crypto.Peras.Committee.Crypto
   ( -- * Core types associated to voting committees
     PrivateKey
   , PublicKey
@@ -25,7 +25,7 @@ module Ouroboros.Consensus.Committee.Crypto
   , CryptoSupportsBatchVRFVerification (..)
   ) where
 
-import Cardano.Ledger.BaseTypes (Nonce)
+import Cardano.Crypto.Peras.Committee.Base (Nonce)
 import Data.Containers.NonEmpty (HasNonEmpty (..))
 import Data.Kind (Type)
 import Data.Proxy (Proxy)

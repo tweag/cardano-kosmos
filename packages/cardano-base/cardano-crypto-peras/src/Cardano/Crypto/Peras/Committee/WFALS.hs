@@ -28,9 +28,9 @@
 -- PDF: https://eprint.iacr.org/2023/1273.pdf
 --
 -- For this, we combine the deterministic portion of the weighted Fait-Accompli
--- scheme (defined in @Ouroboros.Consensus.Committee.WFA@) with local sortition
--- (defined in @Ouroboros.Consensus.Committee.LS@) as a fallback scheme.
-module Ouroboros.Consensus.Committee.WFALS
+-- scheme (defined in @Cardano.Crypto.Peras.Committee.WFA@) with local sortition
+-- (defined in @Cardano.Crypto.Peras.Committee.LS@) as a fallback scheme.
+module Cardano.Crypto.Peras.Committee.WFALS
   ( -- * Voting committee interface
     WFALS
   , VotingCommittee -- VotingCommittee internals are not exported
@@ -54,7 +54,7 @@ import Cardano.Binary
   , decodeListLenOf
   , encodeListLen
   )
-import Cardano.Ledger.BaseTypes (NonZero (..), Nonce, nonZero)
+import Cardano.Crypto.Peras.Committee.Base (NonZero (..), Nonce, nonZero)
 import Control.Exception (Exception, assert)
 import Control.Monad (void)
 import Control.Monad.Zip (MonadZip (..))
@@ -71,7 +71,7 @@ import Data.Maybe (catMaybes)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
 import NoThunks.Class (NoThunks)
-import Ouroboros.Consensus.Committee.Class
+import Cardano.Crypto.Peras.Committee.Class
   ( CryptoSupportsVotingCommittee (..)
   , UniqueVotesWithSameTarget
   , VotingCommittee
@@ -79,7 +79,7 @@ import Ouroboros.Consensus.Committee.Class
   , getRawVotes
   , getVoteCandidateFromVotes
   )
-import Ouroboros.Consensus.Committee.Crypto
+import Cardano.Crypto.Peras.Committee.Crypto
   ( CryptoSupportsAggregateVoteSigning (..)
   , CryptoSupportsBatchVRFVerification (..)
   , CryptoSupportsVRF (..)
@@ -90,18 +90,18 @@ import Ouroboros.Consensus.Committee.Crypto
   , VRFPoolContext (..)
   , VoteCandidate
   )
-import Ouroboros.Consensus.Committee.LS
+import Cardano.Crypto.Peras.Committee.LS
   ( LocalSortitionNumSeats (..)
   , localSortitionNumSeats
   )
-import Ouroboros.Consensus.Committee.Types
+import Cardano.Crypto.Peras.Committee.Types
   ( Cumulative (..)
   , LedgerStake (..)
   , PoolId
   , TargetCommitteeSize (..)
   , VoteWeight (..)
   )
-import Ouroboros.Consensus.Committee.WFA
+import Cardano.Crypto.Peras.Committee.WFA
   ( ExtWFAStakeDistr (..)
   , NonPersistentCommitteeSize (..)
   , PersistentCommitteeSize (..)

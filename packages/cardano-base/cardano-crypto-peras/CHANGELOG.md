@@ -12,6 +12,11 @@
 * Add `Cardano.Crypto.Peras.Vote` (`PerasVote`, `PerasVoteEligibilityProof`)
 * Add `PerasCertSize` and `perasCertSizeUpperBound` to `Cardano.Crypto.Peras.Cert`
 * Add `maxPerasCertSize`, the shared 40,000-byte certificate size policy limit
+* Add the voting committees (`Cardano.Crypto.Peras.Committee.*`: wFA^LS and everyone-votes)
+  and the BLS crypto scheme `PerasBLSCrypto` (`Cardano.Crypto.Peras.Crypto.BLS`), moved from
+  `ouroboros-consensus` (`Ouroboros.Consensus.Committee.*` and
+  `Ouroboros.Consensus.Peras.Crypto.BLS`). The code is unchanged; the ledger types it uses
+  are mirrored, under the same names, in `Cardano.Crypto.Peras.Committee.Base`
 
 ### `testlib`
 

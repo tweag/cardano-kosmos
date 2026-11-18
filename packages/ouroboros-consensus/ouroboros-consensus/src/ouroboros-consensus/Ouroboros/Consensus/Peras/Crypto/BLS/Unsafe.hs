@@ -7,7 +7,7 @@
 -- variable 'PERAS_PRIVATE_KEY'.
 --
 -- * Public keys from all nodes (including oneself) can be read from a JSON file
--- specified in the environment variable 'PERAS_PUBLIC_KEY_FILE'.
+-- specified in the environment variable 'PERAS_PRIVATE_KEYS_FILE'.
 --
 -- NOTE: keys read using this module always have the "TESTNET" scope.
 --
@@ -22,8 +22,12 @@ module Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
 
 import Cardano.Ledger.State (IndividualPoolStake (..), PoolDistr (..))
 import Data.Aeson (eitherDecodeFileStrict')
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Base16 as B16
+import qualified Data.ByteString.Char8 as BSC
 import Data.Map.Strict (Map)
+import qualified Data.Text as Text
 import qualified Data.Map.Strict as Map
 import Data.String (IsString (..))
 import qualified Ouroboros.Consensus.Committee.Crypto.BLS as BLS
@@ -62,7 +66,7 @@ unsafePerasBLSPrivateKeyFromEnv =
 
 -- | Extend a given 'PoolDistr' with the corresponding BLS public keys for each
 -- pool retrieved from the JSON file specified in the environment variable
--- 'PERAS_PUBLIC_KEY_FILE'.
+-- 'PERAS_PRIVATE_KEYS_FILE'.
 --
 -- WARNING: this is a temporary hack for testing purposes, and should not be
 -- used under any circumstances in production. This will be replaced with proper
@@ -89,7 +93,7 @@ unsafeExtendPerasStakeDistrWithPublicKeysFromEnv poolDistr = do
     $ poolDistr
 
 -- | Retrieve the BLS public keys for the Peras committee members from a JSON
--- file specified in the environment variable 'PERAS_PUBLIC_KEY_FILE'.
+-- file specified in the environment variable 'PERAS_PRIVATE_KEYS_FILE'.
 --
 -- WARNING: this is a temporary hack for testing purposes, and should not be
 -- used under any circumstances in production. This will be replaced with proper
@@ -104,16 +108,28 @@ unsafePerasBLSPublicKeysFromEnv =
         eitherDecodeFileStrict' keysFile >>= \case
           Left err -> do
             pure $ Left $ "Failed to parse public keys from file: " <> err
-          Right rawKeys -> do
-            pure $ traverse decodeKey (Map.mapKeysMonotonic PoolId rawKeys)
+          Right rawObjs -> do
+            pure $ traverse decodeKey (Map.mapKeysMonotonic PoolId $ rawObjs)
  where
   envVar =
-    "PERAS_PUBLIC_KEY_FILE"
+    "PERAS_PRIVATE_KEYS_FILE"
 
-  decodeKey key =
-    case BLS.rawDeserialisePublicKey keyScope (fromString key) of
-      Nothing ->
-        Left $ "Invalid public key format: " <> key
-      Just pk ->
-        Right $ PerasPublicKey pk
+  bLSKeyScope :: BLS.KeyScope
+  bLSKeyScope = "TESTNET"
+
+  decodeKey obj = do
+    privateKeyHex <- case KeyMap.lookup "private_key" obj of
+      Just (Aeson.String privateKeyHex) -> pure privateKeyHex
+      _ -> Left $ "Failed to get Peras BLS private key"
+      
+    privateKeyBytes <- case B16.decode (BSC.pack $ Text.unpack privateKeyHex) of
+      Left err -> Left $ "Failed to decode Peras BLS private key: " <> err
+      Right bytes -> pure bytes
+
+    privateKey <- case BLS.rawDeserialisePrivateKey bLSKeyScope privateKeyBytes of
+      Nothing -> Left $ "Failed to parse Peras BLS private key"
+      Just sk -> pure sk
+
+    let publicKeyBytes = BLS.derivePublicKey privateKey
+    pure $ PerasPublicKey publicKeyBytes
 {-# NOINLINE unsafePerasBLSPublicKeysFromEnv #-}

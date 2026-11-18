@@ -404,12 +404,12 @@ def resolve_peers(nodes):
 def genesis_stakes(root):
     """Stake per node from shelley-genesis.json: the initialFunds of the base addresses are the stake
     delegated to a pool (their stake credential is mapped to a pool id in extraConfig.stakeCredentials,
-    and pools-idxs-map.json gives the index of that pool). Pool N is run by node N. Funds of addresses
+    and pools-map.json gives the index of that pool). Pool N is run by node N. Funds of addresses
     without a stake credential (the 58-hex-digit enterprise addresses) are not staked.
     Returns ({node: lovelace}, total staked lovelace), or ({}, 0) if the files are not there."""
     try:
         extra = json.load(open(os.path.join(root, "shelley-genesis.json")))["extraConfig"]
-        idx = json.load(open(os.path.join(root, "pools-idxs-map.json")))
+        idx = json.load(open(os.path.join(root, "pools-map.json")))
         funds, creds = extra["initialFunds"]["data"], extra["stakeCredentials"]["data"]
     except (OSError, KeyError, ValueError):
         return {}, 0
@@ -417,7 +417,7 @@ def genesis_stakes(root):
     for addr, lovelace in funds.items():
         pool = creds.get(addr[-56:]) if len(addr) == 114 else None   # base address: 1 + 28 + 28 bytes
         if pool in idx:
-            st[idx[pool]] += lovelace
+            st[idx[pool]["idx"]] += lovelace
     return dict(st), sum(st.values())
 
 

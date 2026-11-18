@@ -4,9 +4,6 @@ fun directory ip envoy_port =>
   command = "envoy -c %{directory}/envoy.json",
   environment = [
   ],
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
   readiness_probe = {
     exec = {
       command = "curl -sf http://%{ip}:%{envoy_port}/ready",

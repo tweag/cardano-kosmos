@@ -27,17 +27,23 @@ for pool_dir in "${DEVENV_PATH}"/pools-keys/pool*; do
   pool_index=$(echo "$pool_name" | sed 's/[^0-9]//g')
 
   pool_id=$($CARDANO_CLI dijkstra stake-pool id --cold-verification-key-file "$pool_dir/cold.vkey" --output-hex | tr -d '[:space:]')
+  private_key=$(jq -r '.cborHex' "$pool_dir/cold.skey" | cut -c 5-)
   
   # Append the key-value pair to the JSON object using jq
   if [ -n "$pool_id" ]; then
-    json_output=$(echo "$json_output" | jq --arg key "$pool_id" --argjson val "$pool_index" '. + {($key): $val}')
+    json_output=$(echo "$json_output" | jq \
+      --arg key "$pool_id" \
+      --argjson idx "$pool_index" \
+      --arg priv "$private_key" \
+      --argjson val "$pool_index" \
+      '. + {($key): {"idx": $idx, "private_key": $priv}}')
   fi
 done
 
-echo "$json_output" > "$DEVENV_PATH"/pools-idxs-map.json
+echo "$json_output" > "$DEVENV_PATH"/pools-map.json
 
 echo "(import \"nickel/redistribute-stakes.ncl\")
       (import \""$scenarioFile"\")
       (import \"$DEVENV_PATH/shelley-genesis.json\")
-      (import \"$DEVENV_PATH/pools-idxs-map.json\")
+      (import \"$DEVENV_PATH/pools-map.json\")
       " | nickel export --format json

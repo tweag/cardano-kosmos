@@ -1,7 +1,6 @@
-let { Scenario, Node, .. } = import "./schemas/scenario.ncl"
-in
-let { InputParams, CardanoBinaries, TestnetConfig, .. } = import "./schemas/testnet.ncl"
-in
+let { Scenario, Node, .. } = import "./schemas/scenario.ncl" in
+let { InputParams, CardanoBinaries, TestnetConfig, .. } = import "./schemas/testnet.ncl" in
+let mk_cardano_tracer_config = import "./mk-cardano-tracer-config.ncl" in
 let mkNodesArg | CardanoBinaries -> Array Node -> String =
   fun cardano_binaries nodes =>
     nodes
@@ -18,6 +17,7 @@ let mkTestnetConfig | CardanoBinaries -> InputParams -> Scenario -> TestnetConfi
   ip = input.ip,
   node_ports_base = input.node_ports_base,
   trace_options = input.trace_options,
+  cardano_tracer_config = mk_cardano_tracer_config input testnet_magic
 }
 in mkTestnetConfig
 

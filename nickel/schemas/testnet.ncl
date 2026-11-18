@@ -88,6 +88,7 @@ let export = {
     node_ports_base | Number,
     proxy | String,
     trace_options | { _ | TraceOption },
+    cardano_tracer_config | { _ | Dyn },
   },
 }
 in export

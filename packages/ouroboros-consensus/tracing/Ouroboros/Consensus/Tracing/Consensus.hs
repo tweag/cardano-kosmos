@@ -2869,6 +2869,23 @@ instance
         , "round" .= unPerasRoundNo roundNo
         , "decision" .= String (showT decision)
         ]
+    TracePerasCertInclusionNotEnabledForRound slotNo ->
+      mconcat
+        [ "kind" .= String "TracePerasCertInclusionNotEnabledForRound"
+        , "slot" .= unSlotNo slotNo
+        ]
+    TracePerasCertInclusionPastHorizonException slotNo err ->
+      mconcat
+        [ "kind" .= String "TracePerasCertInclusionPastHorizonException"
+        , "slot" .= unSlotNo slotNo
+        , "error" .= String (showT err)
+        ]
+    TracePerasCertInclusionError slotNo err ->
+      mconcat
+        [ "kind" .= String "TracePerasCertInclusionError"
+        , "slot" .= unSlotNo slotNo
+        , "error" .= String (showT err)
+        ]
 
   forHuman = \case
     TracePerasCertInclusionNoCertToInclude slotNo ->
@@ -2907,9 +2924,18 @@ instance MetaTrace (TracePerasCertInclusionEvent blk) where
     Namespace [] ["NoCertToInclude"]
   namespaceFor TracePerasCertInclusionRulesDecision{} =
     Namespace [] ["RulesDecision"]
+  namespaceFor TracePerasCertInclusionNotEnabledForRound{} =
+    Namespace [] ["NotEnabledForRound"]
+  namespaceFor TracePerasCertInclusionPastHorizonException{} =
+    Namespace [] ["PastHorizonException"]
+  namespaceFor TracePerasCertInclusionError{} =
+    Namespace [] ["Error"]
 
   severityFor (Namespace _ ["NoCertToInclude"]) _ = Just Debug
   severityFor (Namespace _ ["RulesDecision"]) _ = Just Info
+  severityFor (Namespace _ ["NotEnabledForRound"]) _ = Just Debug
+  severityFor (Namespace _ ["PastHorizonException"]) _ = Just Warning
+  severityFor (Namespace _ ["Error"]) _ = Just Error
   severityFor _ _ = Nothing
 
   documentFor (Namespace _ ["NoCertToInclude"]) =
@@ -2919,6 +2945,12 @@ instance MetaTrace (TracePerasCertInclusionEvent blk) where
     Just
       "The decision taken by the Peras certificate inclusion rules, i.e. whether a\
       \ certificate is to be included in the block being forged, and why."
+  documentFor (Namespace _ ["NotEnabledForRound"]) =
+    Just "Peras is not enabled for the round containing the current slot."
+  documentFor (Namespace _ ["PastHorizonException"]) =
+    Just "A past horizon exception occurred while determining the current Peras round."
+  documentFor (Namespace _ ["Error"]) =
+    Just "An error occurred while evaluating Peras certificate inclusion rules."
   documentFor _ = Nothing
   metricsDocFor (Namespace _ ["RulesDecision"]) =
     [ ( "perasIncludeCertDecision"
@@ -2931,6 +2963,9 @@ instance MetaTrace (TracePerasCertInclusionEvent blk) where
   allNamespaces =
     [ Namespace [] ["NoCertToInclude"]
     , Namespace [] ["RulesDecision"]
+    , Namespace [] ["NotEnabledForRound"]
+    , Namespace [] ["PastHorizonException"]
+    , Namespace [] ["Error"]
     ]
 
 --------------------------------------------------------------------------------
@@ -3017,7 +3052,6 @@ instance
         <> showT outcome
     TracePerasVotingCantReadEnv err ->
       "Could not read the Peras voting environment: " <> Text.pack err
-<<<<<<< HEAD
     TracePerasVotingViewError roundNo err ->
       "Could not obtain the Peras voting view for round "
         <> showT (unPerasRoundNo roundNo)
@@ -3030,8 +3064,6 @@ instance
   asMetrics (TracePerasVotingForgedVote _ _) =
     [ CounterM "perasForgedVote" (Just 1)]
   asMetrics _ = []
-=======
->>>>>>> db41942382 (Every repository on its upstream main or master, with BLS signatures without a signing context (cardano-base master))
 
 instance MetaTrace (TracePerasVoteForgingEvent blk) where
   namespaceFor TracePerasVotingNoVoteAfterFirstSlotInRound{} =

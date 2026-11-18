@@ -13,7 +13,7 @@
 -- | BLS crypto helpers to instantiate voting committees.
 --
 -- NOTE: this module is meant to be imported qualified.
-module Ouroboros.Consensus.Committee.Crypto.BLS
+module Cardano.Crypto.Peras.Committee.Crypto.BLS
   ( -- * BLS crypto helpers to instantiate voting committees
     KeyRole (..)
   , KeyScope
@@ -65,8 +65,8 @@ import Cardano.Crypto.DSIGN
 import Cardano.Crypto.EllipticCurve.BLS12_381 (blsIsInf, blsMSM)
 import qualified Cardano.Crypto.Hash as Hash
 import Cardano.Crypto.Util (SignableRepresentation (..), bytesToNatural)
-import Cardano.Ledger.Hashes (HASH)
-import Cardano.Ledger.State (BlsKey (..))
+import Cardano.Crypto.Peras.Committee.Base (HASH)
+import Cardano.Crypto.Peras.Committee.Base (BlsKey (..))
 import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.Coerce (coerce)
@@ -78,7 +78,7 @@ import Data.Proxy (Proxy (..))
 import GHC.Generics (Generic)
 import GHC.Natural (Natural)
 import NoThunks.Class (NoThunks)
-import Ouroboros.Consensus.Committee.Crypto (NormalizedVRFOutput (..))
+import Cardano.Crypto.Peras.Committee.Crypto (NormalizedVRFOutput (..))
 
 -- * BLS crypto helpers to instantiate voting committees
 

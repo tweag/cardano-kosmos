@@ -4,7 +4,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- | Types common to any generic committee selection scheme
-module Ouroboros.Consensus.Committee.Types
+module Cardano.Crypto.Peras.Committee.Types
   ( PoolId (..)
   , LedgerStake (..)
   , VoteWeight (..)
@@ -14,9 +14,9 @@ module Ouroboros.Consensus.Committee.Types
 
 import Cardano.Binary (FromCBOR (..), ToCBOR (..))
 import qualified Cardano.Crypto.Hash as Hash
-import Cardano.Ledger.BaseTypes (HasZero)
-import Cardano.Ledger.Core (KeyHash (..), KeyRole (..))
-import Cardano.Prelude (Generic)
+import Cardano.Crypto.Peras.Committee.Base (HasZero)
+import Cardano.Crypto.Peras.Committee.Base (KeyHash (..), KeyRole (..))
+import GHC.Generics (Generic)
 import Control.DeepSeq (NFData)
 import Data.Semigroup (Sum (..))
 import Data.Word (Word64)

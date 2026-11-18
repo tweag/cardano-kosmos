@@ -17,6 +17,9 @@
   `ouroboros-consensus` (`Ouroboros.Consensus.Committee.*` and
   `Ouroboros.Consensus.Peras.Crypto.BLS`). The code is unchanged; the ledger types it uses
   are mirrored, under the same names, in `Cardano.Crypto.Peras.Committee.Base`
+* Add `Cardano.Crypto.Peras.Cert.WFALS`, the conversion of certificates to wFA^LS ones
+* Add `Cardano.Crypto.Peras.Validation`: `mkPerasCertValidationContext` builds the
+  validation context of an epoch, `verifyPerasCert` verifies a certificate against it
 
 ### `testlib`
 

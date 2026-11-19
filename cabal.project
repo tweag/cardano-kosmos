@@ -46,6 +46,8 @@ package cardano-api
 packages:
    -- intersectmbo
 
+  packages/cardano-config
+
   packages/cardano-node/cardano-node
   packages/cardano-node/cardano-node-capi
   packages/cardano-node/cardano-node-chairman

@@ -22,6 +22,8 @@ module Ouroboros.Consensus.Network.NodeToNode
   , ByteLimits
   , byteLimits
   , noByteLimits
+  , byteLimitsPerasCertDiffusion
+  , byteLimitsPerasVoteDiffusion
 
     -- * Tracers
   , Tracers
@@ -51,6 +53,7 @@ import Codec.CBOR.Read (DeserialiseFailure)
 import qualified Control.Concurrent.Class.MonadSTM.Strict.TVar as TVar.Unchecked
 import Control.DeepSeq (NFData)
 import Control.Monad.Class.MonadTime.SI (MonadTime)
+import qualified Control.Monad.Class.MonadTime.SI as Time
 import Control.Monad.Class.MonadTimer.SI (MonadTimer)
 import Control.ResourceRegistry
 import Control.Tracer
@@ -61,6 +64,7 @@ import Data.Int (Int64)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Void (Void)
+import Data.Word (Word16)
 import qualified Network.Mux as Mux
 import Network.TypedProtocol.Codec
 import Ouroboros.Consensus.Block
@@ -120,6 +124,10 @@ import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type
   , timeLimitsLeiosNotify
   )
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound (objectDiffusionInbound)
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound.State
+  ( ObjectDiffusionInboundStateView (..)
+  , bracketObjectDiffusionInbound
+  )
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasCert
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.ObjectPool.PerasVote
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Outbound (objectDiffusionOutbound)
@@ -174,6 +182,7 @@ import Ouroboros.Network.PeerSharing
   , peerSharingClient
   , peerSharingServer
   )
+import Ouroboros.Network.PerasSupport (PerasSupport)
 import Ouroboros.Network.Protocol.BlockFetch.Codec
 import Ouroboros.Network.Protocol.BlockFetch.Server
   ( BlockFetchServer
@@ -239,6 +248,13 @@ import System.Random (StdGen, splitGen)
   Handlers
 -------------------------------------------------------------------------------}
 
+-- | Interval for returning agency while an Object Diffusion server is idle.
+--
+-- TODO https://github.com/tweag/cardano-peras/issues/187
+-- Confirm the production value against the graceful peer-demotion timeout.
+objectDiffusionIdleTimeout :: Time.DiffTime
+objectDiffusionIdleTimeout = 20
+
 -- | Protocol handlers for node-to-node (remote) communication
 data Handlers m addr blk = Handlers
   { hChainSyncClient ::
@@ -292,6 +308,7 @@ data Handlers m addr blk = Handlers
   , hPerasCertDiffusionClient ::
       NodeToNodeVersion ->
       ControlMessageSTM m ->
+      ObjectDiffusionInboundStateView PerasRoundNo m ->
       ConnectionId addr ->
       PerasCertDiffusionInboundPipelined blk m ()
   , hPerasCertDiffusionServer ::
@@ -301,6 +318,7 @@ data Handlers m addr blk = Handlers
   , hPerasVoteDiffusionClient ::
       NodeToNodeVersion ->
       ControlMessageSTM m ->
+      ObjectDiffusionInboundStateView PerasVoteId m ->
       ConnectionId addr ->
       PerasVoteDiffusionInboundPipelined blk m ()
   , hPerasVoteDiffusionServer ::
@@ -461,36 +479,40 @@ mkHandlers
                   (mapTxSubmissionMempoolReader txForgetValidated $ getMempoolReader getMempool)
                   (getMempoolWriter getMempool)
                   version
-      , hPerasCertDiffusionClient = \version controlMessageSTM peer ->
+      , hPerasCertDiffusionClient = \version controlMessageSTM state peer ->
           objectDiffusionInbound
             (contramap (TraceLabelPeer peer) (Node.perasCertDiffusionInboundTracer tracers))
             ( perasCertDiffusionMaxObjectsUnacknowledged miniProtocolParameters
-            , 10 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
-            , 10 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            , fromIntegral perasCertDiffusionMaxBatchSize
+            , fromIntegral perasCertDiffusionMaxBatchSize
             )
             (makePerasCertPoolWriterFromChainDB systemTime getChainDB)
             version
             controlMessageSTM
+            state
       , hPerasCertDiffusionServer = \version peer ->
           objectDiffusionOutbound
             (contramap (TraceLabelPeer peer) (Node.perasCertDiffusionOutboundTracer tracers))
             (perasCertDiffusionMaxObjectsUnacknowledged miniProtocolParameters)
+            objectDiffusionIdleTimeout
             (makePerasCertPoolReaderFromChainDB $ getChainDB)
             version
-      , hPerasVoteDiffusionClient = \version controlMessageSTM peer ->
+      , hPerasVoteDiffusionClient = \version controlMessageSTM state peer ->
           objectDiffusionInbound
             (contramap (TraceLabelPeer peer) (Node.perasVoteDiffusionInboundTracer tracers))
             ( perasVoteDiffusionMaxObjectsUnacknowledged miniProtocolParameters
-            , 50 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
-            , 50 -- TODO: see https://github.com/tweag/cardano-peras/issues/97
+            , fromIntegral perasVoteDiffusionMaxBatchSize
+            , fromIntegral perasVoteDiffusionMaxBatchSize
             )
             (makePerasVotePoolWriterFromChainDB systemTime getChainDB)
             version
             controlMessageSTM
+            state
       , hPerasVoteDiffusionServer = \version peer ->
           objectDiffusionOutbound
             (contramap (TraceLabelPeer peer) (Node.perasVoteDiffusionOutboundTracer tracers))
             (perasVoteDiffusionMaxObjectsUnacknowledged miniProtocolParameters)
+            objectDiffusionIdleTimeout
             (makePerasVotePoolReaderFromChainDB $ getChainDB)
             version
       , hKeepAliveClient = \_version -> keepAliveClient (Node.keepAliveClientTracer tracers) keepAliveRng
@@ -789,7 +811,7 @@ type ServerApp m addr bytes a =
 --
 -- See 'Network.Mux.Types.MuxApplication'
 data Apps m addr bCS bBF bTX bPCD bPVD bKA bPS bLN bLF a b = Apps
-  { aChainSyncClient :: ClientApp m addr bCS a
+  { aChainSyncClient :: PerasSupport -> ClientApp m addr bCS a
   -- ^ Start a chain sync client that communicates with the given upstream
   -- node.
   , aChainSyncServer :: ServerApp m addr bCS b
@@ -882,14 +904,40 @@ data ByteLimits bCS bBF bTX bPCD bPVD bKA bPS bLN bLF = ByteLimits
         bLF
   }
 
+-- | Maximum request batch sizes. Keep ID and object requests within the same
+-- bounds used by the protocol driver's byte limits.
+-- TODO: see https://github.com/tweag/cardano-peras/issues/97
+perasCertDiffusionMaxBatchSize, perasVoteDiffusionMaxBatchSize :: Word16
+perasCertDiffusionMaxBatchSize = 10
+perasVoteDiffusionMaxBatchSize = 50
+
+-- | Certificate diffusion byte limits for complete batches, including four
+-- CBOR framing bytes. Certificate IDs are round numbers (Word64s, nine bytes).
+byteLimitsPerasCertDiffusion ::
+  (bytes -> Word) -> ProtocolSizeLimits (PerasCertDiffusion blk) bytes
+byteLimitsPerasCertDiffusion =
+  byteLimitsObjectDiffusion
+    (4 + 9 * fromIntegral perasCertDiffusionMaxBatchSize)
+    (4 + maxCertSize * fromIntegral perasCertDiffusionMaxBatchSize)
+
+-- | Vote diffusion byte limits for complete batches, including four CBOR
+-- framing bytes. Vote IDs contain a list header, Word64 round and Word16 seat
+-- index: @1 + 9 + 3 = 13@ bytes.
+byteLimitsPerasVoteDiffusion ::
+  (bytes -> Word) -> ProtocolSizeLimits (PerasVoteDiffusion blk) bytes
+byteLimitsPerasVoteDiffusion =
+  byteLimitsObjectDiffusion
+    (4 + 13 * fromIntegral perasVoteDiffusionMaxBatchSize)
+    (4 + maxVoteSize * fromIntegral perasVoteDiffusionMaxBatchSize)
+
 noByteLimits :: ByteLimits bCS bBF bTX bPCD bPVD bKA bPS bLN bLF
 noByteLimits =
   ByteLimits
     { blChainSync = byteLimitsChainSync (const 0)
     , blBlockFetch = byteLimitsBlockFetch (const 0)
     , blTxSubmission2 = byteLimitsTxSubmission2 (const 0)
-    , blPerasCertDiffusion = byteLimitsObjectDiffusion (const 0)
-    , blPerasVoteDiffusion = byteLimitsObjectDiffusion (const 0)
+    , blPerasCertDiffusion = byteLimitsPerasCertDiffusion (const 0)
+    , blPerasVoteDiffusion = byteLimitsPerasVoteDiffusion (const 0)
     , blKeepAlive = byteLimitsKeepAlive (const 0)
     , blPeerSharing = byteLimitsPeerSharing (const 0)
     , blLeiosNotify = byteLimitsLeiosNotify (const 0)
@@ -912,8 +960,8 @@ byteLimits =
     { blChainSync = byteLimitsChainSync size
     , blBlockFetch = byteLimitsBlockFetch size
     , blTxSubmission2 = byteLimitsTxSubmission2 size
-    , blPerasCertDiffusion = byteLimitsObjectDiffusion size
-    , blPerasVoteDiffusion = byteLimitsObjectDiffusion size
+    , blPerasCertDiffusion = byteLimitsPerasCertDiffusion size
+    , blPerasVoteDiffusion = byteLimitsPerasVoteDiffusion size
     , blKeepAlive = byteLimitsKeepAlive size
     , blPeerSharing = byteLimitsPeerSharing size
     , blLeiosNotify = byteLimitsLeiosNotify size
@@ -968,11 +1016,13 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
   NodeKernel{getDiffusionPipeliningSupport, getLeiosDB} = kernel
 
   aChainSyncClient ::
+    PerasSupport ->
     NodeToNodeVersion ->
     ExpandedInitiatorContext addrNTN PeerTrustable m ->
     Channel m bCS ->
     m (NodeToNodeInitiatorResult, Maybe bCS)
   aChainSyncClient
+    perasSupport
     version
     ExpandedInitiatorContext
       { eicConnectionId = them
@@ -998,6 +1048,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
           (getGsmState kernel)
           them
           version
+          perasSupport
           lopBucketConfig
           csjConfig
           getDiffusionPipeliningSupport
@@ -1172,17 +1223,21 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
       }
     channel = do
       labelThisThread "PerasCertDiffusionClient"
-      ((), trailing) <-
-        runPipelinedPeerWithLimits
-          (TraceLabelPeer them `contramap` tPerasCertDiffusionTracer)
-          (cPerasCertDiffusionCodec (mkCodecs version))
-          blPerasCertDiffusion
-          timeLimitsObjectDiffusion
-          channel
-          ( objectDiffusionInboundPeerPipelined
-              (hPerasCertDiffusionClient version controlMessageSTM them)
-          )
-      return (NoInitiatorResult, trailing)
+      bracketObjectDiffusionInbound
+        (getPerasCertDiffusionHandles kernel)
+        them
+        $ \state -> do
+          ((), trailing) <-
+            runPipelinedPeerWithLimits
+              (TraceLabelPeer them `contramap` tPerasCertDiffusionTracer)
+              (cPerasCertDiffusionCodec (mkCodecs version))
+              blPerasCertDiffusion
+              timeLimitsObjectDiffusion
+              channel
+              ( objectDiffusionInboundPeerPipelined
+                  (hPerasCertDiffusionClient version controlMessageSTM state them)
+              )
+          return (NoInitiatorResult, trailing)
 
   aPerasCertDiffusionServer ::
     NodeToNodeVersion ->
@@ -1217,6 +1272,13 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
       }
     channel = do
       labelThisThread "PerasVoteDiffusionClient"
+      -- Only certificate diffusion participates in GSM caught-up detection.
+      -- Votes must not register in or remove entries from the certificate handles.
+      let state =
+            ObjectDiffusionInboundStateView
+              { odisvSignalCaughtUp = pure ()
+              , odisvSetNextOutstandingObjectId = \_ -> pure ()
+              }
       ((), trailing) <-
         runPipelinedPeerWithLimits
           (TraceLabelPeer them `contramap` tPerasVoteDiffusionTracer)
@@ -1225,7 +1287,7 @@ mkApps kernel rng Tracers{..} mkCodecs ByteLimits{..} chainSyncTimeouts lopBucke
           timeLimitsObjectDiffusion
           channel
           ( objectDiffusionInboundPeerPipelined
-              (hPerasVoteDiffusionClient version controlMessageSTM them)
+              (hPerasVoteDiffusionClient version controlMessageSTM state them)
           )
       return (NoInitiatorResult, trailing)
 
@@ -1458,7 +1520,9 @@ initiator featureFlags miniProtocolParameters version versionData Apps{..} =
     -- a quadruple uniquely determining a connection).
     ( NodeToNodeProtocols
         { chainSyncProtocol =
-            (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aChainSyncClient version ctx)))
+            ( InitiatorProtocolOnly
+                (MiniProtocolCb (\ctx -> aChainSyncClient (perasSupport versionData) version ctx))
+            )
         , blockFetchProtocol =
             (InitiatorProtocolOnly (MiniProtocolCb (\ctx -> aBlockFetchClient version ctx)))
         , txSubmissionProtocol =
@@ -1499,7 +1563,7 @@ initiatorAndResponder featureFlags miniProtocolParameters version versionData Ap
     ( NodeToNodeProtocols
         { chainSyncProtocol =
             ( InitiatorAndResponderProtocol
-                (MiniProtocolCb (\initiatorCtx -> aChainSyncClient version initiatorCtx))
+                (MiniProtocolCb (\initiatorCtx -> aChainSyncClient (perasSupport versionData) version initiatorCtx))
                 (MiniProtocolCb (\responderCtx -> aChainSyncServer version responderCtx))
             )
         , blockFetchProtocol =

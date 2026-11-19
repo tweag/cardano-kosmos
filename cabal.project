@@ -90,6 +90,7 @@ packages:
 
   packages/ouroboros-consensus
   packages/ouroboros-network/ouroboros-network
+  packages/ouroboros-network/cardano-diffusion
 
 -- Needed when cross compiling
 extra-packages: alex, dmq-node

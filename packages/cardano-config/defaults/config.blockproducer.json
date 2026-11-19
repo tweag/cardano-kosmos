@@ -1,0 +1,79 @@
+{
+    "Version": 2,
+    "Configuration": {
+        "Consensus": {
+            "ConsensusMode": "PraosMode"
+        },
+        "HermodTracing": {
+            "Options": {
+                "": {
+                    "severity": "Notice",
+                    "detail": "DNormal",
+                    "backends": [
+                        "Stdout MachineFormat"
+                    ]
+                }
+            }
+        },
+        "LocalConnections": {
+            "EnableGrpc": false
+        },
+        "Mempool": {},
+        "Network": {
+            "AcceptedConnectionsLimit": {
+                "HardLimit": 512,
+                "SoftLimit": 384,
+                "Delay": 5
+            },
+            "ChainSyncIdleTimeout": 3373,
+            "DeadlineTargetNumberOfActiveBigLedgerPeers": 5,
+            "DeadlineTargetNumberOfActivePeers": 20,
+            "DeadlineTargetNumberOfEstablishedBigLedgerPeers": 10,
+            "DeadlineTargetNumberOfEstablishedPeers": 30,
+            "DeadlineTargetNumberOfKnownBigLedgerPeers": 15,
+            "DeadlineTargetNumberOfKnownPeers": 100,
+            "DeadlineTargetNumberOfRootPeers": 100,
+            "DiffusionMode": "InitiatorAndResponder",
+            "EgressPollInterval": 0,
+            "ExperimentalProtocolsEnabled": false,
+            "MaxConcurrencyBulkSync": 1,
+            "MaxConcurrencyDeadline": 1,
+            "MinBigLedgerPeersForTrustedState": 5,
+            "PeerSharing": false,
+            "ProtocolIdleTimeout": 5,
+            "ResponderCoreAffinityPolicy": "NoResponderCoreAffinity",
+            "SyncTargetNumberOfActiveBigLedgerPeers": 30,
+            "SyncTargetNumberOfActivePeers": 5,
+            "SyncTargetNumberOfEstablishedBigLedgerPeers": 40,
+            "SyncTargetNumberOfEstablishedPeers": 10,
+            "SyncTargetNumberOfKnownBigLedgerPeers": 100,
+            "SyncTargetNumberOfKnownPeers": 150,
+            "SyncTargetNumberOfRootPeers": 0,
+            "TimeWaitTimeout": 60,
+            "TxSubmissionInitDelay": 60,
+            "TxSubmissionLogicVersion": "TxSubmissionLogicV1"
+        },
+        "Protocol": {
+            "RequiresNetworkMagic": "RequiresNoMagic",
+            "StartAsNonProducingNode": false
+        },
+        "Storage": {
+            "DatabasePath": "mainnet/db/",
+            "LedgerDB": {
+                "Backend": "V2InMemory",
+                "Snapshots": {
+                    "Interval": 86400,
+                    "Offset": 0,
+                    "RateLimit": 600,
+                    "MinDelay": 300,
+                    "MaxDelay": 21600,
+                    "NumOfDiskSnapshots": 2
+                },
+                "QueryBatchSize": 100000
+            }
+        },
+        "Testing": {
+            "ExperimentalHardForksEnabled": false
+        }
+    }
+}

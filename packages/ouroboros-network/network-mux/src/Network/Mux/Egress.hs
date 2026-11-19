@@ -3,6 +3,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE RankNTypes            #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TypeFamilies          #-}
 
 module Network.Mux.Egress
@@ -12,10 +13,14 @@ module Network.Mux.Egress
   , EgressQueue
   , TranslocationServiceRequest (..)
   , Wanton (..)
+  , egressSoftBufferLimit
   ) where
 
 import Control.Monad
 import Data.ByteString.Lazy qualified as BL
+import Data.Int (Int64)
+import Data.Map.Strict qualified as Map
+import Data.Word (Word64)
 
 import Control.Concurrent.Class.MonadSTM.Strict
 import Control.Monad.Class.MonadAsync
@@ -24,6 +29,7 @@ import Control.Monad.Class.MonadTime.SI
 import Control.Monad.Class.MonadTimer.SI hiding (timeout)
 import Control.Tracer (Tracer)
 
+import Network.Mux.Counters (ByteSlots)
 import Network.Mux.Timeout
 import Network.Mux.Types
 
@@ -128,6 +134,45 @@ data TranslocationServiceRequest m =
 --  been enqueued on the -- underlying bearer.
 newtype Wanton m = Wanton { want :: StrictTVar m BL.ByteString }
 
+-- | A soft limit on the egress buffer ('Wanton') size, 0x3ffff bytes, one
+-- short of 256 KiB. A mini-protocol's send appends to its buffer only while
+-- the buffer holds fewer bytes, and forces its message's encoding up to it,
+-- to a chunk boundary; the one limit bounds both by design: the check counts
+-- the buffer no further, and a message within it is admitted whole and
+-- forced whole. A sender blocked behind the limit holds its buffer, the
+-- limit's worth and more, and the forced prefix of the message it waits
+-- with, so a channel's forced footprint is up to about twice the limit.
+--
+-- There is no hard limit: an investigation showed that one would only limit
+-- the performance of data-intensive mini-protocols, and the mux is already
+-- fair when the bandwidth is limited. See issue #5271.
+--
+egressSoftBufferLimit :: Int64
+egressSoftBufferLimit = 0x3ffff
+
+
+-- | The bytes of a batch by mini-protocol and direction: a strict list, so
+-- the sums stay unboxed and merging a run leaves no thunk.
+--
+data BatchBytes
+    = NoBatchBytes
+    | BatchBytes !MiniProtocolNum !MiniProtocolDir {-# UNPACK #-} !Word64 !BatchBytes
+
+-- | Add the bytes of a run to the entry of its mini-protocol and direction,
+-- or append one.
+--
+insertBatchBytes
+  :: MiniProtocolNum
+  -> MiniProtocolDir
+  -> Word64
+  -> BatchBytes
+  -> BatchBytes
+insertBatchBytes !num !dir !n NoBatchBytes = BatchBytes num dir n NoBatchBytes
+insertBatchBytes !num !dir !n (BatchBytes num' dir' n' rest)
+  | num == num'
+  , dir == dir' = BatchBytes num' dir' (n' + n) rest
+  | otherwise   = BatchBytes num' dir' n' (insertBatchBytes num dir n rest)
+
 
 -- | Process the messages from the mini protocols - there is a single
 -- shared FIFO that contains the items of work. This is processed so
@@ -144,18 +189,41 @@ muxer
        )
     => EgressQueue m
     -> Tracer m BearerTrace
+    -> ByteSlots m
+    -- ^ This mux's byte slots, one per mini-protocol and direction it runs.
     -> Bearer m
     -> m void
-muxer egressQueue tracer Bearer { writeMany, sduSize, batchSize, egressInterval } =
+muxer egressQueue tracer byteSlots Bearer { writeMany, sduSize, batchSize, egressInterval } =
     withTimeoutSerial $ \timeout ->
+    -- The loop runs masked, so a count means bytes handed to the kernel:
+    -- nothing lands between the write's return and the count. A
+    -- cancellation lands in the write, where the bearer's timeout lands
+    -- too, or in the bearer's tail once the kernel has the bytes, which
+    -- leaves that batch uncounted on a mux that is ending anyway, or at the
+    -- loop's other blocking points, the queue read and the poll delay. The
+    -- write runs unmasked to work around an io-sim bug: a timeout under a
+    -- mask leaks its exception past its frame when the timed call finishes
+    -- as the timer fires (IntersectMBO/io-sim#269), which GHC retracts; once
+    -- that is fixed the unmask can go, the write blocking interruptibly
+    -- under the mask as the queue read does. Masked once, outside the loop,
+    -- a batch pays the one unmask application.
+    mask $ \unmask ->
     forever $ do
       start <- getMonotonicTime
       TLSRDemand mpc md d <- atomically $ readTBQueue egressQueue
       sdu <- processSingleWanton egressQueue sduSize mpc md d
       sdus <- buildBatch [sdu] (sduLength sdu)
-      void $ writeMany tracer timeout sdus
+      -- A write that throws, part of the batch sent or none, is not counted:
+      -- the connection is gone with it.
+      unmask (void (writeMany tracer timeout sdus))
       end <- getMonotonicTime
-      empty <- atomically $ isEmptyTBQueue egressQueue
+      -- The batch summed by mini-protocol and direction first, so the
+      -- transaction updates a slot once per protocol in the batch, not once
+      -- per SDU; a mux without counters has no slots and sums nothing.
+      let !bytes = if Map.null byteSlots then NoBatchBytes else batchBytes sdus
+      empty <- atomically $ do
+        countBytes bytes
+        isEmptyTBQueue egressQueue
       when empty $ do
         let delta = diffTime end start
         threadDelay (egressInterval - delta)
@@ -166,6 +234,38 @@ muxer egressQueue tracer Bearer { writeMany, sduSize, batchSize, egressInterval 
 
     sduLength :: SDU -> Int
     sduLength sdu = fromIntegral msHeaderLength + fromIntegral (msLength sdu)
+
+    -- The bytes of a batch by mini-protocol and direction, header included:
+    -- a batch holds few protocols, so the list is short. A run of SDUs on
+    -- one protocol is summed as it goes, unboxed, and merged once, at its
+    -- end, so a batch on one protocol merges once.
+    batchBytes :: [SDU] -> BatchBytes
+    batchBytes []           = NoBatchBytes
+    batchBytes (sdu : sdus) = runs NoBatchBytes (msNum sdu) (msDir sdu) (bytesOf sdu) sdus
+      where
+        runs :: BatchBytes
+             -> MiniProtocolNum
+             -> MiniProtocolDir
+             -> Word64
+             -> [SDU] -> BatchBytes
+        runs !acc !num !dir !n []
+          = insertBatchBytes num dir n acc
+        runs !acc !num !dir !n (sdu' : rest)
+          | msNum sdu' == num, msDir sdu' == dir
+          = runs acc num dir (n + bytesOf sdu') rest
+          | otherwise
+          = runs (insertBatchBytes num dir n acc) (msNum sdu') (msDir sdu') (bytesOf sdu') rest
+
+        bytesOf :: SDU -> Word64
+        bytesOf = fromIntegral . sduLength
+
+    -- Add a batch's bytes to its slots, in the transaction that polls the
+    -- queue.
+    countBytes :: BatchBytes -> STM m ()
+    countBytes NoBatchBytes = return ()
+    countBytes (BatchBytes num dir n rest) = do
+      forM_ (Map.lookup (num, dir) byteSlots) $ \slot -> modifyTVar slot (+ n)
+      countBytes rest
 
     -- Build a batch of SDUs to submit in one go to the bearer.
     -- The egress queue is still processed one SDU at the time

@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/ouroboros-network.git
-	branch = 2fb69829a19b5c04e4fb212bdd78fb63f9d2d776
-	commit = 2fb69829a19b5c04e4fb212bdd78fb63f9d2d776
-	parent = c68569225a8887a02deee24e5c09782b26d9fcc3
+	branch = main
+	commit = bcfb5f8ec851a8b16c1d453d7df4ac0b8166065d
+	parent = 9f53a86509e44db64e677f2fd90352cb3a05294c
 	method = merge
 	cmdver = 0.4.9

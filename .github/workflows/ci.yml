@@ -65,3 +65,4 @@ jobs:
           cabal update
           ./scripts/setup-testnet-env.sh devnet-env
           ./scripts/wait-until-peras.sh
+          ./peras-trace-analyzer/check_peras_logs.py --no-cooldown --wait 60 --poll 10

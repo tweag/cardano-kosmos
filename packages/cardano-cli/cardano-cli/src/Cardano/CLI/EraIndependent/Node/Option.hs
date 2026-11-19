@@ -7,18 +7,15 @@
 
 module Cardano.CLI.EraIndependent.Node.Option
   ( pNodeCmds
-  , pBlsSigningKeyFile
   )
 where
 
-import Cardano.Api (File (..), FileDirection (In))
 import Cardano.Api.Experimental qualified as Exp
 
 import Cardano.CLI.EraBased.Common.Option
 import Cardano.CLI.EraIndependent.Node.Command
 import Cardano.CLI.EraIndependent.Node.Command qualified as Cmd
 import Cardano.CLI.Parser
-import Cardano.CLI.Type.Common (SigningKeyFile)
 
 import Data.Foldable
 import Data.Maybe (catMaybes)
@@ -30,48 +27,47 @@ pNodeCmds =
   let nodeCmdParsers =
         asum $
           catMaybes
-            [ Just $
-                Opt.hsubparser $
-                  commandWithMetavar "key-gen" $
-                    Opt.info pKeyGenOperator $
-                      Opt.progDesc $
-                        mconcat
-                          [ "Create a key pair for a node operator's offline "
-                          , "key and a new certificate issue counter"
-                          ]
-            , Just $
-                Opt.hsubparser $
-                  commandWithMetavar "key-gen-KES" $
-                    Opt.info pKeyGenKES $
-                      Opt.progDesc $
-                        mconcat
-                          [ "Create a key pair for a node KES operational key"
-                          ]
-            , Just $
-                Opt.hsubparser $
-                  commandWithMetavar "key-gen-VRF" $
-                    Opt.info pKeyGenVRF $
-                      Opt.progDesc $
-                        mconcat
-                          [ "Create a key pair for a node VRF operational key"
-                          ]
+            [ Just
+                $ Opt.hsubparser
+                $ commandWithMetavar "key-gen"
+                $ Opt.info pKeyGenOperator
+                $ Opt.progDesc
+                $ mconcat
+                  [ "Create a key pair for a node operator's offline "
+                  , "key and a new certificate issue counter"
+                  ]
+            , Just
+                $ Opt.hsubparser
+                $ commandWithMetavar "key-gen-KES"
+                $ Opt.info pKeyGenKES
+                $ Opt.progDesc
+                $ mconcat
+                  [ "Create a key pair for a node KES operational key"
+                  ]
+            , Just
+                $ Opt.hsubparser
+                $ commandWithMetavar "key-gen-VRF"
+                $ Opt.info pKeyGenVRF
+                $ Opt.progDesc
+                $ mconcat
+                  [ "Create a key pair for a node VRF operational key"
+                  ]
             , pKeyGenBLS @era
-            , Just $
-                Opt.hsubparser $
-                  commandWithMetavar "key-hash-VRF" . Opt.info pKeyHashVRF $
-                    Opt.progDesc $
-                      mconcat
-                        [ "Print hash of a node's operational VRF key."
-                        ]
-            , pKeyHashBLS @era
-            , Just $
-                Opt.hsubparser $
-                  commandWithMetavar "new-counter" $
-                    Opt.info pNewCounter $
-                      Opt.progDesc $
-                        mconcat
-                          [ "Create a new certificate issue counter"
-                          ]
+            , Just
+                $ Opt.hsubparser
+                $ commandWithMetavar "key-hash-VRF" . Opt.info pKeyHashVRF
+                $ Opt.progDesc
+                $ mconcat
+                  [ "Print hash of a node's operational VRF key."
+                  ]
+            , Just
+                $ Opt.hsubparser
+                $ commandWithMetavar "new-counter"
+                $ Opt.info pNewCounter
+                $ Opt.progDesc
+                $ mconcat
+                  [ "Create a new certificate issue counter"
+                  ]
             , Just
                 $ Opt.hsubparser
                 $ commandWithMetavar "issue-op-cert"
@@ -89,13 +85,13 @@ pNodeCmds =
                   [ "Issue a node operational certificate"
                   ]
             ]
-   in Opt.hsubparser $
-        commandWithMetavar "node" $
-          Opt.info nodeCmdParsers $
-            Opt.progDesc $
-              mconcat
-                [ "Node operation commands."
-                ]
+   in Opt.hsubparser
+        $ commandWithMetavar "node"
+        $ Opt.info nodeCmdParsers
+        $ Opt.progDesc
+        $ mconcat
+          [ "Node operation commands."
+          ]
 
 pKeyGenOperator :: Parser NodeCmds
 pKeyGenOperator =
@@ -147,31 +143,6 @@ pKeyHashVRF =
     Cmd.NodeKeyHashVRFCmdArgs
       <$> pVerificationKeyOrFileIn
       <*> pMaybeOutputFile
-
-pKeyHashBLS :: forall era. Exp.IsEra era => Maybe (Parser NodeCmds)
-pKeyHashBLS = case Exp.useEra @era of
-  Exp.ConwayEra -> Nothing
-  Exp.DijkstraEra ->
-    Just
-      $ Opt.hsubparser
-      $ commandWithMetavar "key-hash-BLS"
-        . Opt.info
-          ( fmap Cmd.NodeKeyHashBLSCmd $
-              Cmd.NodeKeyHashBLSCmdArgs
-                <$> pVerificationKeyOrFileIn
-                <*> pMaybeOutputFile
-          )
-      $ Opt.progDesc
-      $ mconcat
-        [ "Print hash of a node's operational BLS key."
-        ]
-
-pBlsSigningKeyFile :: Parser (SigningKeyFile In)
-pBlsSigningKeyFile =
-  File
-    <$> parseFilePath
-      "bls-signing-key-file"
-      "Input filepath of the BLS signing key."
 
 pNewCounter :: Parser NodeCmds
 pNewCounter =

@@ -30,7 +30,11 @@ import Cardano.CLI.EraBased.Script.Type
 import Cardano.CLI.EraBased.Script.Type qualified as ScriptT
 import Cardano.CLI.EraBased.Script.Vote.Type qualified as Voting
 import Cardano.CLI.EraBased.Script.Withdrawal.Type qualified as Withdrawal
-import Cardano.CLI.EraBased.Transaction.Command (IncludeCurrentTreasuryValue (..))
+import Cardano.CLI.EraBased.Transaction.Command
+  ( IncludeCurrentTreasuryValue (..)
+  , accountBalanceIntervalOptionName
+  , startingAccountBalanceIntervalOptionName
+  )
 import Cardano.CLI.Option.Flag
 import Cardano.CLI.Option.Flag.Type qualified as Z
 import Cardano.CLI.Orphan ()
@@ -40,7 +44,8 @@ import Cardano.CLI.Type.Common
 import Cardano.CLI.Type.Governance
 import Cardano.CLI.Type.Key
 import Cardano.CLI.Type.Key.VerificationKey
-import Cardano.Ledger.BaseTypes (NonZero, nonZero)
+import Cardano.Ledger.BaseTypes (Exclusive (..), Inclusive (..), NonZero, nonZero)
+import Cardano.Ledger.Dijkstra.Scripts qualified as L
 import Cardano.Ledger.Plutus.Language qualified as L
 
 import Control.Monad (void, when)
@@ -122,13 +127,13 @@ pNetworkIdDeprecated =
           [ Opt.long "mainnet"
           , Opt.help "DEPRECATED. This argument has no effect."
           ]
-    , fmap (Testnet . NetworkMagic) $
-        Opt.option (bounded "TESTNET_MAGIC") $
-          mconcat
-            [ Opt.long "testnet-magic"
-            , Opt.metavar "NATURAL"
-            , Opt.help "DEPRECATED. This argument has no effect."
-            ]
+    , fmap (Testnet . NetworkMagic)
+        $ Opt.option (bounded "TESTNET_MAGIC")
+        $ mconcat
+          [ Opt.long "testnet-magic"
+          , Opt.metavar "NATURAL"
+          , Opt.help "DEPRECATED. This argument has no effect."
+          ]
     ]
 
 pNetworkId :: EnvCli -> Parser NetworkId
@@ -145,17 +150,17 @@ pNetworkId envCli =
                     , "environment variable"
                     ]
               ]
-        , fmap (Testnet . NetworkMagic) $
-            Opt.option (bounded "TESTNET_MAGIC") $
-              mconcat
-                [ Opt.long "testnet-magic"
-                , Opt.metavar "NATURAL"
-                , Opt.help $
-                    mconcat
-                      [ "Specify a testnet magic id. This overrides the CARDANO_NODE_NETWORK_ID "
-                      , "environment variable"
-                      ]
-                ]
+        , fmap (Testnet . NetworkMagic)
+            $ Opt.option (bounded "TESTNET_MAGIC")
+            $ mconcat
+              [ Opt.long "testnet-magic"
+              , Opt.metavar "NATURAL"
+              , Opt.help $
+                  mconcat
+                    [ "Specify a testnet magic id. This overrides the CARDANO_NODE_NETWORK_ID "
+                    , "environment variable"
+                    ]
+              ]
         ]
       , -- Default to the network id specified by the environment variable if it is available.
         pure <$> maybeToList (envCliNetworkId envCli)
@@ -168,7 +173,7 @@ pTarget =
     pTargetFromConway
     (forShelleyBasedEraMaybeEon $ convert (useEra @era))
  where
-  pTargetFromConway :: Era era -> Parser (Consensus.Target ChainPoint)
+  pTargetFromConway :: Exp.Era era -> Parser (Consensus.Target ChainPoint)
   pTargetFromConway _ =
     asum $
       mconcat
@@ -231,34 +236,34 @@ defaultByronEpochSlots = 21600
 
 pEpochSlots :: Parser EpochSlots
 pEpochSlots =
-  fmap EpochSlots $
-    Opt.option (bounded "SLOTS") $
-      mconcat
-        [ Opt.long "epoch-slots"
-        , Opt.metavar "SLOTS"
-        , Opt.help "The number of slots per epoch for the Byron era."
-        , Opt.value defaultByronEpochSlots -- Default to the mainnet value.
-        , Opt.showDefault
-        ]
+  fmap EpochSlots
+    $ Opt.option (bounded "SLOTS")
+    $ mconcat
+      [ Opt.long "epoch-slots"
+      , Opt.metavar "SLOTS"
+      , Opt.help "The number of slots per epoch for the Byron era."
+      , Opt.value defaultByronEpochSlots -- Default to the mainnet value.
+      , Opt.showDefault
+      ]
 
 pSocketPath :: EnvCli -> Parser SocketPath
 pSocketPath envCli =
   asum $
     mconcat
       [
-        [ fmap File $
-            Opt.strOption $
-              mconcat
-                [ Opt.long "socket-path"
-                , Opt.metavar "SOCKET_PATH"
-                , Opt.help $
-                    mconcat
-                      [ "Path to the node socket.  This overrides the CARDANO_NODE_SOCKET_PATH "
-                      , "environment variable.  The argument is optional if CARDANO_NODE_SOCKET_PATH "
-                      , "is defined and mandatory otherwise."
-                      ]
-                , Opt.completer (Opt.bashCompleter "file")
-                ]
+        [ fmap File
+            $ Opt.strOption
+            $ mconcat
+              [ Opt.long "socket-path"
+              , Opt.metavar "SOCKET_PATH"
+              , Opt.help $
+                  mconcat
+                    [ "Path to the node socket.  This overrides the CARDANO_NODE_SOCKET_PATH "
+                    , "environment variable.  The argument is optional if CARDANO_NODE_SOCKET_PATH "
+                    , "is defined and mandatory otherwise."
+                    ]
+              , Opt.completer (Opt.bashCompleter "file")
+              ]
         ]
       , -- Default to the socket path specified by the environment variable if it is available.
         pure . File <$> maybeToList (envCliSocketPath envCli)
@@ -354,10 +359,10 @@ subInfoParser :: String -> InfoMod a -> [Maybe (Parser a)] -> Maybe (Parser a)
 subInfoParser name i mps = case catMaybes mps of
   [] -> Nothing
   parsers ->
-    Just $
-      Opt.hsubparser $
-        commandWithMetavar name $
-          Opt.info (asum parsers) i
+    Just
+      $ Opt.hsubparser
+      $ commandWithMetavar name
+      $ Opt.info (asum parsers) i
 
 pConwayEra :: EnvCli -> Parser (Era ConwayEra)
 pConwayEra envCli =
@@ -379,6 +384,9 @@ parseLovelace = do
   if i > toInteger (maxBound :: Word64)
     then fail $ show i <> " lovelace exceeds the Word64 upper bound"
     else return $ L.Coin i
+
+parseStakeAddressAndLovelace :: P.Parser (StakeAddress, Lovelace)
+parseStakeAddressAndLovelace = (,) <$> parseAddressAny <* P.char '+' <*> parseLovelace
 
 parseCoinPerByte :: P.Parser L.CoinPerByte
 parseCoinPerByte = do
@@ -427,7 +435,9 @@ pStakePoolVerificationKeyFile :: Maybe String -> Parser (VerificationKeyFile In)
 pStakePoolVerificationKeyFile prefix =
   File
     <$> asum
-      [ parseFilePath "cold-verification-key-file" "Filepath of the stake pool verification key."
+      [ parseFilePath
+          "cold-verification-key-file"
+          "Filepath of the stake pool verification key. Use `-` to read from standard input."
       , Opt.strOption $
           mconcat
             [ Opt.long $ prefixFlag prefix "stake-pool-verification-key-file"
@@ -757,13 +767,13 @@ pAnyVerificationKeyFileIn helpText =
 
 pAnyVerificationKeyText :: String -> Parser AnyVerificationKeyText
 pAnyVerificationKeyText helpText =
-  fmap (AnyVerificationKeyText . Text.pack) $
-    Opt.strOption $
-      mconcat
-        [ Opt.long "verification-key"
-        , Opt.metavar "STRING"
-        , Opt.help $ helpText <> " (Bech32-encoded)"
-        ]
+  fmap (AnyVerificationKeyText . Text.pack)
+    $ Opt.strOption
+    $ mconcat
+      [ Opt.long "verification-key"
+      , Opt.metavar "STRING"
+      , Opt.help $ helpText <> " (Bech32-encoded)"
+      ]
 
 pAnyVerificationKeySource :: String -> Parser AnyVerificationKeySource
 pAnyVerificationKeySource helpText =
@@ -938,12 +948,12 @@ pCBORInFile =
 
 --------------------------------------------------------------------------------
 
-pMintScriptFile :: Parser (File ScriptInAnyLang In)
-pMintScriptFile =
+pMintScriptFile :: String -> Parser (File ScriptInAnyLang In)
+pMintScriptFile help =
   pScriptFor
     "mint-script-file"
     (Just "minting-script-file")
-    "The file containing the script to witness the minting of assets for a particular policy Id."
+    ("The file containing the script to witness " ++ help)
 
 pPlutusMintScriptWitnessData
   :: WitCtx witctx
@@ -986,13 +996,13 @@ pSimpleScriptOrPlutusSpendingScriptWitness autoBalanceExecUnits scriptFlagPrefix
 
 pExecutionUnits :: String -> Parser ExecutionUnits
 pExecutionUnits scriptFlagPrefix =
-  fmap (uncurry ExecutionUnits) $
-    Opt.option pairIntegralReader $
-      mconcat
-        [ Opt.long (scriptFlagPrefix ++ "-execution-units")
-        , Opt.metavar "(INT, INT)"
-        , Opt.help "The time and space units needed by the script."
-        ]
+  fmap (uncurry ExecutionUnits)
+    $ Opt.option pairIntegralReader
+    $ mconcat
+      [ Opt.long (scriptFlagPrefix ++ "-execution-units")
+      , Opt.metavar "(INT, INT)"
+      , Opt.help "The time and space units needed by the script."
+      ]
 
 pScriptRedeemerOrFile :: String -> Parser ScriptDataOrFile
 pScriptRedeemerOrFile scriptFlagPrefix =
@@ -1090,15 +1100,26 @@ pScriptDataOrFile dataFlagPrefix helpTextForValue helpTextForFile =
    where
     liftWith f = either (fail . f) pure
 
-pVoteFiles
-  :: BalanceTxExecUnits
+pVoteFilesForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser [(VoteFile In, Maybe AnyNonAssetScript)]
-pVoteFiles bExUnits = many $ pVoteFile bExUnits
+pVoteFilesForEra era bExUnits = many $ pVoteFileForEra era bExUnits
 
-pVoteFile
-  :: BalanceTxExecUnits
+pVoteFileForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser (VoteFile In, Maybe AnyNonAssetScript)
-pVoteFile balExUnits =
+pVoteFileForEra era =
+  pVoteFileWithPlutusReferenceLanguage (pGovernancePlutusSLanguageForEra era "vote-") "a vote"
+
+pVoteFileWithPlutusReferenceLanguage
+  :: Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (VoteFile In, Maybe AnyNonAssetScript)
+pVoteFileWithPlutusReferenceLanguage pLanguage scriptFileHelp balExUnits =
   (,)
     <$> pFileInDirection "vote-file" "Filepath of the vote."
     <*> optional (pVoteScriptOrReferenceScriptWitness balExUnits)
@@ -1110,8 +1131,8 @@ pVoteFile balExUnits =
       bExUnits
       "vote"
       Nothing
-      "a vote"
-      <|> pVoteReferencePlutusScriptWitness "vote" balExUnits
+      scriptFileHelp
+      <|> pVoteReferencePlutusScriptWitness pLanguage balExUnits
 
 pVoteScriptWitness
   :: BalanceTxExecUnits
@@ -1135,28 +1156,40 @@ pVoteScriptWitness bExecUnits scriptFlagPrefix scriptFlagPrefixDeprecated help =
       )
 
 pVoteReferencePlutusScriptWitness
-  :: String -> BalanceTxExecUnits -> Parser AnyNonAssetScript
-pVoteReferencePlutusScriptWitness prefix autoBalanceExecUnits =
-  let appendedPrefix = prefix ++ "-"
-   in Voting.createPlutusReferenceScriptFromCliArgs
-        <$> pReferenceTxIn appendedPrefix "plutus"
-        <*> plutusSLanguageP appendedPrefix L.SPlutusV3 "v3"
-        <*> pScriptRedeemerOrFile (appendedPrefix ++ "reference-tx-in")
-        <*> ( case autoBalanceExecUnits of
-                AutoBalance -> pure (ExecutionUnits 0 0)
-                ManualBalance -> pExecutionUnits $ appendedPrefix ++ "reference-tx-in"
-            )
+  :: Parser AnySLanguage -> BalanceTxExecUnits -> Parser AnyNonAssetScript
+pVoteReferencePlutusScriptWitness pLanguage autoBalanceExecUnits =
+  Voting.createPlutusReferenceScriptFromCliArgs
+    <$> pReferenceTxIn "vote-" "plutus"
+    <*> pLanguage
+    <*> pScriptRedeemerOrFile "vote-reference-tx-in"
+    <*> ( case autoBalanceExecUnits of
+            AutoBalance -> pure (ExecutionUnits 0 0)
+            ManualBalance -> pExecutionUnits "vote-reference-tx-in"
+        )
 
-pProposalFiles
-  :: BalanceTxExecUnits
+pProposalFilesForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser [(ProposalFile In, Maybe AnyNonAssetScript)]
-pProposalFiles balExUnits =
-  many (pProposalFile balExUnits)
+pProposalFilesForEra era balExUnits =
+  many (pProposalFileForEra era balExUnits)
 
-pProposalFile
-  :: BalanceTxExecUnits
+pProposalFileForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser (ProposalFile In, Maybe AnyNonAssetScript)
-pProposalFile balExUnits =
+pProposalFileForEra era =
+  pProposalFileWithPlutusReferenceLanguage
+    (pGovernancePlutusSLanguageForEra era "proposal-")
+    "a proposal"
+
+pProposalFileWithPlutusReferenceLanguage
+  :: Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (ProposalFile In, Maybe AnyNonAssetScript)
+pProposalFileWithPlutusReferenceLanguage pLanguage scriptFileHelp balExUnits =
   (,)
     <$> pFileInDirection "proposal-file" "Filepath of the proposal."
     <*> optional (pProposingScriptOrReferenceScriptWitness balExUnits)
@@ -1168,8 +1201,8 @@ pProposalFile balExUnits =
       bExUnits
       "proposal"
       Nothing
-      "a proposal"
-      <|> pProposalReferencePlutusScriptWitness "proposal" balExUnits
+      scriptFileHelp
+      <|> pProposalReferencePlutusScriptWitness pLanguage balExUnits
 
 pProposalScriptWitness
   :: BalanceTxExecUnits
@@ -1193,17 +1226,16 @@ pProposalScriptWitness bExecUnits scriptFlagPrefix scriptFlagPrefixDeprecated he
       )
 
 pProposalReferencePlutusScriptWitness
-  :: String -> BalanceTxExecUnits -> Parser AnyNonAssetScript
-pProposalReferencePlutusScriptWitness prefix autoBalanceExecUnits =
-  let appendedPrefix = prefix ++ "-"
-   in Proposing.createPlutusReferenceScriptFromCliArgs
-        <$> pReferenceTxIn appendedPrefix "plutus"
-        <*> plutusSLanguageP appendedPrefix L.SPlutusV3 "v3"
-        <*> pScriptRedeemerOrFile (appendedPrefix ++ "reference-tx-in")
-        <*> ( case autoBalanceExecUnits of
-                AutoBalance -> pure (ExecutionUnits 0 0)
-                ManualBalance -> pExecutionUnits $ appendedPrefix ++ "reference-tx-in"
-            )
+  :: Parser AnySLanguage -> BalanceTxExecUnits -> Parser AnyNonAssetScript
+pProposalReferencePlutusScriptWitness pLanguage autoBalanceExecUnits =
+  Proposing.createPlutusReferenceScriptFromCliArgs
+    <$> pReferenceTxIn "proposal-" "plutus"
+    <*> pLanguage
+    <*> pScriptRedeemerOrFile "proposal-reference-tx-in"
+    <*> ( case autoBalanceExecUnits of
+            AutoBalance -> pure (ExecutionUnits 0 0)
+            ManualBalance -> pExecutionUnits "proposal-reference-tx-in"
+        )
 
 pCurrentTreasuryValue :: Parser (Maybe TxCurrentTreasuryValue)
 pCurrentTreasuryValue =
@@ -1264,13 +1296,13 @@ pPaymentVerificationKeyTextOrFile =
 
 pPaymentVerificationKeyText :: Parser Text
 pPaymentVerificationKeyText =
-  fmap Text.pack $
-    Opt.strOption $
-      mconcat
-        [ Opt.long "payment-verification-key"
-        , Opt.metavar "STRING"
-        , Opt.help "Payment verification key (Bech32-encoded)"
-        ]
+  fmap Text.pack
+    $ Opt.strOption
+    $ mconcat
+      [ Opt.long "payment-verification-key"
+      , Opt.metavar "STRING"
+      , Opt.help "Payment verification key (Bech32-encoded)"
+      ]
 
 pPaymentVerificationKeyFile :: Parser (VerificationKeyFile In)
 pPaymentVerificationKeyFile =
@@ -1354,10 +1386,22 @@ pTxBuildOutputOptions =
             <> "removed in a future version. Please, use calculate-plutus-script-cost command instead.)"
         )
 
-pCertificateFile
-  :: BalanceTxExecUnits
+pCertificateFileForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser (CertificateFile, Maybe AnyNonAssetScript)
-pCertificateFile balanceExecUnits =
+pCertificateFileForEra era =
+  pCertificateFileWithPlutusReferenceLanguage
+    (pAnyPlutusSLanguageForEra era "certificate-")
+    "the use of the certificate."
+
+pCertificateFileWithPlutusReferenceLanguage
+  :: Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (CertificateFile, Maybe AnyNonAssetScript)
+pCertificateFileWithPlutusReferenceLanguage pLanguage scriptFileHelp balanceExecUnits =
   (,)
     <$> ( fmap CertificateFile $
             asum
@@ -1374,8 +1418,8 @@ pCertificateFile balanceExecUnits =
       balanceExecUnits
       "certificate"
       Nothing
-      "the use of the certificate."
-      <|> pCertificateReferencePlutusScriptWitness "certificate" bExecUnits
+      scriptFileHelp
+      <|> pCertificateReferencePlutusScriptWitness pLanguage bExecUnits
 
   helpText =
     mconcat
@@ -1402,17 +1446,16 @@ pCertificatePlutusScriptWitness bExecUnits scriptFlagPrefix scriptFlagPrefixDepr
       )
 
 pCertificateReferencePlutusScriptWitness
-  :: String -> BalanceTxExecUnits -> Parser AnyNonAssetScript
-pCertificateReferencePlutusScriptWitness prefix autoBalanceExecUnits =
-  let appendedPrefix = prefix ++ "-"
-   in Certifying.createPlutusReferenceScriptFromCliArgs
-        <$> pReferenceTxIn appendedPrefix "plutus"
-        <*> pAnyPlutusSLanguage appendedPrefix
-        <*> pScriptRedeemerOrFile (appendedPrefix ++ "reference-tx-in")
-        <*> ( case autoBalanceExecUnits of
-                AutoBalance -> pure (ExecutionUnits 0 0)
-                ManualBalance -> pExecutionUnits $ appendedPrefix ++ "reference-tx-in"
-            )
+  :: Parser AnySLanguage -> BalanceTxExecUnits -> Parser AnyNonAssetScript
+pCertificateReferencePlutusScriptWitness pLanguage autoBalanceExecUnits =
+  Certifying.createPlutusReferenceScriptFromCliArgs
+    <$> pReferenceTxIn "certificate-" "plutus"
+    <*> pLanguage
+    <*> pScriptRedeemerOrFile "certificate-reference-tx-in"
+    <*> ( case autoBalanceExecUnits of
+            AutoBalance -> pure (ExecutionUnits 0 0)
+            ManualBalance -> pExecutionUnits "certificate-reference-tx-in"
+        )
 
 pPoolMetadataFile :: Parser (StakePoolMetadataFile In)
 pPoolMetadataFile =
@@ -1467,17 +1510,102 @@ pMetadataFile =
         File <$> parseFilePath "metadata-cbor-file" "Filepath of the metadata, in raw CBOR format."
     ]
 
-pWithdrawal
-  :: BalanceTxExecUnits
+-- | Parse repeatable @--direct-deposit STAKE_ADDRESS+LOVELACE@ options for
+-- ADA deposits into registered accounts. Available only in Dijkstra.
+pDirectDeposits :: Exp.Era era -> Parser [(StakeAddress, Lovelace)]
+pDirectDeposits era = case era of
+  Exp.ConwayEra -> pure []
+  Exp.DijkstraEra ->
+    many
+      $ Opt.option (readerFromParsecParser parseStakeAddressAndLovelace)
+      $ Opt.long "direct-deposit"
+        <> Opt.metavar "STAKE_ADDRESS+LOVELACE"
+        <> Opt.help
+          "Deposit ADA into a registered account. Amount in lovelace; each account may occur once."
+
+-- | Comparison syntax deliberately follows the ledger's inclusive lower and
+-- exclusive upper bounds. Exact assertions retain their distinct constructor.
+parseAccountBalanceInterval :: P.Parser (StakeAddress, L.AccountBalanceInterval era)
+parseAccountBalanceInterval = do
+  address <- parseAddressAny
+  interval <-
+    (L.AccountBalanceExact <$> parseExact)
+      <|> (L.AccountBalanceUpperBound . Exclusive <$> parseUpperBound)
+      <|> do
+        lower <- parseLowerBound
+        upper <- optional (P.char ',' *> parseUpperBound)
+        case upper of
+          Nothing -> pure $ L.AccountBalanceLowerBound (Inclusive lower)
+          Just upperBound
+            | lower < upperBound ->
+                pure $ L.AccountBalanceBothBounds (Inclusive lower) (Exclusive upperBound)
+            | otherwise -> fail "The lower bound must be strictly less than the upper bound"
+  pure (address, interval)
+ where
+  parseExact = P.char '=' *> parseLovelace
+  parseLowerBound = P.string ">=" *> parseLovelace
+  parseUpperBound = P.char '<' *> parseLovelace
+
+pAccountBalanceIntervals
+  :: Exp.Era era
+  -> Parser [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+pAccountBalanceIntervals era =
+  pBalanceIntervals
+    era
+    accountBalanceIntervalOptionName
+    "Require the account balance to satisfy this interval before applying this transaction's withdrawals, certificates, or direct deposits. Top-level transactions check the balance after all sub-transactions; each sub-transaction checks the balance after any preceding sub-transactions."
+
+pStartingAccountBalanceIntervals
+  :: Exp.Era era
+  -> Parser [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+pStartingAccountBalanceIntervals era =
+  pBalanceIntervals
+    era
+    startingAccountBalanceIntervalOptionName
+    "Check the account balance before the entire transaction, including all sub-transactions. Top-level only."
+
+pBalanceIntervals
+  :: Exp.Era era
+  -> String
+  -> String
+  -> Parser [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+pBalanceIntervals era optionName timing = case era of
+  Exp.ConwayEra -> pure []
+  Exp.DijkstraEra ->
+    many
+      $ Opt.option (readerFromParsecParser parseAccountBalanceInterval)
+      $ Opt.long optionName
+        <> Opt.metavar "STAKE_ADDRESS{=LOVELACE|>=LOWER|<UPPER|>=LOWER,<UPPER}"
+        <> Opt.help
+          ( timing
+              <> " Amounts in lovelace; lower bounds inclusive, upper bounds exclusive."
+              <> " Quote the argument so the shell treats < and > as literal characters, e.g. 'stake_test1...>=100,<200'."
+              <> " Each account may occur once per option."
+          )
+
+pWithdrawalForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser
        ( StakeAddress
        , Lovelace
        , Maybe AnyNonAssetScript
        )
-pWithdrawal balance =
+pWithdrawalForEra era =
+  pWithdrawalWithPlutusReferenceLanguage
+    (pAnyPlutusSLanguageForEra era "withdrawal-")
+    "the withdrawal of rewards."
+
+pWithdrawalWithPlutusReferenceLanguage
+  :: Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (StakeAddress, Lovelace, Maybe AnyNonAssetScript)
+pWithdrawalWithPlutusReferenceLanguage pLanguage scriptFileHelp balance =
   (\(stakeAddr, lovelace) maybeScriptFp -> (stakeAddr, lovelace, maybeScriptFp))
     <$> Opt.option
-      (readerFromParsecParser parseWithdrawal)
+      (readerFromParsecParser parseStakeAddressAndLovelace)
       ( Opt.long "withdrawal"
           <> Opt.metavar "WITHDRAWAL"
           <> Opt.help helpText
@@ -1490,8 +1618,8 @@ pWithdrawal balance =
       balance
       "withdrawal"
       Nothing
-      "the withdrawal of rewards."
-      <|> pWithdrawalReferencePlutusScriptWitness "withdrawal" balance
+      scriptFileHelp
+      <|> pWithdrawalReferencePlutusScriptWitness pLanguage balance
 
   helpText =
     mconcat
@@ -1500,10 +1628,6 @@ pWithdrawal balance =
       , "followed by the amount in Lovelace. Optionally specify "
       , "a script witness."
       ]
-
-  parseWithdrawal :: P.Parser (StakeAddress, Lovelace)
-  parseWithdrawal =
-    (,) <$> parseAddressAny <* P.char '+' <*> parseLovelace
 
 pWithdrawalScriptWitness
   :: BalanceTxExecUnits
@@ -1527,24 +1651,35 @@ pWithdrawalScriptWitness bExecUnits scriptFlagPrefix scriptFlagPrefixDeprecated 
       )
 
 pWithdrawalReferencePlutusScriptWitness
-  :: String -> BalanceTxExecUnits -> Parser AnyNonAssetScript
-pWithdrawalReferencePlutusScriptWitness prefix autoBalanceExecUnits =
-  let appendedPrefix = prefix ++ "-"
-   in Withdrawal.createPlutusReferenceScriptFromCliArgs
-        <$> pReferenceTxIn appendedPrefix "plutus"
-        <*> pAnyPlutusSLanguage appendedPrefix
-        <*> pScriptRedeemerOrFile (appendedPrefix ++ "reference-tx-in")
-        <*> ( case autoBalanceExecUnits of
-                AutoBalance -> pure (ExecutionUnits 0 0)
-                ManualBalance -> pExecutionUnits $ appendedPrefix ++ "reference-tx-in"
-            )
-
-pPlutusScriptLanguage :: String -> Parser AnyPlutusScriptVersion
-pPlutusScriptLanguage prefix = plutusP prefix PlutusScriptV2 "v2" <|> plutusP prefix PlutusScriptV3 "v3"
+  :: Parser AnySLanguage -> BalanceTxExecUnits -> Parser AnyNonAssetScript
+pWithdrawalReferencePlutusScriptWitness pLanguage autoBalanceExecUnits =
+  Withdrawal.createPlutusReferenceScriptFromCliArgs
+    <$> pReferenceTxIn "withdrawal-" "plutus"
+    <*> pLanguage
+    <*> pScriptRedeemerOrFile "withdrawal-reference-tx-in"
+    <*> ( case autoBalanceExecUnits of
+            AutoBalance -> pure (ExecutionUnits 0 0)
+            ManualBalance -> pExecutionUnits "withdrawal-reference-tx-in"
+        )
 
 pAnyPlutusSLanguage :: String -> Parser AnySLanguage
 pAnyPlutusSLanguage prefix =
   plutusSLanguageP prefix L.SPlutusV2 "v2" <|> plutusSLanguageP prefix L.SPlutusV3 "v3"
+
+-- | V4 reference scripts are available from Dijkstra onwards. Keep earlier
+-- eras' reference-language options unchanged.
+pAnyPlutusSLanguageForEra :: Exp.Era era -> String -> Parser AnySLanguage
+pAnyPlutusSLanguageForEra era prefix =
+  pAnyPlutusSLanguage prefix <|> pPlutusV4ReferenceLanguage era prefix
+
+pGovernancePlutusSLanguageForEra :: Exp.Era era -> String -> Parser AnySLanguage
+pGovernancePlutusSLanguageForEra era prefix =
+  plutusSLanguageP prefix L.SPlutusV3 "v3" <|> pPlutusV4ReferenceLanguage era prefix
+
+pPlutusV4ReferenceLanguage :: Exp.Era era -> String -> Parser AnySLanguage
+pPlutusV4ReferenceLanguage era prefix = case era of
+  Exp.DijkstraEra -> plutusSLanguageP prefix L.SPlutusV4 "v4"
+  Exp.ConwayEra -> empty
 
 plutusSLanguageP
   :: L.PlutusLanguage lang
@@ -1552,16 +1687,6 @@ plutusSLanguageP
 plutusSLanguageP prefix plutusVersion versionString =
   Opt.flag'
     (AnySLanguage plutusVersion)
-    ( Opt.long (prefix <> "plutus-script-" <> versionString)
-        <> Opt.help ("Specify a plutus script " <> versionString <> " reference script.")
-    )
-
-plutusP
-  :: IsPlutusScriptLanguage lang
-  => String -> PlutusScriptVersion lang -> String -> Parser AnyPlutusScriptVersion
-plutusP prefix plutusVersion versionString =
-  Opt.flag'
-    (AnyPlutusScriptVersion plutusVersion)
     ( Opt.long (prefix <> "plutus-script-" <> versionString)
         <> Opt.help ("Specify a plutus script " <> versionString <> " reference script.")
     )
@@ -1639,23 +1764,23 @@ pSigningKeyFileIn =
 
 pKesPeriod :: Parser KESPeriod
 pKesPeriod =
-  fmap KESPeriod $
-    Opt.option (bounded "KES_PERIOD") $
-      mconcat
-        [ Opt.long "kes-period"
-        , Opt.metavar "NATURAL"
-        , Opt.help "The start of the KES key validity period."
-        ]
+  fmap KESPeriod
+    $ Opt.option (bounded "KES_PERIOD")
+    $ mconcat
+      [ Opt.long "kes-period"
+      , Opt.metavar "NATURAL"
+      , Opt.help "The start of the KES key validity period."
+      ]
 
 pEpochNo :: String -> Parser EpochNo
 pEpochNo h =
-  fmap EpochNo $
-    Opt.option (bounded "EPOCH") $
-      mconcat
-        [ Opt.long "epoch"
-        , Opt.metavar "NATURAL"
-        , Opt.help h
-        ]
+  fmap EpochNo
+    $ Opt.option (bounded "EPOCH")
+    $ mconcat
+      [ Opt.long "epoch"
+      , Opt.metavar "NATURAL"
+      , Opt.help h
+      ]
 
 pEpochNoUpdateProp :: Parser EpochNo
 pEpochNoUpdateProp = pEpochNo "The epoch number in which the update proposal is valid."
@@ -1975,12 +2100,27 @@ pKesVerificationKeyFile =
       ]
 
 pTxSubmitFile :: Parser FilePath
-pTxSubmitFile = parseFilePath "tx-file" "Filepath of the transaction you intend to submit."
+pTxSubmitFile =
+  parseFilePath
+    "tx-file"
+    "Filepath of the transaction you intend to submit. Use `-` to read from standard input."
 
-pTxIn
-  :: BalanceTxExecUnits
+pTxInForEra
+  :: Exp.Era era
+  -> BalanceTxExecUnits
   -> Parser (TxIn, Maybe AnySpendScript)
-pTxIn balance =
+pTxInForEra era =
+  pTxInWithPlutusReferenceLanguage
+    (pAnyPlutusSLanguageForEra era "spending-")
+    "the spending of the transaction input."
+
+pTxInWithPlutusReferenceLanguage
+  :: Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (TxIn, Maybe AnySpendScript)
+pTxInWithPlutusReferenceLanguage pLanguage scriptFileHelp balance =
   (,)
     <$> Opt.option
       (readerFromParsecParser parseTxIn)
@@ -2004,7 +2144,7 @@ pTxIn balance =
   pPlutusReferenceSpendScriptWitness autoBalanceExecUnits =
     PlutusSpend.createPlutusReferenceScriptFromCliArgs
       <$> pReferenceTxIn "spending-" "plutus"
-      <*> pAnyPlutusSLanguage "spending-"
+      <*> pLanguage
       <*> pScriptDatumOrFileSpendingCip69 "spending-reference-tx-in"
       <*> pScriptRedeemerOrFile "spending-reference-tx-in"
       <*> ( case autoBalanceExecUnits of
@@ -2018,7 +2158,7 @@ pTxIn balance =
       balance
       "tx-in"
       (Just "txin")
-      "the spending of the transaction input."
+      scriptFileHelp
 
 pTxInCollateral :: Parser TxIn
 pTxInCollateral =
@@ -2138,17 +2278,17 @@ pTxOutDatum =
     <|> pure TxOutDatumByNone
  where
   pTxOutDatumByHashOnly =
-    fmap TxOutDatumByHashOnly $
-      Opt.option (readerFromParsecParser parseScriptDataHash) $
-        mconcat
-          [ Opt.long "tx-out-datum-hash"
-          , Opt.metavar "HASH"
-          , Opt.help $
-              mconcat
-                [ "The script datum hash for this tx output, as "
-                , "the raw datum hash (in hex)."
-                ]
-          ]
+    fmap TxOutDatumByHashOnly
+      $ Opt.option (readerFromParsecParser parseScriptDataHash)
+      $ mconcat
+        [ Opt.long "tx-out-datum-hash"
+        , Opt.metavar "HASH"
+        , Opt.help $
+            mconcat
+              [ "The script datum hash for this tx output, as "
+              , "the raw datum hash (in hex)."
+              ]
+        ]
 
   pTxOutDatumByHashOf =
     TxOutDatumByHashOf
@@ -2182,7 +2322,20 @@ pMintMultiAsset
    . IsEra era
   => BalanceTxExecUnits
   -> Parser (Maybe (L.MultiAsset, [AnyMintScript]))
-pMintMultiAsset balanceExecUnits =
+pMintMultiAsset =
+  pMintMultiAssetWithPlutusReferenceLanguage @era
+    (pAnyPlutusSLanguageForEra (useEra @era) "mint-")
+    "the minting of assets for a particular policy Id."
+
+pMintMultiAssetWithPlutusReferenceLanguage
+  :: forall era
+   . IsEra era
+  => Parser AnySLanguage
+  -> String
+  -- ^ Script-file witness description
+  -> BalanceTxExecUnits
+  -> Parser (Maybe (L.MultiAsset, [AnyMintScript]))
+pMintMultiAssetWithPlutusReferenceLanguage pLanguage scriptFileHelp balanceExecUnits =
   let mintAssets =
         Opt.option
           -- TODO: parseMintingMultiAssetValue should not be parameterized on era
@@ -2202,7 +2355,7 @@ pMintMultiAsset balanceExecUnits =
   pMintingScript :: Parser AnyMintScript
   pMintingScript =
     createSimpleOrPlutusScriptFromCliArgs
-      <$> pMintScriptFile
+      <$> pMintScriptFile scriptFileHelp
       <*> optional (pPlutusMintScriptWitnessData WitCtxMint balanceExecUnits)
 
   pSimpleReferenceMintingScriptWitness :: Parser AnyMintScript
@@ -2216,7 +2369,7 @@ pMintMultiAsset balanceExecUnits =
   pPlutusMintReferenceScriptWitnessFiles autoBalanceExecUnits =
     createPlutusReferenceScriptFromCliArgs
       <$> pReferenceTxIn "mint-" "plutus"
-      <*> pAnyPlutusSLanguage "mint-"
+      <*> pLanguage
       <*> pScriptRedeemerOrFile "mint-reference-tx-in"
       <*> ( case autoBalanceExecUnits of
               AutoBalance -> pure (ExecutionUnits 0 0)
@@ -2270,51 +2423,57 @@ pInvalidHereafter
 pInvalidHereafter eon =
   fmap (TxValidityUpperBound $ convert eon) $
     asum
-      [ fmap (Just . SlotNo) $
-          Opt.option (bounded "SLOT") $
-            mconcat
-              [ Opt.long "invalid-hereafter"
-              , Opt.metavar "SLOT"
-              , Opt.help "Time that transaction is valid until (in slots)."
-              ]
-      , fmap (Just . SlotNo) $
-          Opt.option (bounded "SLOT") $
-            mconcat
-              [ Opt.long "upper-bound"
-              , Opt.metavar "SLOT"
-              , Opt.help $
-                  mconcat
-                    [ "Time that transaction is valid until (in slots) "
-                    , "(deprecated; use --invalid-hereafter instead)."
-                    ]
-              , Opt.internal
-              ]
-      , fmap (Just . SlotNo) $
-          Opt.option (bounded "SLOT") $
-            mconcat
-              [ Opt.long "ttl"
-              , Opt.metavar "SLOT"
-              , Opt.help "Time to live (in slots) (deprecated; use --invalid-hereafter instead)."
-              , Opt.internal
-              ]
+      [ fmap (Just . SlotNo)
+          $ Opt.option (bounded "SLOT")
+          $ mconcat
+            [ Opt.long "invalid-hereafter"
+            , Opt.metavar "SLOT"
+            , Opt.help "Time that transaction is valid until (in slots)."
+            ]
+      , fmap (Just . SlotNo)
+          $ Opt.option (bounded "SLOT")
+          $ mconcat
+            [ Opt.long "upper-bound"
+            , Opt.metavar "SLOT"
+            , Opt.help $
+                mconcat
+                  [ "Time that transaction is valid until (in slots) "
+                  , "(deprecated; use --invalid-hereafter instead)."
+                  ]
+            , Opt.internal
+            ]
+      , fmap (Just . SlotNo)
+          $ Opt.option (bounded "SLOT")
+          $ mconcat
+            [ Opt.long "ttl"
+            , Opt.metavar "SLOT"
+            , Opt.help "Time to live (in slots) (deprecated; use --invalid-hereafter instead)."
+            , Opt.internal
+            ]
       , pure Nothing
       ]
 
 pTxFee :: Parser Lovelace
 pTxFee =
-  fmap (L.Coin . (fromIntegral :: Natural -> Integer)) $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "fee"
-        , Opt.metavar "LOVELACE"
-        , Opt.help "The fee amount in Lovelace."
-        ]
+  fmap (L.Coin . (fromIntegral :: Natural -> Integer))
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "fee"
+      , Opt.metavar "LOVELACE"
+      , Opt.help "The fee amount in Lovelace."
+      ]
 
 pWitnessFile :: Parser WitnessFile
-pWitnessFile = WitnessFile <$> parseFilePath "witness-file" "Filepath of the witness"
+pWitnessFile =
+  WitnessFile
+    <$> parseFilePath "witness-file" "Filepath of the witness. Use `-` to read from standard input."
 
 pTxBodyFileIn :: Parser (TxBodyFile In)
-pTxBodyFileIn = File <$> parseFilePath "tx-body-file" "Input filepath of the JSON TxBody."
+pTxBodyFileIn =
+  File
+    <$> parseFilePath
+      "tx-body-file"
+      "Input filepath of the JSON TxBody. Use `-` to read from standard input."
 
 pTxBodyFileOut :: Parser (TxBodyFile Out)
 pTxBodyFileOut =
@@ -2329,7 +2488,9 @@ pTxBodyFileOut =
       ]
 
 pTxFileIn :: Parser (TxFile In)
-pTxFileIn = File <$> parseFilePath "tx-file" "Input filepath of the JSON Tx."
+pTxFileIn =
+  File
+    <$> parseFilePath "tx-file" "Input filepath of the JSON Tx. Use `-` to read from standard input."
 
 pTxFileOut :: Parser (TxFile Out)
 pTxFileOut =
@@ -2350,46 +2511,53 @@ pInputTxOrTxBodyFile =
     , InputTxFile <$> pTxFileIn
     ]
 
+pCertificateFileIn :: Parser CertificateFile
+pCertificateFileIn =
+  CertificateFile
+    <$> parseFilePath
+      "certificate-file"
+      "Input filepath of the certificate. Use `-` to read from standard input."
+
 pTxInCountDeprecated :: Parser TxInCount
 pTxInCountDeprecated =
-  fmap TxInCount $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "tx-in-count"
-        , Opt.metavar "NATURAL"
-        , Opt.help "DEPRECATED. This argument has no effect."
-        ]
+  fmap TxInCount
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "tx-in-count"
+      , Opt.metavar "NATURAL"
+      , Opt.help "DEPRECATED. This argument has no effect."
+      ]
 
 pTxOutCountDeprecated :: Parser TxOutCount
 pTxOutCountDeprecated =
-  fmap TxOutCount $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "tx-out-count"
-        , Opt.metavar "NATURAL"
-        , Opt.help "DEPRECATED. This argument has no effect."
-        ]
+  fmap TxOutCount
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "tx-out-count"
+      , Opt.metavar "NATURAL"
+      , Opt.help "DEPRECATED. This argument has no effect."
+      ]
 
 pTxShelleyWitnessCount :: Parser TxShelleyWitnessCount
 pTxShelleyWitnessCount =
-  fmap TxShelleyWitnessCount $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "witness-count"
-        , Opt.metavar "NATURAL"
-        , Opt.help "The number of Shelley key witnesses."
-        ]
+  fmap TxShelleyWitnessCount
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "witness-count"
+      , Opt.metavar "NATURAL"
+      , Opt.help "The number of Shelley key witnesses."
+      ]
 
 pTxByronWitnessCount :: Parser TxByronWitnessCount
 pTxByronWitnessCount =
-  fmap TxByronWitnessCount $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "byron-witness-count"
-        , Opt.metavar "NATURAL"
-        , Opt.help "The number of Byron key witnesses (default is 0)."
-        , Opt.value 0
-        ]
+  fmap TxByronWitnessCount
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "byron-witness-count"
+      , Opt.metavar "NATURAL"
+      , Opt.help "The number of Byron key witnesses (default is 0)."
+      , Opt.value 0
+      ]
 
 pQueryUTxOFilter :: Parser QueryUTxOFilter
 pQueryUTxOFilter =
@@ -2456,13 +2624,13 @@ pByronAddress =
 
 pAddress :: Parser Text
 pAddress =
-  fmap Text.pack $
-    Opt.strOption $
-      mconcat
-        [ Opt.long "address"
-        , Opt.metavar "ADDRESS"
-        , Opt.help "A Cardano address"
-        ]
+  fmap Text.pack
+    $ Opt.strOption
+    $ mconcat
+      [ Opt.long "address"
+      , Opt.metavar "ADDRESS"
+      , Opt.help "A Cardano address"
+      ]
 
 -- | First argument is the prefix for the option's flag to use
 pStakePoolVerificationKeyHash :: Maybe String -> Parser (Hash StakePoolKey)
@@ -3245,23 +3413,23 @@ pMinCommitteeSize =
 
 pCommitteeTermLength :: Parser L.EpochInterval
 pCommitteeTermLength =
-  fmap L.EpochInterval $
-    Opt.option (bounded "EPOCH_INTERVAL") $
-      mconcat
-        [ Opt.long "committee-term-length"
-        , Opt.metavar "WORD32"
-        , Opt.help "Maximal term length for members of the constitutional committee, in epochs."
-        ]
+  fmap L.EpochInterval
+    $ Opt.option (bounded "EPOCH_INTERVAL")
+    $ mconcat
+      [ Opt.long "committee-term-length"
+      , Opt.metavar "WORD32"
+      , Opt.help "Maximal term length for members of the constitutional committee, in epochs."
+      ]
 
 pGovActionLifetime :: Parser L.EpochInterval
 pGovActionLifetime =
-  fmap L.EpochInterval $
-    Opt.option (bounded "EPOCH_INTERVAL") $
-      mconcat
-        [ Opt.long "governance-action-lifetime"
-        , Opt.metavar "WORD32"
-        , Opt.help "Maximal lifetime of governance actions, in epochs."
-        ]
+  fmap L.EpochInterval
+    $ Opt.option (bounded "EPOCH_INTERVAL")
+    $ mconcat
+      [ Opt.long "governance-action-lifetime"
+      , Opt.metavar "WORD32"
+      , Opt.help "Maximal lifetime of governance actions, in epochs."
+      ]
 
 pDRepDeposit :: Parser Lovelace
 pDRepDeposit =
@@ -3274,13 +3442,13 @@ pDRepDeposit =
 
 pDRepActivity :: Parser L.EpochInterval
 pDRepActivity =
-  fmap L.EpochInterval $
-    Opt.option (bounded "EPOCH_INTERVAL") $
-      mconcat
-        [ Opt.long "drep-activity"
-        , Opt.metavar "WORD32"
-        , Opt.help "DRep activity period, in epochs."
-        ]
+  fmap L.EpochInterval
+    $ Opt.option (bounded "EPOCH_INTERVAL")
+    $ mconcat
+      [ Opt.long "drep-activity"
+      , Opt.metavar "WORD32"
+      , Opt.help "DRep activity period, in epochs."
+      ]
 
 parseTxOutShelleyBasedEra
   :: P.Parser (TxOutDatumAnyEra -> ReferenceScriptAnyEra -> TxOutShelleyBasedEra)
@@ -3609,18 +3777,18 @@ pNetworkIdForTestnetData envCli =
   asum $
     mconcat
       [
-        [ fmap (Testnet . NetworkMagic) $
-            Opt.option (bounded "TESTNET_MAGIC") $
-              mconcat
-                [ Opt.long "testnet-magic"
-                , Opt.metavar "NATURAL"
-                , Opt.help $
-                    mconcat
-                      [ "Specify a testnet magic id for the cluster. "
-                      , "This overrides both the network magic from the "
-                      , "spec file and CARDANO_NODE_NETWORK_ID environment variable."
-                      ]
-                ]
+        [ fmap (Testnet . NetworkMagic)
+            $ Opt.option (bounded "TESTNET_MAGIC")
+            $ mconcat
+              [ Opt.long "testnet-magic"
+              , Opt.metavar "NATURAL"
+              , Opt.help $
+                  mconcat
+                    [ "Specify a testnet magic id for the cluster. "
+                    , "This overrides both the network magic from the "
+                    , "spec file and CARDANO_NODE_NETWORK_ID environment variable."
+                    ]
+              ]
         ]
       , -- Default to the network id specified by the environment variable if it is available.
         pure <$> maybeToList (envCliNetworkId envCli)
@@ -3628,14 +3796,14 @@ pNetworkIdForTestnetData envCli =
 
 pReferenceScriptSize :: Parser ReferenceScriptSize
 pReferenceScriptSize =
-  fmap ReferenceScriptSize $
-    Opt.option integralReader $
-      mconcat
-        [ Opt.long "reference-script-size"
-        , Opt.metavar "NATURAL"
-        , Opt.help "Total size in bytes of transaction reference scripts (default is 0)."
-        , Opt.value 0
-        ]
+  fmap ReferenceScriptSize
+    $ Opt.option integralReader
+    $ mconcat
+      [ Opt.long "reference-script-size"
+      , Opt.metavar "NATURAL"
+      , Opt.help "Total size in bytes of transaction reference scripts (default is 0)."
+      , Opt.value 0
+      ]
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -3653,3 +3821,12 @@ pFeatured peon p = do
   case mw of
     Nothing -> pure Nothing
     Just eon' -> Just . Featured eon' <$> p
+
+pIsCborOutCanonical :: Parser TxCborFormat
+pIsCborOutCanonical =
+  Opt.flag TxCborNotCanonical TxCborCanonical $
+    mconcat
+      [ Opt.long "out-canonical-cbor"
+      , Opt.help
+          "Produce transaction in canonical CBOR according to RFC7049. Only this part of CIP-21 is implemented."
+      ]

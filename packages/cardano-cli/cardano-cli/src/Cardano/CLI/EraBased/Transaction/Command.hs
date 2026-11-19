@@ -25,6 +25,8 @@ module Cardano.CLI.EraBased.Transaction.Command
   , TransactionWitnessCmdArgs (..)
   , TxCborFormat (..)
   , IncludeCurrentTreasuryValue (..)
+  , accountBalanceIntervalOptionName
+  , startingAccountBalanceIntervalOptionName
   , renderTransactionCmds
   )
 where
@@ -33,13 +35,21 @@ import Cardano.Api
 import Cardano.Api.Experimental qualified as Exp
 import Cardano.Api.Ledger qualified as L
 
+import Cardano.CLI.EraBased.Script.Guard.Type
 import Cardano.CLI.EraBased.Script.Type
 import Cardano.CLI.Orphan ()
 import Cardano.CLI.Type.Common
 import Cardano.CLI.Type.Governance
+import Cardano.Ledger.Dijkstra.Scripts qualified as L
 
 import Data.Universe (Some)
 import Vary (Vary)
+
+accountBalanceIntervalOptionName :: String
+accountBalanceIntervalOptionName = "account-balance-interval"
+
+startingAccountBalanceIntervalOptionName :: String
+startingAccountBalanceIntervalOptionName = "starting-account-balance-interval"
 
 data TransactionCmds era
   = TransactionBuildRawCmd !(TransactionBuildRawCmdArgs era)
@@ -70,8 +80,8 @@ data TransactionBuildRawCmdArgs era = TransactionBuildRawCmdArgs
   -- ^ Return collateral
   , mTotalCollateral :: !(Maybe Coin)
   -- ^ Total collateral
-  , requiredSigners :: ![RequiredSigner]
-  -- ^ Required signers
+  , guardArguments :: !(TxGuardArguments era)
+  -- ^ Conway required signers or Dijkstra key and script guards.
   , txouts :: ![TxOutAnyEra]
   , mMintedAssets :: !(Maybe (L.MultiAsset, [AnyMintScript]))
   -- ^ Multi-Asset minted value with script witness
@@ -84,6 +94,10 @@ data TransactionBuildRawCmdArgs era = TransactionBuildRawCmdArgs
   , certificates :: ![(CertificateFile, Maybe AnyNonAssetScript)]
   -- ^ Certificates with potential script witness
   , withdrawals :: ![(StakeAddress, Coin, Maybe AnyNonAssetScript)]
+  , directDeposits :: ![(StakeAddress, Coin)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  , accountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  , startingAccountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
   , metadataSchema :: !TxMetadataJsonSchema
   , scriptFiles :: ![ScriptFile]
   -- ^ Auxiliary scripts
@@ -93,19 +107,12 @@ data TransactionBuildRawCmdArgs era = TransactionBuildRawCmdArgs
   , proposalFiles :: ![(ProposalFile In, Maybe AnyNonAssetScript)]
   , mCurrentTreasuryValue :: !(Maybe TxCurrentTreasuryValue)
   , mTreasuryDonation :: !(Maybe TxTreasuryDonation)
+  , subTransactionFiles :: ![SignedSubTxFile In]
+  -- ^ Signed sub-transactions to embed. Dijkstra era onwards; always empty in Conway.
   , isCborOutCanonical :: !TxCborFormat
   , txBodyOutFile :: !(TxBodyFile Out)
   }
   deriving Show
-
--- | Whether output transaction is in CBOR canonical format according to RFC7049 section 3.9.
---
--- 1. https://datatracker.ietf.org/doc/html/rfc7049#section-3.9
--- 2. https://github.com/cardano-foundation/CIPs/blob/master/CIP-0021/README.md#canonical-cbor-serialization-format
-data TxCborFormat
-  = TxCborCanonical
-  | TxCborNotCanonical
-  deriving (Eq, Show)
 
 -- | Whether to include the current treasury value in the transaction body.
 --
@@ -135,8 +142,8 @@ data TransactionBuildCmdArgs era = TransactionBuildCmdArgs
   -- ^ Transaction inputs with optional spending scripts
   , readOnlyReferenceInputs :: ![TxIn]
   -- ^ Read only reference inputs
-  , requiredSigners :: ![RequiredSigner]
-  -- ^ Required signers
+  , guardArguments :: !(TxGuardArguments era)
+  -- ^ Conway required signers or Dijkstra key and script guards.
   , txinsc :: ![TxIn]
   -- ^ Transaction inputs for collateral, only key witnesses, no scripts.
   , mReturnCollateral :: !(Maybe TxOutShelleyBasedEra)
@@ -157,6 +164,10 @@ data TransactionBuildCmdArgs era = TransactionBuildCmdArgs
   -- ^ Certificates with potential script witness
   , withdrawals :: ![(StakeAddress, Coin, Maybe AnyNonAssetScript)]
   -- ^ Withdrawals with potential script witness
+  , directDeposits :: ![(StakeAddress, Coin)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  , accountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  , startingAccountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
   , metadataSchema :: !TxMetadataJsonSchema
   , scriptFiles :: ![ScriptFile]
   -- ^ Auxiliary scripts
@@ -184,8 +195,8 @@ data TransactionBuildEstimateCmdArgs era = TransactionBuildEstimateCmdArgs
   -- ^ Transaction inputs with optional spending scripts
   , readOnlyReferenceInputs :: ![TxIn]
   -- ^ Read only reference inputs
-  , requiredSigners :: ![RequiredSigner]
-  -- ^ Required signers
+  , guardArguments :: !(TxGuardArguments era)
+  -- ^ Conway required signers or Dijkstra key and script guards.
   , txinsc :: ![TxIn]
   -- ^ Transaction inputs for collateral, only key witnesses, no scripts.
   , mReturnCollateral :: !(Maybe TxOutShelleyBasedEra)
@@ -204,6 +215,10 @@ data TransactionBuildEstimateCmdArgs era = TransactionBuildEstimateCmdArgs
   -- ^ Certificates with potential script witness
   , withdrawals :: ![(StakeAddress, Coin, Maybe AnyNonAssetScript)]
   -- ^ Withdrawals with potential script witness
+  , directDeposits :: ![(StakeAddress, Coin)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  , accountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  , startingAccountBalanceIntervals :: ![(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
   , plutusCollateral :: !(Maybe Coin)
   -- ^ Total collateral
   , totalReferenceScriptSize :: !(Maybe ReferenceScriptSize)

@@ -8,8 +8,6 @@ module Cardano.CLI.Option
   )
 where
 
-import Cardano.Api.Experimental (ConwayEra)
-
 import Cardano.CLI.Byron.Parser (backwardsCompatibilityCommands, parseByronCommands)
 import Cardano.CLI.Compatible.Option
 import Cardano.CLI.Environment (EnvCli)
@@ -61,14 +59,14 @@ addressCmdsTopLevel envCli = AddressCommand <$> pAddressCmds envCli
 -- The node related commands are shelley era agnostic for the time being.
 -- There is no need to guard them by the era argument.
 nodeCmdsTopLevel :: Parser ClientCommand
-nodeCmdsTopLevel = NodeCommands <$> pNodeCmds @ConwayEra
+nodeCmdsTopLevel = NodeCommands <$> pNodeCmds @MainnetEra
 
 -- Queries actually depend on the node to client version which may coincide
 -- with a hardfork but not necessarily. We will expose commands at the top level
 -- regardless if they are compatible with the era or not. The help text should be
 -- updated to make this clear. Gating commands behind eras
 queryCmdsTopLevel :: EnvCli -> Parser ClientCommand
-queryCmdsTopLevel envCli = QueryCommands @ConwayEra <$> pQueryCmdsTopLevel envCli
+queryCmdsTopLevel envCli = QueryCommands @MainnetEra <$> pQueryCmdsTopLevel envCli
 
 keyCmdsTopLevel :: Parser ClientCommand
 keyCmdsTopLevel = KeyCommands <$> pKeyCmds
@@ -96,22 +94,22 @@ parseClientCommand envCli =
 
 parseByron :: EnvCli -> Parser ClientCommand
 parseByron mNetworkId =
-  fmap ByronCommand $
-    subparser $
-      mconcat
-        [ metavar "Byron specific commands"
-        , command' "byron" "Byron specific commands" $ parseByronCommands mNetworkId
-        ]
+  fmap ByronCommand
+    $ subparser
+    $ mconcat
+      [ metavar "Byron specific commands"
+      , command' "byron" "Byron specific commands" $ parseByronCommands mNetworkId
+      ]
 
 parseHash :: Parser ClientCommand
 parseHash = HashCmds <$> pHashCmds
 
 parseCompatibilityCommands :: EnvCli -> Parser ClientCommand
 parseCompatibilityCommands envCli =
-  Opt.hsubparser $
-    commandWithMetavar "compatible" $
-      Opt.info (CompatibleCommands <$> pAnyCompatibleCommand envCli) $
-        Opt.progDesc "Limited backward compatible commands for testing only."
+  Opt.hsubparser
+    $ commandWithMetavar "compatible"
+    $ Opt.info (CompatibleCommands <$> pAnyCompatibleCommand envCli)
+    $ Opt.progDesc "Limited backward compatible commands for testing only."
 
 parseDebug :: EnvCli -> Parser ClientCommand
 parseDebug envCli = CliDebugCmds <$> parseDebugCmds envCli
@@ -121,10 +119,10 @@ parseAnyEra envCli = AnyEraCommand <$> pAnyEraCommand envCli
 
 parseLegacy :: EnvCli -> Parser ClientCommand
 parseLegacy envCli =
-  Opt.hsubparser $
-    commandWithMetavar "legacy" $
-      Opt.info (LegacyCmds <$> parseLegacyCmds envCli) $
-        Opt.progDesc "Legacy commands"
+  Opt.hsubparser
+    $ commandWithMetavar "legacy"
+    $ Opt.info (LegacyCmds <$> parseLegacyCmds envCli)
+    $ Opt.progDesc "Legacy commands"
 
 -- | Parse Legacy commands at the top level of the CLI.
 -- Yes! A --version flag or version command. Either guess is right!

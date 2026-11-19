@@ -2,7 +2,6 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -16,7 +15,9 @@ import Cardano.Api.Experimental qualified as Exp
 
 import Cardano.CLI.Environment (EnvCli (..))
 import Cardano.CLI.EraBased.Common.Option
+import Cardano.CLI.EraBased.Script.Guard.Option
 import Cardano.CLI.EraBased.Transaction.Command
+import Cardano.CLI.EraBased.Transaction.SubTransaction.Option
 import Cardano.CLI.Option.Flag
 import Cardano.CLI.Parser
 import Cardano.CLI.Read
@@ -25,7 +26,6 @@ import Cardano.CLI.Type.Common
 import Control.Monad
 import Data.Foldable
 import Data.Function ((&))
-import Data.Functor
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Universe (Some)
 import Options.Applicative hiding (help, str)
@@ -45,82 +45,82 @@ pTransactionCmds envCli =
           [ "Transaction commands."
           ]
     )
-    [ Just $
-        Opt.hsubparser $
-          commandWithMetavar "build-raw" $
-            Opt.info pTransactionBuildRaw $
-              Opt.progDescDoc $
-                Just $
-                  mconcat
-                    [ pretty @String "Build a transaction (low-level, inconvenient)"
-                    , line
-                    , line
-                    , H.yellow $
-                        mconcat
-                          [ "Please note "
-                          , H.underline "the order"
-                          , " of some cmd options is crucial. If used incorrectly may produce "
-                          , "undesired tx body. See nested [] notation above for details."
-                          ]
-                    ]
+    [ Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "build-raw"
+        $ Opt.info pTransactionBuildRaw
+        $ Opt.progDescDoc
+        $ Just
+        $ mconcat
+          [ pretty @String "Build a transaction (low-level, inconvenient)"
+          , line
+          , line
+          , H.yellow $
+              mconcat
+                [ "Please note "
+                , H.underline "the order"
+                , " of some cmd options is crucial. If used incorrectly may produce "
+                , "undesired tx body. See nested [] notation above for details."
+                ]
+          ]
     , pTransactionBuildCmd envCli
     , pTransactionBuildEstimateCmd envCli
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "sign" $
-            Opt.info (pTransactionSign envCli) $
-              Opt.progDesc "Sign a transaction"
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "witness" $
-            Opt.info (pTransactionCreateWitness envCli) $
-              Opt.progDesc "Create a transaction witness"
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "assemble" $
-            Opt.info pTransactionAssembleTxBodyWit $
-              Opt.progDesc "Assemble a tx body and witness(es) to form a transaction"
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "sign"
+        $ Opt.info (pTransactionSign envCli)
+        $ Opt.progDesc "Sign a transaction"
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "witness"
+        $ Opt.info (pTransactionCreateWitness envCli)
+        $ Opt.progDesc "Create a transaction witness"
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "assemble"
+        $ Opt.info pTransactionAssembleTxBodyWit
+        $ Opt.progDesc "Assemble a tx body and witness(es) to form a transaction"
     , Just pSignWitnessBackwardCompatible
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "submit" $
-            Opt.info (pTransactionSubmit envCli) $
-              Opt.progDesc $
-                mconcat
-                  [ "Submit a transaction to the local node whose Unix domain socket "
-                  , "is obtained from the CARDANO_NODE_SOCKET_PATH environment variable."
-                  ]
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "policyid" $
-            Opt.info pTransactionPolicyId $
-              Opt.progDesc "Calculate the PolicyId from the monetary policy script."
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "calculate-min-fee" $
-            Opt.info pTransactionCalculateMinFee $
-              Opt.progDesc "Calculate the minimum fee for a transaction."
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "calculate-min-required-utxo" $
-            Opt.info pTransactionCalculateMinReqUTxO $
-              Opt.progDesc "Calculate the minimum required UTxO for a transaction output."
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "calculate-plutus-script-cost" $
-            Opt.info (pTransactionCalculatePlutusScriptCost envCli) $
-              Opt.progDesc "Calculate the costs of the Plutus scripts of a given transaction."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "submit"
+        $ Opt.info (pTransactionSubmit envCli)
+        $ Opt.progDesc
+        $ mconcat
+          [ "Submit a transaction to the local node whose Unix domain socket "
+          , "is obtained from the CARDANO_NODE_SOCKET_PATH environment variable."
+          ]
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "policyid"
+        $ Opt.info pTransactionPolicyId
+        $ Opt.progDesc "Calculate the PolicyId from the monetary policy script."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "calculate-min-fee"
+        $ Opt.info pTransactionCalculateMinFee
+        $ Opt.progDesc "Calculate the minimum fee for a transaction."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "calculate-min-required-utxo"
+        $ Opt.info pTransactionCalculateMinReqUTxO
+        $ Opt.progDesc "Calculate the minimum required UTxO for a transaction output."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "calculate-plutus-script-cost"
+        $ Opt.info (pTransactionCalculatePlutusScriptCost envCli)
+        $ Opt.progDesc "Calculate the costs of the Plutus scripts of a given transaction."
     , Just pCalculateMinRequiredUtxoBackwardCompatible
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "hash-script-data" $
-            Opt.info pTxHashScriptData $
-              Opt.progDesc "Calculate the hash of script data."
-    , Just $
-        Opt.hsubparser $
-          commandWithMetavar "txid" $
-            Opt.info pTransactionId $
-              Opt.progDesc "Print a transaction identifier."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "hash-script-data"
+        $ Opt.info pTxHashScriptData
+        $ Opt.progDesc "Calculate the hash of script data."
+    , Just
+        $ Opt.hsubparser
+        $ commandWithMetavar "txid"
+        $ Opt.info pTransactionId
+        $ Opt.progDesc "Print a transaction identifier."
     ]
 
 -- Backwards compatible parsers
@@ -145,48 +145,53 @@ pSignWitnessBackwardCompatible =
   Opt.subparser $
     Opt.command "sign-witness" assembleInfo <> Opt.internal
 
-pScriptValidity :: Parser ScriptValidity
-pScriptValidity =
-  asum
-    [ Opt.flag' ScriptValid $
-        mconcat
-          [ Opt.long "script-valid"
-          , Opt.help "Assertion that the script is valid. (default)"
-          ]
-    , Opt.flag' ScriptInvalid $
-        mconcat
-          [ Opt.long "script-invalid"
-          , Opt.help $
-              mconcat
-                [ "Assertion that the script is invalid.  "
-                , "If a transaction is submitted with such a script, "
-                , "the script will fail and the collateral will be taken."
-                ]
-          ]
-    ]
+pScriptValidity :: Exp.Era era -> Parser (Maybe ScriptValidity)
+pScriptValidity era' = case era' of
+  -- CIP-0167 removes the author-supplied validity flag from standalone transactions:
+  -- https://github.com/cardano-foundation/CIPs/tree/master/CIP-0167
+  Exp.DijkstraEra -> pure Nothing
+  Exp.ConwayEra ->
+    optional $
+      asum
+        [ Opt.flag' ScriptValid $
+            mconcat
+              [ Opt.long "script-valid"
+              , Opt.help "Assertion that the script is valid. (default)"
+              ]
+        , Opt.flag' ScriptInvalid $
+            mconcat
+              [ Opt.long "script-invalid"
+              , Opt.help $
+                  mconcat
+                    [ "Assertion that the script is invalid.  "
+                    , "If a transaction is submitted with such a script, "
+                    , "the script will fail and the collateral will be taken."
+                    ]
+              ]
+        ]
 
 pTransactionBuildCmd
   :: forall era. Exp.IsEra era => EnvCli -> Maybe (Parser (TransactionCmds era))
 pTransactionBuildCmd envCli = do
   era' <- forEraMaybeEon (convert $ Exp.useEra @era)
-  pure $
-    Opt.hsubparser $
-      commandWithMetavar "build" $
-        Opt.info (pCmd era') $
-          Opt.progDescDoc $
-            Just $
-              mconcat
-                [ pretty @String "Build a balanced transaction (automatically calculates fees)"
-                , line
-                , line
-                , H.yellow $
-                    mconcat
-                      [ "Please note "
-                      , H.underline "the order"
-                      , " of some cmd options is crucial. If used incorrectly may produce "
-                      , "undesired tx body. See nested [] notation above for details."
-                      ]
-                ]
+  pure
+    $ Opt.hsubparser
+    $ commandWithMetavar "build"
+    $ Opt.info (pCmd era')
+    $ Opt.progDescDoc
+    $ Just
+    $ mconcat
+      [ pretty @String "Build a balanced transaction (automatically calculates fees)"
+      , line
+      , line
+      , H.yellow $
+          mconcat
+            [ "Please note "
+            , H.underline "the order"
+            , " of some cmd options is crucial. If used incorrectly may produce "
+            , "undesired tx body. See nested [] notation above for details."
+            ]
+      ]
  where
   pCmd era' = do
     fmap TransactionBuildCmd $
@@ -196,11 +201,11 @@ pTransactionBuildCmd envCli = do
                 <*> pNetworkId envCli
                 <*> pSocketPath envCli
             )
-        <*> optional pScriptValidity
+        <*> pScriptValidity (Exp.useEra @era)
         <*> optional pWitnessOverride
-        <*> some (pTxIn AutoBalance)
+        <*> some (pTxInForEra (Exp.useEra @era) AutoBalance)
         <*> many pReadOnlyReferenceTxIn
-        <*> many pRequiredSigner
+        <*> pTxGuardArguments (Exp.useEra @era) AutoBalance
         <*> many pTxInCollateral
         <*> optional pReturnCollateral
         <*> optional pTotalCollateral
@@ -209,8 +214,11 @@ pTransactionBuildCmd envCli = do
         <*> (fmap join . optional $ pMintMultiAsset @era AutoBalance)
         <*> optional pInvalidBefore
         <*> pInvalidHereafter era'
-        <*> many (pCertificateFile AutoBalance)
-        <*> many (pWithdrawal AutoBalance)
+        <*> many (pCertificateFileForEra (Exp.useEra @era) AutoBalance)
+        <*> many (pWithdrawalForEra (Exp.useEra @era) AutoBalance)
+        <*> pDirectDeposits (Exp.useEra @era)
+        <*> pAccountBalanceIntervals (Exp.useEra @era)
+        <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
         <*> pTxMetadataJsonSchema
         <*> many
           ( pScriptFor
@@ -219,8 +227,8 @@ pTransactionBuildCmd envCli = do
               "Filepath of auxiliary script(s)"
           )
         <*> many pMetadataFile
-        <*> pVoteFiles AutoBalance
-        <*> pProposalFiles AutoBalance
+        <*> pVoteFilesForEra (Exp.useEra @era) AutoBalance
+        <*> pProposalFilesForEra (Exp.useEra @era) AutoBalance
         <*> pIncludeCurrentTreasuryValue
         <*> pTreasuryDonation
         <*> pIsCborOutCanonical
@@ -232,38 +240,38 @@ pTransactionBuildEstimateCmd
    . Exp.IsEra era
   => EnvCli -> Maybe (Parser (TransactionCmds era))
 pTransactionBuildEstimateCmd _envCli = do
-  pure $
-    Opt.hsubparser $
-      commandWithMetavar "build-estimate" $
-        Opt.info pCmd $
-          Opt.progDescDoc $
-            Just $
-              mconcat
-                [ pretty @String
-                    "Build a balanced transaction without access to a live node (automatically estimates fees)"
-                , line
-                , line
-                , H.yellow $
-                    mconcat
-                      [ "Please note "
-                      , H.underline "the order"
-                      , " of some cmd options is crucial. If used incorrectly may produce "
-                      , "undesired tx body. See nested [] notation above for details."
-                      ]
-                ]
+  pure
+    $ Opt.hsubparser
+    $ commandWithMetavar "build-estimate"
+    $ Opt.info pCmd
+    $ Opt.progDescDoc
+    $ Just
+    $ mconcat
+      [ pretty @String
+          "Build a balanced transaction without access to a live node (automatically estimates fees)"
+      , line
+      , line
+      , H.yellow $
+          mconcat
+            [ "Please note "
+            , H.underline "the order"
+            , " of some cmd options is crucial. If used incorrectly may produce "
+            , "undesired tx body. See nested [] notation above for details."
+            ]
+      ]
  where
   pCmd :: Parser (TransactionCmds era)
   pCmd = do
     fmap TransactionBuildEstimateCmd $
       TransactionBuildEstimateCmdArgs Exp.useEra
-        <$> optional pScriptValidity
+        <$> pScriptValidity (Exp.useEra @era)
         <*> pNumberOfShelleyKeyWitnesses
         <*> optional pNumberOfByronKeyWitnesses
         <*> pProtocolParamsFile
         <*> pTotalUTxOValue
-        <*> some (pTxIn ManualBalance)
+        <*> some (pTxInForEra (Exp.useEra @era) ManualBalance)
         <*> many pReadOnlyReferenceTxIn
-        <*> many pRequiredSigner
+        <*> pTxGuardArguments (Exp.useEra @era) ManualBalance
         <*> many pTxInCollateral
         <*> optional pReturnCollateral
         <*> many pTxOut
@@ -271,8 +279,11 @@ pTransactionBuildEstimateCmd _envCli = do
         <*> (fmap join . optional $ pMintMultiAsset @era ManualBalance)
         <*> optional pInvalidBefore
         <*> pInvalidHereafter Exp.useEra
-        <*> many (pCertificateFile ManualBalance)
-        <*> many (pWithdrawal ManualBalance)
+        <*> many (pCertificateFileForEra (Exp.useEra @era) ManualBalance)
+        <*> many (pWithdrawalForEra (Exp.useEra @era) ManualBalance)
+        <*> pDirectDeposits (Exp.useEra @era)
+        <*> pAccountBalanceIntervals (Exp.useEra @era)
+        <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
         <*> optional pTotalCollateral
         <*> optional pReferenceScriptSize
         <*> pTxMetadataJsonSchema
@@ -283,8 +294,8 @@ pTransactionBuildEstimateCmd _envCli = do
               "Filepath of auxiliary script(s)"
           )
         <*> many pMetadataFile
-        <*> pVoteFiles ManualBalance
-        <*> pProposalFiles ManualBalance
+        <*> pVoteFilesForEra (Exp.useEra @era) ManualBalance
+        <*> pProposalFilesForEra (Exp.useEra @era) ManualBalance
         <*> pCurrentTreasuryValue
         <*> pTreasuryDonation
         <*> pIsCborOutCanonical
@@ -292,40 +303,44 @@ pTransactionBuildEstimateCmd _envCli = do
 
 pChangeAddress :: Parser TxOutChangeAddress
 pChangeAddress =
-  fmap TxOutChangeAddress $
-    Opt.option (readerFromParsecParser parseAddressAny) $
-      mconcat
-        [ Opt.long "change-address"
-        , Opt.metavar "ADDRESS"
-        , Opt.help "Address where ADA in excess of the tx fee will go to."
-        ]
+  fmap TxOutChangeAddress
+    $ Opt.option (readerFromParsecParser parseAddressAny)
+    $ mconcat
+      [ Opt.long "change-address"
+      , Opt.metavar "ADDRESS"
+      , Opt.help "Address where ADA in excess of the tx fee will go to."
+      ]
 
 pTransactionBuildRaw :: forall era. Exp.IsEra era => Parser (TransactionCmds era)
 pTransactionBuildRaw =
   fmap TransactionBuildRawCmd $
     TransactionBuildRawCmdArgs Exp.useEra
-      <$> optional pScriptValidity
-      <*> some (pTxIn ManualBalance)
+      <$> pScriptValidity (Exp.useEra @era)
+      <*> some (pTxInForEra (Exp.useEra @era) ManualBalance)
       <*> many pReadOnlyReferenceTxIn
       <*> many pTxInCollateral
       <*> optional pReturnCollateral
       <*> optional pTotalCollateral
-      <*> many pRequiredSigner
+      <*> pTxGuardArguments (Exp.useEra @era) ManualBalance
       <*> many pTxOut
       <*> (fmap join . optional $ pMintMultiAsset @era ManualBalance)
       <*> optional pInvalidBefore
       <*> pInvalidHereafter Exp.useEra
       <*> pTxFee
-      <*> many (pCertificateFile ManualBalance)
-      <*> many (pWithdrawal ManualBalance)
+      <*> many (pCertificateFileForEra (Exp.useEra @era) ManualBalance)
+      <*> many (pWithdrawalForEra (Exp.useEra @era) ManualBalance)
+      <*> pDirectDeposits (Exp.useEra @era)
+      <*> pAccountBalanceIntervals (Exp.useEra @era)
+      <*> pStartingAccountBalanceIntervals (Exp.useEra @era)
       <*> pTxMetadataJsonSchema
       <*> many (pScriptFor "auxiliary-script-file" Nothing "Filepath of auxiliary script(s)")
       <*> many pMetadataFile
       <*> optional pProtocolParamsFile
-      <*> pVoteFiles ManualBalance
-      <*> pProposalFiles ManualBalance
+      <*> pVoteFilesForEra (Exp.useEra @era) ManualBalance
+      <*> pProposalFilesForEra (Exp.useEra @era) ManualBalance
       <*> pCurrentTreasuryValue
       <*> pTreasuryDonation
+      <*> pSubTransactionFiles @era
       <*> pIsCborOutCanonical
       <*> pTxBodyFileOut
 
@@ -427,7 +442,10 @@ pTransactionCalculatePlutusScriptCost envCli =
           )
 
   pTxInputFile :: Parser FilePath
-  pTxInputFile = parseFilePath "tx-file" "Filepath of the transaction whose Plutus scripts to calculate the cost."
+  pTxInputFile =
+    parseFilePath
+      "tx-file"
+      "Filepath of the transaction whose Plutus scripts to calculate the cost. Use `-` to read from standard input."
 
 pLocalContext :: Parser (NodeContextInfoSource era)
 pLocalContext =
@@ -549,16 +567,3 @@ pTransactionId =
         , flagFormatText
         , flagFormatYaml
         ]
-
-pIsCborOutCanonical :: Parser TxCborFormat
-pIsCborOutCanonical =
-  ( Opt.switch $
-      mconcat
-        [ Opt.long "out-canonical-cbor"
-        , Opt.help
-            "Produce transaction in canonical CBOR according to RFC7049. Only this part of CIP-21 is implemented."
-        ]
-  )
-    <&> \case
-      True -> TxCborCanonical
-      False -> TxCborNotCanonical

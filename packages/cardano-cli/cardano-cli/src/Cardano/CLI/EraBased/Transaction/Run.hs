@@ -12,8 +12,7 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Cardano.CLI.EraBased.Transaction.Run
-  ( partitionSomeWitnesses
-  , runTransactionCmds
+  ( runTransactionCmds
   , runTransactionBuildCmd
   , runTransactionBuildRawCmd
   , runTransactionSignCmd
@@ -47,9 +46,10 @@ import Cardano.Api.Network qualified as Consensus
 
 import Cardano.Binary qualified as CBOR
 import Cardano.CLI.Compatible.Exception
-import Cardano.CLI.Compatible.Transaction.TxOut
 import Cardano.CLI.EraBased.Genesis.Internal.Common (readProtocolParameters)
 import Cardano.CLI.EraBased.Script.Certificate.Read
+import Cardano.CLI.EraBased.Script.Guard.Read
+import Cardano.CLI.EraBased.Script.Guard.Type (TxGuardArguments (..), TxGuardRequirements (..))
 import Cardano.CLI.EraBased.Script.Mint.Read
 import Cardano.CLI.EraBased.Script.Proposal.Read
 import Cardano.CLI.EraBased.Script.Read.Common
@@ -58,11 +58,13 @@ import Cardano.CLI.EraBased.Script.Vote.Read
 import Cardano.CLI.EraBased.Script.Withdrawal.Read
 import Cardano.CLI.EraBased.Transaction.Command
 import Cardano.CLI.EraBased.Transaction.Command qualified as Cmd
+import Cardano.CLI.EraBased.Transaction.Internal.Common
 import Cardano.CLI.EraBased.Transaction.Internal.HashCheck
   ( checkCertificateHashes
   , checkProposalHashes
   , checkVotingProcedureHashes
   )
+import Cardano.CLI.EraBased.Transaction.SubTransaction.Run
 import Cardano.CLI.Json.Encode qualified as Json
 import Cardano.CLI.LocalStateQuery (checkNodeNetworkId)
 import Cardano.CLI.Orphan ()
@@ -74,6 +76,7 @@ import Cardano.CLI.Type.Error.TxCmdError
 import Cardano.CLI.Type.Error.TxValidationError
 import Cardano.CLI.Type.Output (renderScriptCostsWithScriptHashesMap)
 import Cardano.Ledger.Api (allInputsTxBodyF, bodyTxL)
+import Cardano.Ledger.Dijkstra.Scripts qualified as L
 import Cardano.Ledger.Hashes (DataHash)
 import Cardano.Prelude (putLByteString)
 
@@ -86,8 +89,6 @@ import Data.ByteString qualified as Data.Bytestring
 import Data.ByteString.Char8 qualified as BS
 import Data.ByteString.Lazy.Char8 qualified as LBS
 import Data.Data ((:~:) (..))
-import Data.Foldable qualified as Foldable
-import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
@@ -139,7 +140,7 @@ runTransactionBuildCmd
     , mOverrideWitnesses = mOverrideWitnesses
     , txins
     , readOnlyReferenceInputs
-    , requiredSigners = reqSigners
+    , guardArguments
     , txinsc
     , mReturnCollateral = mReturnColl
     , mTotalCollateral
@@ -150,6 +151,9 @@ runTransactionBuildCmd
     , mValidityUpperBound
     , certificates
     , withdrawals
+    , directDeposits
+    , accountBalanceIntervals
+    , startingAccountBalanceIntervals
     , metadataSchema
     , scriptFiles
     , metadataFiles
@@ -160,6 +164,19 @@ runTransactionBuildCmd
     , isCborOutCanonical
     , buildOutputOptions
     } = do
+    guardRequirements <- case guardArguments of
+      ConwayRequiredSignerArguments signers -> ConwayRequiredSigners <$> readConwayRequiredSigners signers
+      DijkstraGuardArguments guards -> DijkstraGuards <$> readDijkstraGuards guards
+    -- Reject duplicate deposits and interval assertions before any node queries.
+    void $ fromEitherCli $ convertDirectDeposits directDeposits
+    void
+      $ fromEitherCli
+      $ convertAccountBalanceIntervals accountBalanceIntervalOptionName accountBalanceIntervals
+    void
+      $ fromEitherCli
+      $ convertAccountBalanceIntervals
+        startingAccountBalanceIntervalOptionName
+        startingAccountBalanceIntervals
     checkNodeNetworkId nodeConnInfo
 
     let eon = convert currentEra
@@ -178,9 +195,9 @@ runTransactionBuildCmd
       :: [(Exp.Certificate (Exp.LedgerEra era), Exp.AnyWitness (Exp.LedgerEra era))] <-
       sequence
         [ (,mSwit)
-            <$> ( fromEitherIOCli @(FileError TextEnvelopeError) $
-                    obtainCommonConstraints currentEra $
-                      readFileTextEnvelope (File certFile)
+            <$> ( fromEitherIOCli @(FileError TextEnvelopeError)
+                    $ obtainCommonConstraints currentEra
+                    $ readFileTextEnvelope (File certFile)
                 )
         | (CertificateFile certFile, mSwit) <- certFilesAndMaybeScriptWits
         ]
@@ -199,8 +216,6 @@ runTransactionBuildCmd
     txAuxScripts <-
       fromEitherCli $ validateTxAuxScripts scripts
 
-    requiredSigners <-
-      mapM (fromEitherIOCli . readRequiredSigner) reqSigners
     mReturnCollateralAndDatums <-
       forM mReturnColl toTxOutInShelleyBasedEra
     let mReturnCollateral = fst <$> mReturnCollateralAndDatums
@@ -254,9 +269,9 @@ runTransactionBuildCmd
             (\stakeCred -> Map.notMember (makeStakeAddress networkId stakeCred) balances)
             allAddrHashes
 
-    unless (null unregisteredAddresses) $
-      throwCliError $
-        TxCmdUnregisteredStakeAddress unregisteredAddresses
+    unless (null unregisteredAddresses)
+      $ throwCliError
+      $ TxCmdUnregisteredStakeAddress unregisteredAddresses
 
     -- the same collateral input can be used for several plutus scripts
     let filteredTxinsc = nubOrd txinsc
@@ -269,7 +284,9 @@ runTransactionBuildCmd
             (map (\(_, _, wit) -> wit) withdrawalsAndMaybeScriptWits)
             (map snd votingProceduresAndMaybeScriptWits)
             (map snd proposals)
-            readOnlyReferenceInputs
+            ( readOnlyReferenceInputs
+                ++ getTxGuardReferenceInputs guardRequirements
+            )
 
     let inputsThatRequireWitnessing = [input | (input, _) <- txins]
         allTxInputs = inputsThatRequireWitnessing ++ allReferenceInputs ++ filteredTxinsc
@@ -310,7 +327,10 @@ runTransactionBuildCmd
           mValidityUpperBound
           certsAndMaybeScriptWits
           withdrawalsAndMaybeScriptWits
-          requiredSigners
+          directDeposits
+          accountBalanceIntervals
+          startingAccountBalanceIntervals
+          guardRequirements
           txAuxScripts
           txMetadata
           mOverrideWitnesses
@@ -362,23 +382,13 @@ runTransactionBuildCmd
               scriptHashes
               scriptExecUnitsMap
         liftIO $ LBS.writeFile (unFile fp) $ encodePretty scriptCostOutput
-      OutputTxBodyOnly fpath -> fromEitherIOCli $ do
+      OutputTxBodyOnly fpath -> do
         let noWitTx = ShelleyTx (convert eon) $ obtainCommonConstraints (Exp.useEra @era) tx
-
-        if isCborOutCanonical == TxCborCanonical
-          then writeTxFileTextEnvelopeCanonical eon fpath noWitTx
-          else writeTxFileTextEnvelope eon fpath noWitTx
-
-toTxOutInEra
-  :: forall era e
-   . Exp.IsEra era
-  => TxOutAnyEra
-  -> CIO e (Exp.TxOut (Exp.LedgerEra era), Map.Map DataHash (L.Data (Exp.LedgerEra era)))
-toTxOutInEra (TxOutAnyEra addr' val' mDatumHash refScriptFp) = do
-  let sbe = convert (Exp.useEra @era)
-      addr = anyAddressInShelleyBasedEra sbe addr'
-  obtainCommonConstraints (Exp.useEra @era) $
-    mkTxOut sbe addr val' mDatumHash refScriptFp
+        fromEitherCli $ validateCanonicalSubTransactions isCborOutCanonical eon noWitTx
+        fromEitherIOCli $
+          if isCborOutCanonical == TxCborCanonical
+            then writeTxFileTextEnvelopeCanonical eon fpath noWitTx
+            else writeTxFileTextEnvelope eon fpath noWitTx
 
 runTransactionBuildEstimateCmd
   :: forall era e
@@ -395,7 +405,7 @@ runTransactionBuildEstimateCmd -- TODO change type
     , totalUTxOValue
     , txins
     , readOnlyReferenceInputs = readOnlyRefIns
-    , requiredSigners = reqSigners
+    , guardArguments
     , txinsc = txInsCollateral
     , mReturnCollateral = mReturnColl
     , txouts
@@ -405,6 +415,9 @@ runTransactionBuildEstimateCmd -- TODO change type
     , mValidityUpperBound
     , certificates
     , withdrawals
+    , directDeposits
+    , accountBalanceIntervals
+    , startingAccountBalanceIntervals
     , metadataSchema
     , scriptFiles
     , metadataFiles
@@ -417,6 +430,9 @@ runTransactionBuildEstimateCmd -- TODO change type
     , isCborOutCanonical
     , txBodyOutFile
     } = do
+    guardRequirements <- case guardArguments of
+      ConwayRequiredSignerArguments signers -> ConwayRequiredSigners <$> readConwayRequiredSigners signers
+      DijkstraGuardArguments guards -> DijkstraGuards <$> readDijkstraGuards guards
     let sbe = convert currentEra
 
     ledgerPParams <-
@@ -442,9 +458,6 @@ runTransactionBuildEstimateCmd -- TODO change type
       mapM (readFileScriptInAnyLang . unFile) scriptFiles
     txAuxScripts <-
       fromEitherCli $ validateTxAuxScripts scripts
-
-    requiredSigners <-
-      mapM (fromEitherIOCli . readRequiredSigner) reqSigners
 
     mReturnCollateralAndDatums <- mapM toTxOutInShelleyBasedEra mReturnColl
     let mReturnCollateral = fst <$> mReturnCollateralAndDatums
@@ -472,9 +485,9 @@ runTransactionBuildEstimateCmd -- TODO change type
     certsAndMaybeScriptWits <-
       sequence $
         [ (,mSwit)
-            <$> ( obtainCommonConstraints currentEra $
-                    fromEitherIOCli $
-                      readFileTextEnvelope (File certFile)
+            <$> ( obtainCommonConstraints currentEra
+                    $ fromEitherIOCli
+                    $ readFileTextEnvelope (File certFile)
                 )
         | (CertificateFile certFile, mSwit :: Exp.AnyWitness (Exp.LedgerEra era)) <-
             certFilesAndMaybeScriptWits
@@ -483,6 +496,7 @@ runTransactionBuildEstimateCmd -- TODO change type
     txBodyContent <-
       fromEitherCli $
         constructTxBodyContent
+          []
           mScriptValidity
           (Just ledgerPParams)
           txInsAndMaybeScriptWits
@@ -496,7 +510,10 @@ runTransactionBuildEstimateCmd -- TODO change type
           valuesWithScriptWits
           certsAndMaybeScriptWits
           withdrawalsAndMaybeScriptWits
-          requiredSigners
+          directDeposits
+          accountBalanceIntervals
+          startingAccountBalanceIntervals
+          guardRequirements
           0
           txAuxScripts
           txMetadata
@@ -507,9 +524,6 @@ runTransactionBuildEstimateCmd -- TODO change type
           supplementalDatums
 
     let stakeCredentialsToDeregisterMap = fromList $ catMaybes [getStakeDeregistrationInfo cert | (cert, _) <- certsAndMaybeScriptWits]
-        drepsToDeregisterMap =
-          fromList $
-            catMaybes [getDRepDeregistrationInfo Exp.useEra cert | (cert, _) <- certsAndMaybeScriptWits]
         poolsToDeregister =
           fromList $
             catMaybes [getPoolDeregistrationInfo Exp.useEra cert | (cert, _) <- certsAndMaybeScriptWits]
@@ -524,27 +538,31 @@ runTransactionBuildEstimateCmd -- TODO change type
               ]
 
     balancedTxBody :: Exp.TxBodyContent (Exp.LedgerEra era) <-
-      fromEitherCli $
-        first TxCmdFeeEstimationError $
-          Exp.estimateBalancedTxBody
-            currentEra
-            txBodyContent
-            ledgerPParams
-            poolsToDeregister
-            stakeCredentialsToDeregisterMap
-            drepsToDeregisterMap
-            pScriptExecUnits
-            totCol
-            shelleyWitnesses
-            (fromMaybe 0 mByronWitnesses)
-            (maybe 0 unReferenceScriptSize totalReferenceScriptSize)
-            (anyAddressInShelleyBasedEra sbe changeAddr)
-            (obtainCommonConstraints currentEra $ toLedgerValue (convert currentEra) totalUTxOValue)
+      fromEitherCli
+        $ first TxCmdFeeEstimationError
+        $ Exp.estimateBalancedTxBody
+          currentEra
+          txBodyContent
+          ledgerPParams
+          poolsToDeregister
+          stakeCredentialsToDeregisterMap
+          pScriptExecUnits
+          totCol
+          shelleyWitnesses
+          (fromMaybe 0 mByronWitnesses)
+          (maybe 0 unReferenceScriptSize totalReferenceScriptSize)
+          (anyAddressInShelleyBasedEra sbe changeAddr)
+          (obtainCommonConstraints currentEra $ toLedgerValue (convert currentEra) totalUTxOValue)
 
     unsignedTx <-
-      fromEitherCli $
-        first TxCmdMakeUnsignedTxError $
-          Exp.makeUnsignedTx currentEra balancedTxBody
+      fromEitherCli
+        $ first TxCmdMakeUnsignedTxError
+        $ Exp.makeUnsignedTx currentEra balancedTxBody
+    fromEitherCli $
+      validateCanonicalSubTransactions
+        isCborOutCanonical
+        (convert currentEra)
+        (unsignedToToApiTx unsignedTx)
     fromEitherIOCli
       $ ( if isCborOutCanonical == TxCborCanonical
             then writeTxFileTextEnvelopeCanonical
@@ -570,13 +588,6 @@ getPoolDeregistrationInfo
 getPoolDeregistrationInfo era (Exp.Certificate cert) =
   StakePoolKeyHash . fst
     <$> (obtainCommonConstraints era L.getRetirePoolTxCert cert :: Maybe (L.KeyHash L.StakePool, EpochNo))
-
-getDRepDeregistrationInfo
-  :: Exp.Era era
-  -> Exp.Certificate (Exp.LedgerEra era)
-  -> Maybe (L.Credential L.DRepRole, Lovelace)
-getDRepDeregistrationInfo e (Exp.Certificate cert) =
-  obtainCommonConstraints e $ L.getUnRegDRepTxCert cert
 
 getStakeDeregistrationInfo
   :: forall era
@@ -608,7 +619,7 @@ runTransactionBuildRawCmd
     , txInsCollateral
     , mReturnCollateral = mReturnColl
     , mTotalCollateral
-    , requiredSigners = reqSigners
+    , guardArguments
     , txouts
     , mMintedAssets
     , mValidityLowerBound
@@ -616,6 +627,9 @@ runTransactionBuildRawCmd
     , fee
     , certificates
     , withdrawals
+    , directDeposits
+    , accountBalanceIntervals
+    , startingAccountBalanceIntervals
     , metadataSchema
     , scriptFiles
     , metadataFiles
@@ -624,9 +638,15 @@ runTransactionBuildRawCmd
     , proposalFiles
     , mCurrentTreasuryValue
     , mTreasuryDonation
+    , subTransactionFiles
     , isCborOutCanonical
     , txBodyOutFile
     } = Exp.obtainCommonConstraints eon $ do
+    guardRequirements <- case guardArguments of
+      ConwayRequiredSignerArguments signers -> ConwayRequiredSigners <$> readConwayRequiredSigners signers
+      DijkstraGuardArguments guards -> DijkstraGuards <$> readDijkstraGuards guards
+    signedSubTxs <- readSignedSubTransactions subTransactionFiles
+
     txInsAndMaybeScriptWits <-
       readSpendScriptWitnesses txIns
 
@@ -654,9 +674,6 @@ runTransactionBuildRawCmd
 
     let mLedgerPParams = LedgerProtocolParameters <$> pparams
 
-    requiredSigners <-
-      mapM (fromEitherIOCli . readRequiredSigner) reqSigners
-
     mReturnCollateralAndDatums <- mapM toTxOutInShelleyBasedEra mReturnColl
     let mReturnCollateral = fst <$> mReturnCollateralAndDatums
         returnCollDatums = maybe mempty snd mReturnCollateralAndDatums
@@ -679,15 +696,16 @@ runTransactionBuildRawCmd
     certsAndMaybeScriptWits <-
       sequence
         [ (,mSwit)
-            <$> ( obtainCommonConstraints eon $
-                    fromEitherIOCli $
-                      readFileTextEnvelope (File certFile)
+            <$> ( obtainCommonConstraints eon
+                    $ fromEitherIOCli
+                    $ readFileTextEnvelope (File certFile)
                 )
         | (CertificateFile certFile, mSwit) <- certFilesAndMaybeScriptWits
         ]
     txBody :: Exp.UnsignedTx (Exp.LedgerEra era) <-
       fromEitherCli $
         runTxBuildRaw
+          signedSubTxs
           mScriptValidity
           txInsAndMaybeScriptWits
           readOnlyRefIns
@@ -701,7 +719,10 @@ runTransactionBuildRawCmd
           valuesWithScriptWits
           certsAndMaybeScriptWits
           withdrawalsAndMaybeScriptWits
-          requiredSigners
+          directDeposits
+          accountBalanceIntervals
+          startingAccountBalanceIntervals
+          guardRequirements
           txAuxScripts
           txMetadata
           mLedgerPParams
@@ -712,6 +733,7 @@ runTransactionBuildRawCmd
           supplementalDatums
     let Exp.UnsignedTx lTx = txBody
         noWitTx = ShelleyTx (convert eon) lTx
+    fromEitherCli $ validateCanonicalSubTransactions isCborOutCanonical (convert Exp.useEra) noWitTx
     fromEitherIOCli $
       if isCborOutCanonical == TxCborCanonical
         then writeTxFileTextEnvelopeCanonical (convert Exp.useEra) txBodyOutFile noWitTx
@@ -719,7 +741,9 @@ runTransactionBuildRawCmd
 
 runTxBuildRaw
   :: Exp.IsEra era
-  => Maybe ScriptValidity
+  => [Exp.SignedSubTx]
+  -- ^ Signed sub-transactions to embed (Dijkstra era onwards)
+  -> Maybe ScriptValidity
   -- ^ Mark script as expected to pass or fail validation
   -> [(TxIn, Exp.AnyWitness (Exp.LedgerEra era))]
   -- ^ TxIn with potential script witness
@@ -743,8 +767,12 @@ runTxBuildRaw
   -> [(Exp.Certificate (Exp.LedgerEra era), Exp.AnyWitness (Exp.LedgerEra era))]
   -- ^ Certificate with potential script witness
   -> [(StakeAddress, Lovelace, Exp.AnyWitness (Exp.LedgerEra era))]
-  -> [Hash PaymentKey]
-  -- ^ Required signers
+  -> [(StakeAddress, Lovelace)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> TxGuardRequirements era
+  -- ^ Conway required signers or Dijkstra key and script guards
   -> TxAuxScripts era
   -> TxMetadataInEra era
   -> Maybe (LedgerProtocolParameters era)
@@ -756,6 +784,7 @@ runTxBuildRaw
   -- ^ Supplemental datums
   -> Either TxCmdError (Exp.UnsignedTx (Exp.LedgerEra era))
 runTxBuildRaw
+  subTxs
   mScriptValidity
   inputsAndMaybeScriptWits
   readOnlyRefIns
@@ -769,7 +798,10 @@ runTxBuildRaw
   valuesWithScriptWits
   certsAndMaybeSriptWits
   withdrawals
-  reqSigners
+  directDeposits
+  accountBalanceIntervals
+  startingAccountBalanceIntervals
+  guardRequirements
   txAuxScripts
   txMetadata
   mpparams
@@ -780,6 +812,7 @@ runTxBuildRaw
   suppDatums = do
     txBodyContent <-
       constructTxBodyContent
+        subTxs
         mScriptValidity
         (fromShelleyLedgerPParamsShim Exp.useEra . unLedgerProtocolParameters <$> mpparams)
         inputsAndMaybeScriptWits
@@ -793,7 +826,10 @@ runTxBuildRaw
         valuesWithScriptWits
         certsAndMaybeSriptWits
         withdrawals
-        reqSigners
+        directDeposits
+        accountBalanceIntervals
+        startingAccountBalanceIntervals
+        guardRequirements
         fee
         txAuxScripts
         txMetadata
@@ -805,10 +841,21 @@ runTxBuildRaw
 
     first TxCmdMakeUnsignedTxError $ Exp.makeUnsignedTx Exp.useEra txBodyContent
 
+-- | Apply the era-specific requirements when constructing the transaction body.
+setTxGuardRequirements
+  :: TxGuardRequirements era
+  -> Exp.TxBodyContent (Exp.LedgerEra era)
+  -> Exp.TxBodyContent (Exp.LedgerEra era)
+setTxGuardRequirements (ConwayRequiredSigners keys) =
+  Exp.setTxExtraKeyWits (Exp.TxExtraKeyWitnesses keys)
+setTxGuardRequirements (DijkstraGuards guards) = Exp.setTxGuards guards
+
 constructTxBodyContent
   :: forall era
    . Exp.IsEra era
-  => Maybe ScriptValidity
+  => [Exp.SignedSubTx]
+  -- ^ Signed sub-transactions to embed (Dijkstra era onwards)
+  -> Maybe ScriptValidity
   -> Maybe (L.PParams (Exp.LedgerEra era))
   -> [(TxIn, Exp.AnyWitness (Exp.LedgerEra era))]
   -- ^ TxIn with potential script witness
@@ -832,8 +879,12 @@ constructTxBodyContent
   -- ^ Certificate with potential script witness
   -> [(StakeAddress, Lovelace, Exp.AnyWitness (Exp.LedgerEra era))]
   -- ^ Withdrawals
-  -> [Hash PaymentKey]
-  -- ^ Required signers
+  -> [(StakeAddress, Lovelace)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> TxGuardRequirements era
+  -- ^ Conway required signers or Dijkstra key and script guards
   -> Lovelace
   -- ^ Tx fee
   -> TxAuxScripts era
@@ -849,6 +900,7 @@ constructTxBodyContent
   -- ^ Supplemental datums
   -> Either TxCmdError (Exp.TxBodyContent (Exp.LedgerEra era))
 constructTxBodyContent
+  subTxs
   mScriptValidity
   mPparams
   inputsAndMaybeScriptWits
@@ -862,7 +914,10 @@ constructTxBodyContent
   valuesWithScriptWits
   certsAndMaybeScriptWits
   withdrawals
-  reqSigners
+  directDeposits
+  accountBalanceIntervals
+  startingAccountBalanceIntervals
+  guardRequirements
   fee
   txAuxScripts
   txMetadata
@@ -880,7 +935,9 @@ constructTxBodyContent
               (map (\(_, _, mSwit) -> mSwit) withdrawals)
               (map snd votingProcedures)
               (map snd proposals)
-              readOnlyRefIns
+              ( readOnlyRefIns
+                  ++ getTxGuardReferenceInputs guardRequirements
+              )
       -- TODO The last argument of validateTxInsReference is a datum set from reference inputs
       -- Should we allow providing of datum from CLI?
       -- TODO: Figure how to expose resolved datums
@@ -909,6 +966,13 @@ constructTxBodyContent
             Exp.mkTxProposalProcedures txProposals
       let validatedCurrentTreasuryValue = unTxCurrentTreasuryValue <$> mCurrentTreasury
           validatedTreasuryDonation = unTxTreasuryDonation <$> mTreasuryDonation
+      validatedDirectDeposits <- convertDirectDeposits directDeposits
+      validatedIntervals <-
+        convertAccountBalanceIntervals accountBalanceIntervalOptionName accountBalanceIntervals
+      validatedStartingIntervals <-
+        convertAccountBalanceIntervals
+          startingAccountBalanceIntervalOptionName
+          startingAccountBalanceIntervals
       let validatedWithdrawals = convertWithdrawals withdrawals
       return
         ( Exp.defaultTxBodyContent
@@ -924,7 +988,10 @@ constructTxBodyContent
             & Exp.setTxMetadata expTxMetadata
             & Exp.setTxAuxScripts auxScripts
             & Exp.setTxWithdrawals validatedWithdrawals
-            & Exp.setTxExtraKeyWits (Exp.TxExtraKeyWitnesses reqSigners)
+            & Exp.setTxDirectDeposits validatedDirectDeposits
+            & Exp.setTxAccountBalanceIntervals validatedIntervals
+            & Exp.setTxStartingAccountBalanceIntervals validatedStartingIntervals
+            & setTxGuardRequirements guardRequirements
             & maybe id (Exp.setTxProtocolParams . Exp.obtainCommonConstraints (Exp.useEra @era)) mPparams
             & Exp.setTxCertificates
               (Exp.mkTxCertificates Exp.useEra certsAndMaybeScriptWits)
@@ -935,30 +1002,16 @@ constructTxBodyContent
             & maybe id Exp.setTxCurrentTreasuryValue validatedCurrentTreasuryValue
             & maybe id Exp.setTxTreasuryDonation validatedTreasuryDonation
             & Exp.setTxSupplementalDatums suppDatums
+            & embedSubTransactions
         )
-
-convertWithdrawals
-  :: [(StakeAddress, L.Coin, Exp.AnyWitness (Exp.LedgerEra era))]
-  -> Exp.TxWithdrawals (Exp.LedgerEra era)
-convertWithdrawals = Exp.TxWithdrawals
-
-convertVotingProcedures
-  :: forall era
-   . Exp.IsEra era
-  => [(VotingProcedures era, Exp.AnyWitness (Exp.LedgerEra era))]
-  -> [(L.VotingProcedures (Exp.LedgerEra era), Exp.AnyWitness (Exp.LedgerEra era))]
-convertVotingProcedures =
-  map
-    ( \(VotingProcedures vp, wit) ->
-        (obtainCommonConstraints (Exp.useEra @era) vp, wit)
-    )
-
-scriptInEraToSimpleScript
-  :: forall era. Exp.IsEra era => ScriptInEra era -> Maybe (Exp.SimpleScript (Exp.LedgerEra era))
-scriptInEraToSimpleScript s =
-  obtainCommonConstraints (Exp.useEra @era) $
-    Exp.SimpleScript
-      <$> L.getNativeScript (obtainCommonConstraints (Exp.useEra @era) $ toShelleyScript s)
+   where
+    -- Sub-transactions only exist in Dijkstra. The parser does not accept
+    -- @--signed-sub-tx-file@ in Conway, so the list is empty there.
+    embedSubTransactions
+      :: Exp.TxBodyContent (Exp.LedgerEra era) -> Exp.TxBodyContent (Exp.LedgerEra era)
+    embedSubTransactions = case Exp.useEra @era of
+      Exp.ConwayEra -> id
+      Exp.DijkstraEra -> Exp.setTxSignedSubTransactions subTxs
 
 runTxBuild
   :: forall era
@@ -991,8 +1044,12 @@ runTxBuild
   -> [(Exp.Certificate (Exp.LedgerEra era), Exp.AnyWitness (Exp.LedgerEra era))]
   -- ^ Certificate with potential script witness
   -> [(StakeAddress, Lovelace, Exp.AnyWitness (Exp.LedgerEra era))]
-  -> [Hash PaymentKey]
-  -- ^ Required signers
+  -> [(StakeAddress, Lovelace)]
+  -- ^ Direct ADA deposits as recipient stake addresses and amounts in lovelace.
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> [(StakeAddress, L.AccountBalanceInterval (Exp.LedgerEra era))]
+  -> TxGuardRequirements era
+  -- ^ Conway required signers or Dijkstra key and script guards
   -> TxAuxScripts era
   -> TxMetadataInEra era
   -> Maybe Word
@@ -1020,7 +1077,10 @@ runTxBuild
   mUpperBound
   certsAndMaybeScriptWits
   withdrawals
-  reqSigners
+  directDeposits
+  accountBalanceIntervals
+  startingAccountBalanceIntervals
+  guardRequirements
   txAuxScripts
   txMetadata
   mOverrideWits
@@ -1043,7 +1103,9 @@ runTxBuild
               (map (\(_, _, wit) -> wit) withdrawals)
               (map snd votingProcedures)
               (map snd proposals)
-              readOnlyRefIns
+              ( readOnlyRefIns
+                  ++ getTxGuardReferenceInputs guardRequirements
+              )
 
       let allTxInputs = inputsThatRequireWitnessing ++ allReferenceInputs ++ txinsc
           localNodeConnInfo =
@@ -1063,7 +1125,7 @@ runTxBuild
           & hoistMaybe (TxCmdTxNodeEraMismatchError $ NodeEraMismatchError era nodeEra)
 
       let certsToQuery = obtainCommonConstraints (Exp.useEra @era) (fst <$> certsAndMaybeScriptWits)
-      (txEraUtxo, pparams, eraHistory, systemStart, stakePools, stakeDelegDeposits, drepDelegDeposits, _) <-
+      (txEraUtxo, pparams, eraHistory, systemStart, stakePools, stakeDelegDeposits, _, _) <-
         lift
           ( executeLocalStateQueryExpr localNodeConnInfo Consensus.VolatileTip $
               queryStateForBalancedTx nodeEra allTxInputs certsToQuery
@@ -1074,6 +1136,7 @@ runTxBuild
       txBodyContent <-
         hoistEither $
           constructTxBodyContent
+            []
             mScriptValidity
             (Just $ fromShelleyLedgerPParamsShim Exp.useEra $ unLedgerProtocolParameters pparams)
             inputsAndMaybeScriptWits
@@ -1087,7 +1150,10 @@ runTxBuild
             mintValueWithScriptWits
             certsAndMaybeScriptWits
             withdrawals
-            reqSigners
+            directDeposits
+            accountBalanceIntervals
+            startingAccountBalanceIntervals
+            guardRequirements
             0
             txAuxScripts
             txMetadata
@@ -1116,16 +1182,15 @@ runTxBuild
             (Exp.obtainCommonConstraints (Exp.useEra @era) $ unLedgerProtocolParameters pparams)
             stakePools
             stakeDelegDeposits
-            (Map.map L.fromCompact drepDelegDeposits)
             (obtainCommonConstraints (Exp.useEra @era) ledgerUTxO)
             txBodyContent
             cAddr
             mOverrideWits
       -- Check to see if we lost any scripts during balancing
       scriptWitnessesBeforeBalance <-
-        firstExceptT TxCmdCBORDecodeError $
-          hoistEither $
-            Exp.extractAllIndexedPlutusScriptWitnesses Exp.useEra txBodyContent
+        firstExceptT TxCmdCBORDecodeError
+          $ hoistEither
+          $ Exp.extractAllIndexedPlutusScriptWitnesses Exp.useEra txBodyContent
       scriptWitnessesAfterBalance <-
         hoistEither . first TxCmdCBORDecodeError $
           Exp.extractAllIndexedPlutusScriptWitnesses Exp.useEra (snd r)
@@ -1144,97 +1209,6 @@ runTxBuild
 -- ----------------------------------------------------------------------------
 -- Transaction body validation and conversion
 --
-
-getAllReferenceInputs
-  :: [Exp.AnyWitness (Exp.LedgerEra era)]
-  -> [Exp.AnyScriptWitness (Exp.LedgerEra era)]
-  -> [Exp.AnyWitness (Exp.LedgerEra era)]
-  -- \^ Certificate witnesses
-  -> [Exp.AnyWitness (Exp.LedgerEra era)]
-  -> [Exp.AnyWitness (Exp.LedgerEra era)]
-  -> [Exp.AnyWitness (Exp.LedgerEra era)]
-  -> [TxIn]
-  -- \^ Read only reference inputs
-  -> [TxIn]
-getAllReferenceInputs
-  spendingWitnesses
-  mintWitnesses
-  certScriptWitnesses
-  withdrawals
-  votingProceduresAndMaybeScriptWits
-  propProceduresAnMaybeScriptWits
-  readOnlyRefIns = do
-    let txinsWitByRefInputs = mapMaybe Exp.getAnyWitnessReferenceInput spendingWitnesses
-        mintingRefInputs = mapMaybe Exp.getAnyScriptWitnessReferenceInput mintWitnesses
-        certsWitByRefInputs = mapMaybe Exp.getAnyWitnessReferenceInput certScriptWitnesses
-        withdrawalsWitByRefInputs = mapMaybe Exp.getAnyWitnessReferenceInput withdrawals
-        votesWitByRefInputs = mapMaybe Exp.getAnyWitnessReferenceInput votingProceduresAndMaybeScriptWits
-        propsWitByRefInputs = mapMaybe Exp.getAnyWitnessReferenceInput propProceduresAnMaybeScriptWits
-
-    concat
-      [ txinsWitByRefInputs
-      , mintingRefInputs
-      , certsWitByRefInputs
-      , withdrawalsWitByRefInputs
-      , votesWitByRefInputs
-      , propsWitByRefInputs
-      , mapMaybe Just readOnlyRefIns
-      ]
-
-toTxOutInShelleyBasedEra
-  :: forall era e
-   . Exp.IsEra era
-  => TxOutShelleyBasedEra
-  -> CIO e (Exp.TxOut (Exp.LedgerEra era), Map.Map DataHash (L.Data (Exp.LedgerEra era)))
-toTxOutInShelleyBasedEra (TxOutShelleyBasedEra addr' val' mDatumHash refScriptFp) = do
-  let sbe = convert (Exp.useEra @era)
-      addr = shelleyAddressInEra sbe addr'
-  obtainCommonConstraints (Exp.useEra @era) $
-    mkTxOut sbe addr val' mDatumHash refScriptFp
-
--- TODO: Currently we specify the policyId with the '--mint' option on the cli
--- and we added a separate '--policy-id' parser that parses the policy id for the
--- given reference input (since we don't have the script in this case). To avoid asking
--- for the policy id twice (in the build command) we can potentially query the UTxO and
--- access the script (and therefore the policy id).
-createTxMintValue
-  :: (L.MultiAsset, [(PolicyId, Exp.AnyScriptWitness (Exp.LedgerEra era))])
-  -> Either TxCmdError (Exp.TxMintValue (Exp.LedgerEra era))
-createTxMintValue (val, scriptWitnesses) =
-  if mempty == val && List.null scriptWitnesses
-    then return $ Exp.TxMintValue Map.empty
-    else do
-      let policiesWithAssets :: Map PolicyId PolicyAssets
-          policiesWithAssets = multiAssetToPolicyAssets val
-          -- The set of policy ids for which we need witnesses:
-          witnessesNeededSet :: Set PolicyId
-          witnessesNeededSet = Map.keysSet policiesWithAssets
-
-      let witnessesProvidedMap = fromList scriptWitnesses
-          witnessesProvidedSet :: Set PolicyId
-          witnessesProvidedSet = Map.keysSet witnessesProvidedMap
-
-      -- Check not too many, nor too few:
-      validateAllWitnessesProvided witnessesNeededSet witnessesProvidedSet
-      validateNoUnnecessaryWitnesses witnessesNeededSet witnessesProvidedSet
-      pure $
-        Exp.TxMintValue $
-          Map.intersectionWith
-            (,)
-            policiesWithAssets
-            witnessesProvidedMap
- where
-  validateAllWitnessesProvided witnessesNeeded witnessesProvided
-    | null witnessesMissing = return ()
-    | otherwise = Left (TxCmdPolicyIdsMissing witnessesMissing (toList witnessesProvided))
-   where
-    witnessesMissing = Set.elems (witnessesNeeded Set.\\ witnessesProvided)
-
-  validateNoUnnecessaryWitnesses witnessesNeeded witnessesProvided
-    | null witnessesExtra = return ()
-    | otherwise = Left (TxCmdPolicyIdsExcess witnessesExtra)
-   where
-    witnessesExtra = Set.elems (witnessesProvided Set.\\ witnessesNeeded)
 
 -- ----------------------------------------------------------------------------
 -- Transaction signing
@@ -1269,20 +1243,21 @@ runTransactionSignCmd
             ledgerTxBody = shelleyBasedEraConstraints sbe $ ledgerTx ^. L.bodyTxL
 
         byronWitnesses <-
-          firstExceptT TxCmdBootstrapWitnessError . liftEither $
-            forM sksByron $
-              shelleyBasedEraConstraints sbe $
-                mkShelleyBootstrapWitness sbe mNetworkId ledgerTxBody
+          firstExceptT TxCmdBootstrapWitnessError . liftEither
+            $ forM sksByron
+            $ shelleyBasedEraConstraints sbe
+            $ mkShelleyBootstrapWitness sbe mNetworkId ledgerTxBody
 
         let newShelleyKeyWits = map (makeShelleyKeyWitness' sbe ledgerTxBody) sksShelley
             allKeyWits = existingTxKeyWits ++ newShelleyKeyWits ++ byronWitnesses
             signedTx = addWitnesses allKeyWits tx
 
-        modifyError TxCmdWriteFileError $
-          hoistIOEither $
-            if isCborOutCanonical == TxCborCanonical
-              then writeTxFileTextEnvelopeCanonical sbe outTxFile signedTx
-              else writeTxFileTextEnvelope sbe outTxFile signedTx
+        liftEither $ validateCanonicalSubTransactions isCborOutCanonical sbe signedTx
+        modifyError TxCmdWriteFileError
+          $ hoistIOEither
+          $ if isCborOutCanonical == TxCborCanonical
+            then writeTxFileTextEnvelopeCanonical sbe outTxFile signedTx
+            else writeTxFileTextEnvelope sbe outTxFile signedTx
       InputTxBodyFile (File txbodyFilePath) -> do
         txbodyFile <- liftIO $ fileOrPipe txbodyFilePath
         unwitnessed <-
@@ -1297,18 +1272,19 @@ runTransactionSignCmd
             -- Byron witnesses require the network ID. This can either be provided
             -- directly or derived from a provided Byron address.
             byronWitnesses <-
-              firstExceptT TxCmdBootstrapWitnessError . liftEither $
-                forM sksByron $
-                  mkShelleyBootstrapWitness sbe mNetworkId ledgerTxBody
+              firstExceptT TxCmdBootstrapWitnessError . liftEither
+                $ forM sksByron
+                $ mkShelleyBootstrapWitness sbe mNetworkId ledgerTxBody
 
             let shelleyKeyWitnesses = map (makeShelleyKeyWitness' sbe ledgerTxBody) sksShelley
                 tx = addWitnesses (byronWitnesses ++ shelleyKeyWitnesses) unsignedTxAsTx
 
-            modifyError TxCmdWriteFileError $
-              hoistIOEither $
-                if isCborOutCanonical == TxCborCanonical
-                  then writeTxFileTextEnvelopeCanonical sbe outTxFile tx
-                  else writeTxFileTextEnvelope sbe outTxFile tx
+            liftEither $ validateCanonicalSubTransactions isCborOutCanonical sbe tx
+            modifyError TxCmdWriteFileError
+              $ hoistIOEither
+              $ if isCborOutCanonical == TxCborCanonical
+                then writeTxFileTextEnvelopeCanonical sbe outTxFile tx
+                else writeTxFileTextEnvelope sbe outTxFile tx
 
 -- ----------------------------------------------------------------------------
 -- Transaction submission
@@ -1331,11 +1307,11 @@ runTransactionSubmitCmd
     case res of
       TxSubmitSuccess -> liftIO $ do
         Text.hPutStrLn IO.stderr "Transaction successfully submitted. Transaction hash is:"
-        LBS.putStrLn $
-          Aeson.encode $
-            TxSubmissionResult $
-              shelleyBasedEraConstraints era $
-                getTxIdShelley era (ledgerTx ^. L.bodyTxL)
+        LBS.putStrLn
+          $ Aeson.encode
+          $ TxSubmissionResult
+          $ shelleyBasedEraConstraints era
+          $ getTxIdShelley era (ledgerTx ^. L.bodyTxL)
       TxSubmitFail reason ->
         case reason of
           TxValidationErrorInCardanoMode err -> left . TxCmdTxSubmitError . Text.pack $ show err
@@ -1370,9 +1346,9 @@ runTransactionCalculateMinFeeCmd
 
     era <- fromEitherCli $ Exp.sbeToEra sbe
     (lpparams :: L.PParams (Exp.LedgerEra era)) <-
-      fromExceptTCli @ProtocolParamsError $
-        Exp.obtainCommonConstraints era $
-          readProtocolParameters protocolParamsFile
+      fromExceptTCli @ProtocolParamsError
+        $ Exp.obtainCommonConstraints era
+        $ readProtocolParameters protocolParamsFile
 
     let unsignedTx :: Exp.UnsignedTx (Exp.LedgerEra era)
         unsignedTx = obtainCommonConstraints era $ Exp.UnsignedTx ledgerTx
@@ -1401,9 +1377,9 @@ runTransactionCalculateMinFeeCmd
                   Nothing ->
                     liftIO $ LBS.putStrLn $ Json.encodeJson content
                   Just file ->
-                    fromEitherIOCli @(FileError ()) $
-                      writeLazyByteStringFile file $
-                        Json.encodeJson content
+                    fromEitherIOCli @(FileError ())
+                      $ writeLazyByteStringFile file
+                      $ Json.encodeJson content
               )
             . Vary.on
               ( \FormatText -> case outFile of
@@ -1417,9 +1393,9 @@ runTransactionCalculateMinFeeCmd
                   Nothing ->
                     liftIO $ LBS.putStrLn $ Json.encodeYaml content
                   Just file ->
-                    fromEitherIOCli @(FileError ()) $
-                      writeLazyByteStringFile file $
-                        Json.encodeYaml content
+                    fromEitherIOCli @(FileError ())
+                      $ writeLazyByteStringFile file
+                      $ Json.encodeYaml content
               )
             $ Vary.exhaustiveCase
         )
@@ -1580,12 +1556,12 @@ runTransactionCalculatePlutusScriptCostCmd
               ledgerTx
 
       scriptCostOutput <-
-        firstExceptT TxCmdPlutusScriptCostErr $
-          hoistEither $
-            renderScriptCostsWithScriptHashesMap
-              executionUnitPrices
-              scriptHashes
-              scriptExecUnitsMap
+        firstExceptT TxCmdPlutusScriptCostErr
+          $ hoistEither
+          $ renderScriptCostsWithScriptHashesMap
+            executionUnitPrices
+            scriptHashes
+            scriptExecUnitsMap
       liftIO
         $ ( case outputFile of
               Just file -> LBS.writeFile (unFile file)
@@ -1607,13 +1583,13 @@ buildTransactionContext
 buildTransactionContext era systemStartOrGenesisFileSource mustUnsafeExtendSafeZone eraHistoryFile utxoFile protocolParamsFile =
   shelleyBasedEraConstraints (convert era) $ do
     ledgerPParams <-
-      firstExceptT TxCmdProtocolParamsError $
-        obtainCommonConstraints era $
-          readProtocolParameters protocolParamsFile
+      firstExceptT TxCmdProtocolParamsError
+        $ obtainCommonConstraints era
+        $ readProtocolParameters protocolParamsFile
     EraHistory interpreter <-
-      onLeft (left . TxCmdTextEnvError) $
-        liftIO $
-          readFileTextEnvelope eraHistoryFile
+      onLeft (left . TxCmdTextEnvError)
+        $ liftIO
+        $ readFileTextEnvelope eraHistoryFile
     systemStart <- case systemStartOrGenesisFileSource of
       SystemStartLiteral systemStart -> return systemStart
       SystemStartFromGenesisFile (GenesisFile byronGenesisFile) -> do
@@ -1638,29 +1614,9 @@ runTransactionPolicyIdCmd
   -> CIO e ()
 runTransactionPolicyIdCmd
   Cmd.TransactionPolicyIdCmdArgs
-    { scriptFile = File sFile
-    } = do
-    script <-
-      readAnyScript @_ @ConwayEra sFile
-    let hash = fromShelleyScriptHash $ Exp.hashAnyScript script
-    liftIO . Text.putStrLn $ serialiseToRawBytesHexText hash
-
-partitionSomeWitnesses
-  :: [ByronOrShelleyWitness]
-  -> ( [ShelleyBootstrapWitnessSigningKeyData]
-     , [ShelleyWitnessSigningKey]
-     )
-partitionSomeWitnesses = reversePartitionedWits . Foldable.foldl' go mempty
- where
-  reversePartitionedWits (bw, skw) =
-    (reverse bw, reverse skw)
-
-  go (byronAcc, shelleyKeyAcc) byronOrShelleyWit =
-    case byronOrShelleyWit of
-      AByronWitness byronWit ->
-        (byronWit : byronAcc, shelleyKeyAcc)
-      AShelleyKeyWitness shelleyKeyWit ->
-        (byronAcc, shelleyKeyWit : shelleyKeyAcc)
+    { scriptFile
+    } =
+    liftIO . Text.putStrLn . serialiseToRawBytesHexText =<< readAnyScriptHash scriptFile
 
 -- ----------------------------------------------------------------------------
 -- Other misc small commands
@@ -1781,11 +1737,12 @@ runTransactionSignWitnessCmd
 
     let unsignedTxAsTx = ShelleyTx era ledgerTx
         tx = addWitnesses witnesses unsignedTxAsTx
-    modifyError TxCmdWriteFileError $
-      hoistIOEither $
-        if isCborOutCanonical == TxCborCanonical
-          then writeTxFileTextEnvelopeCanonical era outFile tx
-          else writeTxFileTextEnvelope era outFile tx
+    liftEither $ validateCanonicalSubTransactions isCborOutCanonical era tx
+    modifyError TxCmdWriteFileError
+      $ hoistIOEither
+      $ if isCborOutCanonical == TxCborCanonical
+        then writeTxFileTextEnvelopeCanonical era outFile tx
+        else writeTxFileTextEnvelope era outFile tx
 
 getExecutionUnitPrices :: CardanoEra era -> LedgerProtocolParameters era -> Maybe L.Prices
 getExecutionUnitPrices cEra (LedgerProtocolParameters pp) =

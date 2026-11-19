@@ -232,14 +232,14 @@ readVerificationKeyTextOrFileAnyOf
 readVerificationKeyTextOrFileAnyOf verKeyTextOrFile =
   case verKeyTextOrFile of
     VktofVerificationKeyText vkText ->
-      pure $
-        first VerificationKeyTextError $
-          deserialiseAnyVerificationKey (Text.encodeUtf8 vkText)
+      pure
+        $ first VerificationKeyTextError
+        $ deserialiseAnyVerificationKey (Text.encodeUtf8 vkText)
     VktofVerificationKeyFile (File fp) -> do
       vkBs <- liftIO $ BS.readFile fp
-      pure $
-        first VerificationKeyTextError $
-          deserialiseAnyVerificationKey vkBs
+      pure
+        $ first VerificationKeyTextError
+        $ deserialiseAnyVerificationKey vkBs
 
 -- | Verification key, verification key hash, or path to a verification key
 -- file.
@@ -411,6 +411,7 @@ data SomeSigningKey
   | ACommitteeHotExtendedSigningKey (SigningKey CommitteeHotExtendedKey)
   | AVrfSigningKey (SigningKey VrfKey)
   | AKesSigningKey (SigningKey KesKey)
+  | ABlsSigningKey (SigningKey BlsKey)
 
 withSomeSigningKey
   :: ()
@@ -439,6 +440,7 @@ withSomeSigningKey ssk f =
     ACommitteeHotExtendedSigningKey sk -> f sk
     AVrfSigningKey sk -> f sk
     AKesSigningKey sk -> f sk
+    ABlsSigningKey sk -> f sk
 
 readSigningKeyFile
   :: ()
@@ -471,6 +473,7 @@ readSigningKeyFile skFile =
     , FromSomeType (AsSigningKey AsCommitteeHotExtendedKey) ACommitteeHotExtendedSigningKey
     , FromSomeType (AsSigningKey AsVrfKey) AVrfSigningKey
     , FromSomeType (AsSigningKey AsKesKey) AKesSigningKey
+    , FromSomeType (AsSigningKey AsBlsKey) ABlsSigningKey
     ]
 
   bech32FileTypes =
@@ -482,6 +485,7 @@ readSigningKeyFile skFile =
     , FromSomeType (AsSigningKey AsStakePoolExtendedKey) AStakePoolExtendedSigningKey
     , FromSomeType (AsSigningKey AsVrfKey) AVrfSigningKey
     , FromSomeType (AsSigningKey AsKesKey) AKesSigningKey
+    , FromSomeType (AsSigningKey AsBlsKey) ABlsSigningKey
     ]
 
 -- | Source for hashes of stake pool keys (potentially extended)

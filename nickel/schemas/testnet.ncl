@@ -29,6 +29,12 @@ let export = {
       acc & { "%{b.field}" | String | default = b.value }
     ) {} found_cardano_binaries,
 
+  mk_cardano_binaries_env = fun bins =>
+    let mk_var_name = fun n => std.string.uppercase (std.string.replace "-" "_" n) in
+    bins
+      |> std.record.to_array
+      |> std.array.map (fun cb => "%{mk_var_name cb.field}=%{cb.value}"),
+
   Severity = [| 'Debug, 'Info, 'Notice, 'Warning, 'Error |],
   Backend = [| '"Stdout HumanFormatColoured", 'EKGBackend, 'Forwarder |],
   Detail = [| 'DMinimal, 'DNormal, 'DExtended |],
@@ -43,6 +49,7 @@ let export = {
   InputParams = {
     directory | String,
     cardano_binaries | CardanoBinaries | default = {},
+    cardano_binaries_env | Array String | default = mk_cardano_binaries_env cardano_binaries,
     ip | String | default = "127.0.0.1",
     node_ports_base | Number | default = 5000,
     victoria = {

@@ -1968,6 +1968,12 @@ instance MetaTrace (PerasVoteDB.TraceEvent blk) where
   documentFor (Namespace _ ["AddVote"]) = Just "AddVote"
   documentFor (Namespace _ ["GarbageCollected"]) = Just "GarbageCollected"
   documentFor _ = Nothing
+  metricsDocFor (Namespace _ ["AddVote"]) =
+    [ ("perasVoteAlreadyInDB","number of occurences when Peras vote was already in DB")
+    , ("perasVotesAdded", "number of occurences when Peras vote was added")
+    , ("perasCertGenerated", "number of occurences when a new Peras certificate was generated after adding a vote")
+    ]
+  metricsDocFor _ = []
 
 instance
   ( Show (PerasVote blk)
@@ -1997,8 +2003,17 @@ instance
       [ "kind" .= String "GarbageCollected"
       , "slot" .= String (Text.pack $ show slotNo)
       ]
-
-  asMetrics _ = []
+  asMetrics (PerasVoteDB.AddVote _voteId _vote result) =
+    case result of
+      PerasVoteDB.PerasVoteAlreadyInDB ->
+        [ CounterM "perasVoteAlreadyInDB" (Just 1)]
+      PerasVoteDB.AddedPerasVoteButDidntGenerateNewCert ->
+        [ CounterM "perasVoteAdded" (Just 1)]
+      PerasVoteDB.AddedPerasVoteAndGeneratedNewCert _ ->
+        [ CounterM "perasVoteAdded" (Just 1)
+        , CounterM "perasCertGenerated" (Just 1)
+        ]
+  asMetrics (PerasVoteDB.GarbageCollected _slotNo) = []
 
 instance MetaTrace (PerasCertDB.TraceEvent blk) where
   namespaceFor (PerasCertDB.AddCert{}) = Namespace [] ["AddCert"]
@@ -2015,6 +2030,11 @@ instance MetaTrace (PerasCertDB.TraceEvent blk) where
   documentFor (Namespace _ ["AddCert"]) = Just "AddCert"
   documentFor (Namespace _ ["GarbageCollected"]) = Just "GarbageCollected"
   documentFor _ = Nothing
+  metricsDocFor (Namespace _ ["AddCert"]) =
+    [ ("perasCertAdded", "Number of occurences when a Peras certificate was added")
+    , ("perasCertAlreadyInDB", "Number of occurences when the Peras certificate was already in the DB")
+    ]
+  metricsDocFor _ = []
 
 instance
   Show (PerasCert blk) =>
@@ -2043,7 +2063,13 @@ instance
       , "slot" .= String (Text.pack $ show slotNo)
       ]
 
-  asMetrics _ = []
+  asMetrics (PerasCertDB.AddCert _roundNo _cert result) =
+    case result of
+      PerasCertDB.AddedPerasCertToDB ->
+        [ CounterM "perasCertAddedToDB" (Just 1)]
+      PerasCertDB.PerasCertAlreadyInDB ->
+        [ CounterM "perasCertAlreadyInDB" (Just 1)]
+  asMetrics (PerasCertDB.GarbageCollected _slotNo) = []
 
 -- --------------------------------------------------------------------------------
 -- -- LedgerDB.TraceEvent

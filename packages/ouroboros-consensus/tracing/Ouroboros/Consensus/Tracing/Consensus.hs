@@ -96,6 +96,8 @@ import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Outbound
 import Ouroboros.Consensus.Node.GSM
 import Ouroboros.Consensus.Node.Run (SerialiseNodeToNodeConstraints, estimateBlockSize)
 import Ouroboros.Consensus.Node.Tracers
+import qualified Ouroboros.Consensus.Peras.Cert.Inclusion as Peras
+import qualified Ouroboros.Consensus.Peras.Voting.Rules as Peras
 import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
 import Ouroboros.Consensus.Protocol.Praos.AgentClient
 import Ouroboros.Consensus.Tracing.ConsensusStartupException ()
@@ -2991,6 +2993,13 @@ instance
         <> showT (unSlotNo slotNo)
         <> ": "
         <> showT err
+  asMetrics (TracePerasCertInclusionRulesDecision _slotNo _roundNo decision) =
+    case decision of
+      Peras.IncludeCert{} ->
+        [ CounterM "perasIncludeCertDecision" (Just 1) ]
+      Peras.DoNotIncludeCert{} ->
+        [ CounterM "perasDoNotIncludeCertDecision" (Just 1) ]
+  asMetrics _ = []
 
 instance MetaTrace (TracePerasCertInclusionEvent blk) where
   namespaceFor TracePerasCertInclusionNoCertToInclude{} =
@@ -3025,6 +3034,13 @@ instance MetaTrace (TracePerasCertInclusionEvent blk) where
   documentFor (Namespace _ ["Error"]) =
     Just "An error occurred while evaluating Peras certificate inclusion rules."
   documentFor _ = Nothing
+  metricsDocFor (Namespace _ ["RulesDecision"]) =
+    [ ( "perasIncludeCertDecision"
+      , "number of occurences when Peras included certificate in block")
+    , ( "perasDoNotIncludeCertDecision"
+      , "number of occurences when Peras decided not to include certificate in block")
+    ]
+  metricsDocFor _ = []
 
   allNamespaces =
     [ Namespace [] ["NoCertToInclude"]
@@ -3129,6 +3145,13 @@ instance
         <> showT (unPerasRoundNo roundNo)
         <> ": "
         <> showT err
+  asMetrics (TracePerasVotingRulesDecision _ decision) =
+    case decision of
+      Peras.Vote{} -> [CounterM "perasVotedForBlock" (Just 1)]
+      Peras.NoVote{} -> [CounterM "perasNotVotedForBlock" (Just 1)]
+  asMetrics (TracePerasVotingForgedVote _ _) =
+    [ CounterM "perasForgedVote" (Just 1)]
+  asMetrics _ = []
 
 instance MetaTrace (TracePerasVoteForgingEvent blk) where
   namespaceFor TracePerasVotingNoVoteAfterFirstSlotInRound{} =
@@ -3185,6 +3208,14 @@ instance MetaTrace (TracePerasVoteForgingEvent blk) where
   documentFor (Namespace _ ["ViewError"]) =
     Just "The Peras voting view could not be obtained for the current round."
   documentFor _ = Nothing
+
+  metricsDocFor (Namespace _ ["RulesDecision"]) =
+    [ ( "perasVotedForBlock"
+      , "number of peras decisions to vote for a block")
+    , ( "perasNotVotedForBlock"
+      , "numbers of peras decisions not to vote for a block")
+    ]
+  metricsDocFor _ = []
 
   allNamespaces =
     [ Namespace [] ["NoVoteAfterFirstSlotInRound"]

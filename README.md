@@ -11,7 +11,7 @@ nix develop
 ./scripts/run-peras-testnet.sh
 ```
 
-That will build all necessary dependencies and start the Peras testnet process-compose.
+That will build all necessary dependencies and start the Peras testnet process-compose. If you want to use `buck2` for faster rebuilds, use `nix develop .#with-buck2`.
 
 To reconfigure the testnet or scenario params, change `nickel/scenarios/<scenario>.ncl` or `nickel/testnet.ncl` and reconfigure before run:
 
@@ -43,6 +43,31 @@ metrics dashboard for the testnet. These are available at:
   available once the `grafana` process comes up. You shouldn't need to log in,
   but if you do, the credentials are `cardano/cardano`.
 
+## Validation scripts
+
+After running the network it's possible to analyse traces for an unexpected events.
+It can be done using two tools in the projects:
+- `peras-trace-analyzer/check_peras_logs.py` - logs checker
+- `peras-trace-analyzer/vizualize_peras.py` - events visualization mechanism
+
+Logs checker:
+
+```sh
+./peras-trace-analyzer/check_peras_logs.py
+```
+
+Will run analysis and provide details on if traces are conformant to the expected
+ones, all `FAIL` events are subject for the deeper investigation. See `--help` for
+more options
+
+```sh
+./peras-trace-analyzer/visualize_peras.py
+```
+
+Will generate a html document with the protocol visualization based on traces.
+It supports a high level representation as well as details on the network protocol
+messages for cert and vote diffusion.
+See `--help` for the list of available options.
 
 ## Work organization
 

@@ -122,6 +122,7 @@ fi
 
 jq --argjson trace_options "$trace_options" \
   '.TraceOptions = $trace_options |
+  .PerasEnabled = true |
   .TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)

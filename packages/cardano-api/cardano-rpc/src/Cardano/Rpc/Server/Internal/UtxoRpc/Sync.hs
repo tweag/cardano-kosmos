@@ -58,13 +58,13 @@ fetchBlockMethod
   -- ^ Response containing the fetched blocks with raw CBOR and cardano header
 fetchBlockMethod request = do
   let refCount = length $ request ^. U5c.ref
-  when (refCount > maxFetchBlockRefs) $
-    throwGrpcErrorWithMessage GrpcInvalidArgument $
-      "too many block references: "
-        <> tshow refCount
-        <> ", maximum "
-        <> tshow maxFetchBlockRefs
-        <> "; batch your requests"
+  when (refCount > maxFetchBlockRefs)
+    $ throwGrpcErrorWithMessage GrpcInvalidArgument
+    $ "too many block references: "
+      <> tshow refCount
+      <> ", maximum "
+      <> tshow maxFetchBlockRefs
+      <> "; batch your requests"
 
   nodeKernelAccess <- grabNodeKernelAccess
   blocks <- forM (request ^. U5c.ref) $ \blockRef -> do
@@ -251,7 +251,7 @@ followTipStream
   :: forall m
    . HasCallStack
   => MonadIO m
-  => ChainFollower
+  => ChainFollower (ByteString, BlockInMode)
   -- ^ Follower to stream changes from
   -> m (Maybe (Proto U5c.BlockRef))
   -- ^ Read the current chain tip, projected into a @BlockRef@

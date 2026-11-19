@@ -66,6 +66,8 @@ import Data.Word
 import GHC.Exts (IsList (..))
 import GHC.Stack (HasCallStack)
 
+import Test.Gen.Cardano.Api.Hardcoded (v4AlwaysSucceedsPlutusScript)
+
 import Test.Hedgehog.Golden.ErrorMessage qualified as ErrorMessage
 import Test.Tasty
 
@@ -106,9 +108,9 @@ paymentVerKey1 = getVerificationKey $ deterministicSigningKey AsPaymentKey (Cryp
 
 txid1 :: TxId
 txid1 =
-  fromJust $
-    hush $
-      deserialiseFromRawBytesHex "210c0a4bb6391baf606843e67863d1474cc462374ab12c42d55f78a0b55b56e0"
+  fromJust
+    $ hush
+    $ deserialiseFromRawBytesHex "210c0a4bb6391baf606843e67863d1474cc462374ab12c42d55f78a0b55b56e0"
 
 txin1 :: TxIn
 txin1 = TxIn txid1 (TxIx 1)
@@ -147,12 +149,23 @@ txout1 = TxOut changeaddr1 txOutValue1 TxOutDatumNone ReferenceScriptNone
 txOutInAnyEra1 :: TxOutInAnyEra
 txOutInAnyEra1 = txOutInAnyEra AllegraEra txout1
 
+-- | The compiled V4 always-succeeds script. The rendered error message carries no
+-- script bytes, so this has no effect on the golden fixture.
+scriptInAnyLangPlutusV4 :: ScriptInAnyLang
+scriptInAnyLangPlutusV4 =
+  case deserialiseFromRawBytes (AsPlutusScript AsPlutusScriptV4) v4AlwaysSucceedsPlutusScript of
+    Left e -> error $ "scriptInAnyLangPlutusV4: Failed to decode Plutus script: " <> show e
+    Right script ->
+      ScriptInAnyLang
+        (PlutusScriptLanguage PlutusScriptV4)
+        (PlutusScript PlutusScriptV4 script)
+
 poolId :: Hash StakePoolKey
 poolId =
-  fromJust $
-    hush $
-      deserialiseFromRawBytesHex
-        "9e734b6c2263c0917bfc550e9c949f41afa3fe000377243bd29df399"
+  fromJust
+    $ hush
+    $ deserialiseFromRawBytesHex
+      "9e734b6c2263c0917bfc550e9c949f41afa3fe000377243bd29df399"
 
 test_Bech32DecodeError :: TestTree
 test_Bech32DecodeError =
@@ -328,8 +341,13 @@ examplePlutusWithContext =
     , pwcScript = Language.decodePlutusRunnable defaultVersion examplePlutusScript
     , pwcArgs = examplePlutusScriptArgs
     , pwcExUnits = ExUnits 1 1
-    , pwcCostModel = defaultCostModel
+    , pwcLanguageCostModel = defaultLanguageCostModel
     }
+
+defaultLanguageCostModel :: Plutus.LanguageCostModel Language.PlutusV3
+defaultLanguageCostModel =
+  either (error . ("defaultLanguageCostModel: " <>) . show) id $
+    Plutus.toLanguageCostModel defaultCostModel
 
 defaultCostModel :: Plutus.CostModel
 defaultCostModel =
@@ -406,6 +424,13 @@ test_TxBodyError =
     , ("TxBodyEmptyTxOuts", TxBodyEmptyTxOuts)
     , ("TxBodyOutputNegative", TxBodyOutputError $ TxOutputNegative 1 txOutInAnyEra1)
     , ("TxBodyOutputOverflow", TxBodyOutputError $ TxOutputOverflow 1 txOutInAnyEra1)
+    ,
+      ( "TxBodyOutputReferenceScriptLanguageNotSupportedInEra"
+      , TxBodyOutputError $
+          TxOutputReferenceScriptLanguageNotSupportedInEra
+            scriptInAnyLangPlutusV4
+            (AnyCardanoEra ConwayEra)
+      )
     , ("TxBodyMetadataError", TxBodyMetadataError [(1, TxMetadataBytesTooLong 2)])
     , ("TxBodyMissingProtocolParams", TxBodyMissingProtocolParams)
     , ("TxBodyInIxOverflow", TxBodyInIxOverflow txin1)

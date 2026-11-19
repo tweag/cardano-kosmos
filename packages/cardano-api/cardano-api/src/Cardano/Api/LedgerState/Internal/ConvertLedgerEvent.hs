@@ -49,7 +49,6 @@ import Ouroboros.Consensus.Cardano.Block (HardForkBlock)
 import Ouroboros.Consensus.Cardano.Block qualified as Consensus
 import Ouroboros.Consensus.HardFork.Combinator.AcrossEras (getOneEraLedgerEvent)
 import Ouroboros.Consensus.Protocol.Praos qualified as Consensus
-import Ouroboros.Consensus.Protocol.Praos2 qualified as Consensus
 import Ouroboros.Consensus.Protocol.TPraos qualified as Consensus
 import Ouroboros.Consensus.Shelley.Ledger
   ( ShelleyBlock
@@ -258,6 +257,6 @@ pattern ConwayLedgerEvent
 pattern ConwayLedgerEvent x = S (S (S (S (S (S (Z x))))))
 
 pattern DijkstraLedgerEvent
-  :: WrapLedgerEvent (ShelleyBlock (Consensus.Praos2 StandardCrypto) DijkstraEra)
+  :: WrapLedgerEvent (ShelleyBlock (Consensus.Praos StandardCrypto) DijkstraEra)
   -> NS WrapLedgerEvent (Consensus.CardanoEras StandardCrypto)
 pattern DijkstraLedgerEvent x = S (S (S (S (S (S (S (Z x)))))))

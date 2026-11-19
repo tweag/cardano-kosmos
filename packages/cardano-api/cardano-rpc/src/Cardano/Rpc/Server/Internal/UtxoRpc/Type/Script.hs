@@ -65,6 +65,10 @@ simpleScriptToUtxoRpcNativeScript = \case
             & U5c.k .~ fromIntegral k
             & U5c.scripts .~ map simpleScriptToUtxoRpcNativeScript scripts
     defMessage & U5c.scriptNOfK .~ nScriptsOf
+  RequireGuard _credential ->
+    -- UTxORPC has no guard variant yet; match the ledger-direct converter and
+    -- retain an empty message so script-list positions remain stable (#1263).
+    defMessage
 
 utxoRpcNativeScriptToSimpleScript
   :: HasCallStack
@@ -79,17 +83,17 @@ utxoRpcNativeScriptToSimpleScript scriptRpc
   | Just slotNo <- scriptRpc ^. U5c.maybe'invalidBefore =
       pure . RequireTimeAfter $ SlotNo slotNo
   | Just scriptsRpc <- scriptRpc ^. U5c.maybe'scriptAll = do
-      fmap RequireAllOf $
-        mapM utxoRpcNativeScriptToSimpleScript $
-          scriptsRpc ^. U5c.items
+      fmap RequireAllOf
+        $ mapM utxoRpcNativeScriptToSimpleScript
+        $ scriptsRpc ^. U5c.items
   | Just scriptsRpc <- scriptRpc ^. U5c.maybe'scriptAny = do
-      fmap RequireAnyOf $
-        mapM utxoRpcNativeScriptToSimpleScript $
-          scriptsRpc ^. U5c.items
+      fmap RequireAnyOf
+        $ mapM utxoRpcNativeScriptToSimpleScript
+        $ scriptsRpc ^. U5c.items
   | Just scriptsRpc <- scriptRpc ^. U5c.maybe'scriptNOfK = do
-      fmap (RequireMOf . fromIntegral $ scriptsRpc ^. U5c.k) $
-        mapM utxoRpcNativeScriptToSimpleScript $
-          scriptsRpc ^. U5c.scripts
+      fmap (RequireMOf . fromIntegral $ scriptsRpc ^. U5c.k)
+        $ mapM utxoRpcNativeScriptToSimpleScript
+        $ scriptsRpc ^. U5c.scripts
   | otherwise = throwM . stringException $ "Cannot decode UTxORPC NativeScript"
 
 referenceScriptToUtxoRpcScript :: ReferenceScript era -> Proto UtxoRpc.Script

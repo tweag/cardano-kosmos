@@ -30,6 +30,7 @@ import Cardano.Api.Experimental.Tx.Internal.BodyContent
   , SubTxBodyContent
   , TxBodyContent
   , TxOut (..)
+  , bodyGuardCredentials
   , collectTxBodyScriptWitnessRequirements
   , convCertificates
   , convMintValue
@@ -45,7 +46,6 @@ import Cardano.Api.Experimental.Tx.Internal.BodyContent
   , subTxCertificates
   , subTxCurrentTreasuryValue
   , subTxDirectDeposits
-  , subTxGuards
   , subTxIns
   , subTxInsReference
   , subTxMetadata
@@ -78,7 +78,7 @@ import Cardano.Ledger.Api qualified as L
 import Cardano.Ledger.Binary qualified as Ledger
 import Cardano.Ledger.Core qualified as L (TxLevel (..))
 import Cardano.Ledger.Dijkstra.TxBody qualified as L
-  ( DijkstraEraTxBody (accountBalanceIntervalsTxBodyL, requiredTopLevelGuardsTxBodyL)
+  ( DijkstraEraTxBody (accountBalanceIntervalsTxBodyL, requiredTopLevelGuardsL)
   )
 
 import Data.ByteString.Lazy qualified as LBS
@@ -181,8 +181,8 @@ makeUnsignedSubTx st = do
           & L.votingProceduresTxBodyL .~ convVotingProcedures (subTxVotingProcedures st)
           & L.treasuryDonationTxBodyL .~ fromMaybe (L.Coin 0) (subTxTreasuryDonation st)
           & L.currentTreasuryValueTxBodyL .~ L.maybeToStrictMaybe (subTxCurrentTreasuryValue st)
-          & L.guardsTxBodyL .~ subTxGuards st
-          & L.requiredTopLevelGuardsTxBodyL .~ subTxRequiredTopLevelGuards st
+          & L.guardsTxBodyL .~ bodyGuardCredentials st
+          & L.requiredTopLevelGuardsL .~ subTxRequiredTopLevelGuards st
           & L.directDepositsTxBodyL .~ subTxDirectDeposits st
           & L.accountBalanceIntervalsTxBodyL .~ subTxAccountBalanceIntervals st
 
@@ -192,11 +192,11 @@ makeUnsignedSubTx st = do
           & L.datsTxWitsL .~ datums
           & L.rdmrsTxWitsL .~ redeemers
 
-  Right $
-    UnsignedSubTx $
-      L.mkBasicTx body
-        & L.witsTxL .~ scriptWitnesses
-        & L.auxDataTxL .~ L.maybeToStrictMaybe txAuxData
+  Right
+    $ UnsignedSubTx
+    $ L.mkBasicTx body
+      & L.witsTxL .~ scriptWitnesses
+      & L.auxDataTxL .~ L.maybeToStrictMaybe txAuxData
 
 -- | Sign the body of an unsigned sub-transaction with one key.
 makeSubTxKeyWitness

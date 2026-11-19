@@ -824,10 +824,10 @@ mkTxProposalProcedures
   => [(L.ProposalProcedure (ShelleyLedgerEra era), Maybe (ScriptWitness WitCtxStake era))]
   -> TxProposalProcedures build era
 mkTxProposalProcedures proposals = do
-  shelleyBasedEraConstraints (shelleyBasedEra @era) $
-    TxProposalProcedures $
-      fromList $
-        map (second pure) proposals
+  shelleyBasedEraConstraints (shelleyBasedEra @era)
+    $ TxProposalProcedures
+    $ fromList
+    $ map (second pure) proposals
 
 -- | Index proposal procedures by the order they appear in the transaction,
 -- and filter out the ones that do not have a witness.
@@ -1263,6 +1263,12 @@ createTransactionBody
   -> Either TxBodyError (TxBody era)
 createTransactionBody sbe bc =
   shelleyBasedEraConstraints sbe $ do
+    -- Checked up front so a reference script with an unsupported language is
+    -- never silently dropped by the ledger 'TxOut' conversion further down.
+    first TxBodyOutputError
+      $ validateTxOutsReferenceScripts sbe
+      $ txOuts bc
+        <> [txout | TxReturnCollateral _ txout <- [txReturnCollateral bc]]
     (sData, mScriptIntegrityHash, scripts) <-
       forEraInEon
         (convert sbe)
@@ -1312,9 +1318,9 @@ createTransactionBody sbe bc =
         treasuryDonation = maybe 0 unFeatured $ txTreasuryDonation bc
 
     setUpdateProposal <- monoidForEraInEonA era $ \w ->
-      pure . Endo $
-        shelleyToBabbageEraConstraints w $
-          A.txBodyL . L.updateTxBodyL .~ convTxUpdateProposal sbe (txUpdateProposal bc)
+      pure . Endo
+        $ shelleyToBabbageEraConstraints w
+        $ A.txBodyL . L.updateTxBodyL .~ convTxUpdateProposal sbe (txUpdateProposal bc)
 
     setInvalidBefore <- monoidForEraInEonA era $ \w ->
       pure $ Endo $ A.invalidBeforeTxBodyL w .~ convValidityLowerBound (txValidityLowerBound bc)
@@ -1323,17 +1329,17 @@ createTransactionBody sbe bc =
       pure $ Endo $ maryEraOnwardsConstraints w $ A.txBodyL . L.mintTxBodyL .~ convMintValue apiMintValue
 
     setScriptIntegrityHash <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          alonzoEraOnwardsConstraints w $
-            A.txBodyL . L.scriptIntegrityHashTxBodyL .~ mScriptIntegrityHash
+      pure
+        $ Endo
+        $ alonzoEraOnwardsConstraints w
+        $ A.txBodyL . L.scriptIntegrityHashTxBodyL .~ mScriptIntegrityHash
 
     setCollateralInputs <- monoidForEraInEonA era $ \w ->
       pure $ Endo $ alonzoEraOnwardsConstraints w $ A.txBodyL . L.collateralInputsTxBodyL .~ collTxIns
 
     setReqSignerHashes <-
       let keyWits = convExtraKeyWitnesses apiExtraKeyWitnesses
-       in monoidForEraInEonA era $ \w -> case w of
+       in monoidForEraInEonA era $ \case
             -- Dijkstra replaced required signer hashes with guards, and a key-hash
             -- guard makes the ledger demand that key's signature: translate, appending
             -- so any other guards stay intact.
@@ -1352,40 +1358,40 @@ createTransactionBody sbe bc =
       pure $ Endo $ babbageEraOnwardsConstraints w $ A.txBodyL . L.referenceInputsTxBodyL .~ refTxIns
 
     setCollateralReturn <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          babbageEraOnwardsConstraints w $
-            A.txBodyL . L.collateralReturnTxBodyL .~ returnCollateral
+      pure
+        $ Endo
+        $ babbageEraOnwardsConstraints w
+        $ A.txBodyL . L.collateralReturnTxBodyL .~ returnCollateral
 
     setTotalCollateral <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          babbageEraOnwardsConstraints w $
-            A.txBodyL . L.totalCollateralTxBodyL .~ totalCollateral
+      pure
+        $ Endo
+        $ babbageEraOnwardsConstraints w
+        $ A.txBodyL . L.totalCollateralTxBodyL .~ totalCollateral
 
     setProposalProcedures <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          conwayEraOnwardsConstraints w $
-            A.txBodyL . L.proposalProceduresTxBodyL .~ proposalProcedures
+      pure
+        $ Endo
+        $ conwayEraOnwardsConstraints w
+        $ A.txBodyL . L.proposalProceduresTxBodyL .~ proposalProcedures
 
     setVotingProcedures <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          conwayEraOnwardsConstraints w $
-            A.txBodyL . L.votingProceduresTxBodyL .~ votingProcedures
+      pure
+        $ Endo
+        $ conwayEraOnwardsConstraints w
+        $ A.txBodyL . L.votingProceduresTxBodyL .~ votingProcedures
 
     setCurrentTreasuryValue <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          conwayEraOnwardsConstraints w $
-            A.txBodyL . L.currentTreasuryValueTxBodyL .~ currentTreasuryValue
+      pure
+        $ Endo
+        $ conwayEraOnwardsConstraints w
+        $ A.txBodyL . L.currentTreasuryValueTxBodyL .~ currentTreasuryValue
 
     setTreasuryDonation <- monoidForEraInEonA era $ \w ->
-      pure $
-        Endo $
-          conwayEraOnwardsConstraints w $
-            A.txBodyL . L.treasuryDonationTxBodyL .~ treasuryDonation
+      pure
+        $ Endo
+        $ conwayEraOnwardsConstraints w
+        $ A.txBodyL . L.treasuryDonationTxBodyL .~ treasuryDonation
 
     let ledgerTxBody =
           mkCommonTxBody sbe (txIns bc) (txOuts bc) (txFee bc) (txWithdrawals bc) txAuxData
@@ -1525,10 +1531,10 @@ fromLedgerProposalProcedures
   -> Maybe (Featured ConwayEraOnwards era (TxProposalProcedures ViewTx era))
 fromLedgerProposalProcedures sbe body =
   forShelleyBasedEraInEonMaybe sbe $ \w ->
-    conwayEraOnwardsConstraints w $
-      Featured w $
-        mkTxProposalProcedures
-          (fmap (,Nothing) . toList $ body ^. L.proposalProceduresTxBodyL)
+    conwayEraOnwardsConstraints w
+      $ Featured w
+      $ mkTxProposalProcedures
+        (fmap (,Nothing) . toList $ body ^. L.proposalProceduresTxBodyL)
 
 fromLedgerVotingProcedures
   :: ()
@@ -1537,11 +1543,11 @@ fromLedgerVotingProcedures
   -> Maybe (Featured ConwayEraOnwards era (TxVotingProcedures ViewTx era))
 fromLedgerVotingProcedures sbe body =
   forShelleyBasedEraInEonMaybe sbe $ \w ->
-    conwayEraOnwardsConstraints w $
-      Featured w $
-        TxVotingProcedures
-          (body ^. L.votingProceduresTxBodyL)
-          ViewTx
+    conwayEraOnwardsConstraints w
+      $ Featured w
+      $ TxVotingProcedures
+        (body ^. L.votingProceduresTxBodyL)
+        ViewTx
 
 fromLedgerCurrentTreasuryValue
   :: ()
@@ -1549,9 +1555,9 @@ fromLedgerCurrentTreasuryValue
   -> Ledger.TxBody Ledger.TopTx (ShelleyLedgerEra era)
   -> Maybe (Featured ConwayEraOnwards era (Maybe Coin))
 fromLedgerCurrentTreasuryValue sbe body = forEraInEonMaybe (toCardanoEra sbe) $ \ceo ->
-  conwayEraOnwardsConstraints ceo $
-    Featured ceo . Ledger.strictMaybeToMaybe $
-      body ^. L.currentTreasuryValueTxBodyL
+  conwayEraOnwardsConstraints ceo
+    $ Featured ceo . Ledger.strictMaybeToMaybe
+    $ body ^. L.currentTreasuryValueTxBodyL
 
 fromLedgerTreasuryDonation
   :: ()
@@ -1595,11 +1601,11 @@ fromLedgerTxInsCollateral sbe body =
     (convert sbe)
     TxInsCollateralNone
     ( \w ->
-        alonzoEraOnwardsConstraints w $
-          TxInsCollateral w $
-            map fromShelleyTxIn $
-              toList $
-                body ^. L.collateralInputsTxBodyL
+        alonzoEraOnwardsConstraints w
+          $ TxInsCollateral w
+          $ map fromShelleyTxIn
+          $ toList
+          $ body ^. L.collateralInputsTxBodyL
     )
 
 fromLedgerTxInsReference
@@ -1646,9 +1652,9 @@ fromLedgerTxReturnCollateral sbe txbody =
 fromLedgerTxFee
   :: ShelleyBasedEra era -> Ledger.TxBody Ledger.TopTx (ShelleyLedgerEra era) -> TxFee era
 fromLedgerTxFee sbe body =
-  shelleyBasedEraConstraints sbe $
-    TxFeeExplicit sbe $
-      body ^. L.feeTxBodyL
+  shelleyBasedEraConstraints sbe
+    $ TxFeeExplicit sbe
+    $ body ^. L.feeTxBodyL
 
 fromLedgerTxValidityLowerBound
   :: ShelleyBasedEra era
@@ -1817,11 +1823,11 @@ makeByronTransactionBody txIns txOuts = do
     traverse
       (first TxBodyOutputError . toByronTxOut)
       outs'
-  return $
-    CBOR.reAnnotate CBOR.byronProtVer $
-      Annotated
-        (Byron.UnsafeTx ins'' outs'' (Byron.mkAttributes ()))
-        ()
+  return
+    $ CBOR.reAnnotate CBOR.byronProtVer
+    $ Annotated
+      (Byron.UnsafeTx ins'' outs'' (Byron.mkAttributes ()))
+      ()
  where
   maxByronTxInIx :: Word
   maxByronTxInIx = fromIntegral (maxBound :: Word32)
@@ -2045,19 +2051,19 @@ mkCommonTxBody
   -> Maybe (L.TxAuxData (ShelleyLedgerEra era))
   -> A.LedgerTxBody era
 mkCommonTxBody sbe txIns txOuts txFee txWithdrawals txAuxData =
-  shelleyBasedEraConstraints sbe $
-    A.LedgerTxBody $
-      L.mkBasicTxBody
-        & L.inputsTxBodyL
-          .~ convTxIns txIns
-        & L.outputsTxBodyL
-          .~ convTxOuts sbe txOuts
-        & L.feeTxBodyL
-          .~ convTransactionFee sbe txFee
-        & L.withdrawalsTxBodyL
-          .~ convWithdrawals txWithdrawals
-        & L.auxDataHashTxBodyL
-          .~ maybe SNothing (SJust . Ledger.hashTxAuxData) txAuxData
+  shelleyBasedEraConstraints sbe
+    $ A.LedgerTxBody
+    $ L.mkBasicTxBody
+      & L.inputsTxBodyL
+        .~ convTxIns txIns
+      & L.outputsTxBodyL
+        .~ convTxOuts sbe txOuts
+      & L.feeTxBodyL
+        .~ convTransactionFee sbe txFee
+      & L.withdrawalsTxBodyL
+        .~ convWithdrawals txWithdrawals
+      & L.auxDataHashTxBodyL
+        .~ maybe SNothing (SJust . Ledger.hashTxAuxData) txAuxData
 
 -- ----------------------------------------------------------------------------
 -- Script witnesses within the tx body
@@ -2104,6 +2110,8 @@ data ScriptWitnessIndex
     ScriptWitnessIndexVoting !Word32
   | -- | The n'th proposal, in the order of the proposals.
     ScriptWitnessIndexProposing !Word32
+  | -- | The guard position in the complete ordered guard set (Dijkstra onwards).
+    ScriptWitnessIndexGuarding !Word32
   deriving (Eq, Ord, Show)
 
 instance ToJSON ScriptWitnessIndex where
@@ -2133,6 +2141,8 @@ instance ToJSON ScriptWitnessIndex where
         [ "kind" .= Aeson.String "ScriptWitnessIndexVoting"
         , "value" .= n
         ]
+    ScriptWitnessIndexGuarding n ->
+      object ["kind" .= Aeson.String "ScriptWitnessIndexGuarding", "value" .= n]
     ScriptWitnessIndexProposing n ->
       object
         [ "kind" .= Aeson.String "ScriptWitnessIndexProposing"
@@ -2152,6 +2162,8 @@ renderScriptWitnessIndex (ScriptWitnessIndexVoting index) =
   "vote " <> show index <> " (in ascending order of the votes)"
 renderScriptWitnessIndex (ScriptWitnessIndexProposing index) =
   "proposal " <> show index <> " (in ascending order of the proposals)"
+renderScriptWitnessIndex (ScriptWitnessIndexGuarding index) =
+  "guard " <> show index <> " (in the ordered guard set)"
 
 fromScriptWitnessIndex
   :: AlonzoEraOnwards era
@@ -2194,6 +2206,7 @@ fromScriptWitnessIndexConway i =
     ScriptWitnessIndexWithdrawal n -> Just $ L.ConwayWithdrawing (L.AsIx n)
     ScriptWitnessIndexVoting n -> Just $ L.ConwayVoting (L.AsIx n)
     ScriptWitnessIndexProposing n -> Just $ L.ConwayProposing (L.AsIx n)
+    ScriptWitnessIndexGuarding _ -> Nothing
 
 fromScriptWitnessIndexDijkstra
   :: ScriptWitnessIndex -> Maybe (L.PlutusPurpose L.AsIx (ShelleyLedgerEra DijkstraEra))
@@ -2205,6 +2218,7 @@ fromScriptWitnessIndexDijkstra i =
     ScriptWitnessIndexWithdrawal n -> Just $ L.DijkstraWithdrawing (L.AsIx n)
     ScriptWitnessIndexVoting n -> Just $ L.DijkstraVoting (L.AsIx n)
     ScriptWitnessIndexProposing n -> Just $ L.DijkstraProposing (L.AsIx n)
+    ScriptWitnessIndexGuarding n -> Just $ L.DijkstraGuarding (L.AsIx n)
 
 toScriptIndex
   :: AlonzoEraOnwards era
@@ -2250,7 +2264,7 @@ toScriptIndexDijkstra scriptPurposeIndex =
     L.DijkstraWithdrawing (L.AsIx i) -> ScriptWitnessIndexWithdrawal i
     L.DijkstraVoting (L.AsIx i) -> ScriptWitnessIndexVoting i
     L.DijkstraProposing (L.AsIx i) -> ScriptWitnessIndexProposing i
-    L.DijkstraGuarding (L.AsIx i) -> error $ "toScriptIndexDijkstra: unexpected DijkstraGuarding at index " <> show i
+    L.DijkstraGuarding (L.AsIx i) -> ScriptWitnessIndexGuarding i
 
 collectTxBodyScriptWitnesses
   :: forall era
@@ -2364,55 +2378,55 @@ collectTxBodyScriptWitnessRequirements
               (getDatums aEon txInsReference txOuts)
               mempty
       txInWits <-
-        first TxBodyPlutusScriptDecodeError $
-          legacyWitnessToScriptRequirements aEon $
-            extractWitnessableTxIns aEon txIns
+        first TxBodyPlutusScriptDecodeError
+          $ legacyWitnessToScriptRequirements aEon
+          $ extractWitnessableTxIns aEon txIns
 
       txWithdrawalWits <-
-        first TxBodyPlutusScriptDecodeError $
-          legacyWitnessToScriptRequirements aEon $
-            extractWitnessableWithdrawals aEon txWithdrawals
+        first TxBodyPlutusScriptDecodeError
+          $ legacyWitnessToScriptRequirements aEon
+          $ extractWitnessableWithdrawals aEon txWithdrawals
 
       txCertWits <-
-        first TxBodyPlutusScriptDecodeError $
-          legacyWitnessToScriptRequirements aEon $
-            extractWitnessableCertificates aEon txCertificates
+        first TxBodyPlutusScriptDecodeError
+          $ legacyWitnessToScriptRequirements aEon
+          $ extractWitnessableCertificates aEon txCertificates
 
       txMintWits <-
-        first TxBodyPlutusScriptDecodeError $
-          legacyWitnessToScriptRequirements aEon $
-            extractWitnessableMints aEon txMintValue
+        first TxBodyPlutusScriptDecodeError
+          $ legacyWitnessToScriptRequirements aEon
+          $ extractWitnessableMints aEon txMintValue
 
       txVotingWits <-
         inEonForShelleyBasedEra
           (Right $ TxScriptWitnessRequirements mempty mempty mempty mempty)
           ( \eon ->
-              first TxBodyPlutusScriptDecodeError $
-                legacyWitnessToScriptRequirements aEon $
-                  extractWitnessableVotes eon txVotingProcedures
+              first TxBodyPlutusScriptDecodeError
+                $ legacyWitnessToScriptRequirements aEon
+                $ extractWitnessableVotes eon txVotingProcedures
           )
           sbe
       txProposalWits <-
         inEonForShelleyBasedEra
           (Right $ TxScriptWitnessRequirements mempty mempty mempty mempty)
           ( \eon ->
-              first TxBodyPlutusScriptDecodeError $
-                legacyWitnessToScriptRequirements aEon $
-                  extractWitnessableProposals eon txProposalProcedures
+              first TxBodyPlutusScriptDecodeError
+                $ legacyWitnessToScriptRequirements aEon
+                $ extractWitnessableProposals eon txProposalProcedures
           )
           sbe
 
-      return $
-        obtainMonoidConstraint aEon $
-          mconcat
-            [ supplementaldatums
-            , txInWits
-            , txWithdrawalWits
-            , txCertWits
-            , txMintWits
-            , txVotingWits
-            , txProposalWits
-            ]
+      return
+        $ obtainMonoidConstraint aEon
+        $ mconcat
+          [ supplementaldatums
+          , txInWits
+          , txWithdrawalWits
+          , txCertWits
+          , txMintWits
+          , txVotingWits
+          , txProposalWits
+          ]
 
 -- | Extract datum:
 -- 1. supplemental datums from transaction outputs
@@ -2434,9 +2448,9 @@ getDatums eon txInsRef txOutsFromTx = alonzoEraOnwardsConstraints eon $ do
         ]
       -- use only supplemental datum
       txOutsDats = [d | TxOut _ _ (TxOutSupplementalDatum _ d) _ <- txOutsFromTx]
-  L.TxDats $
-    fromList $
-      [ (L.hashData ledgerData, ledgerData)
+  L.TxDats
+    $ fromList
+    $ [ (L.hashData ledgerData, ledgerData)
       | d <- refTxInsDats <> txOutsDats
       , let ledgerData = toAlonzoData d
       ]
@@ -2596,6 +2610,8 @@ toAuxiliaryData sbe txMetadata txAuxScripts =
         ShelleyBasedEraConway ->
           guard (not (Map.null ms && null ss)) $> L.mkAlonzoTxAuxData ms ss
         ShelleyBasedEraDijkstra ->
+          -- TODO: cardano-ledger-dijkstra 0.4.0.0 reads auxiliary scripts up to eraMaxLanguage
+          -- (still PlutusV3), so PlutusV4 is dropped on read-back; fixed by ledger PR 6109.
           guard (not (Map.null ms && null ss)) $> L.mkAlonzoTxAuxData ms ss
 
 -- ----------------------------------------------------------------------------

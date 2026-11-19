@@ -41,58 +41,33 @@ jobs:
           - lang: typescript
             devshell: .#rpc-quickstart-typescript
             dir: cardano-rpc/quickstart/typescript
-            run: |
-              # The README documents `npm install`, so run exactly that even
-              # though `npm ci` would be the more CI-idiomatic choice now that
-              # package-lock.json is committed.
-              npm install
-              node send-lovelace.mjs
           - lang: python
             devshell: .#rpc-quickstart-python
             dir: cardano-rpc/quickstart/python
-            run: |
-              # The venv paths are used directly: `source venv/bin/activate`
-              # would not survive into the next step.
-              python3 -m venv venv
-              venv/bin/pip install -r requirements.txt
-              venv/bin/python main.py
-              venv/bin/python send_lovelace.py
           - lang: rust
             devshell: .#rpc-quickstart-rust
             dir: cardano-rpc/quickstart/rust
-            run: |
-              cargo run
-              cargo run --bin send-lovelace
           - lang: go
             devshell: .#rpc-quickstart-go
             dir: cardano-rpc/quickstart/go
-            run: |
-              # Go has no send-lovelace example yet.
-              go run .
           - lang: haskell
             devshell: ''
             dir: .
-            run: |
-              # This deliberately diverges from the README's `cabal run`.
-              # Building the flake attribute substitutes the whole dependency
-              # closure from cache.iog.io, so CI only ever compiles
-              # cardano-api, cardano-rpc and the example itself. The examples
-              # read the cluster from the absolute /tmp/demo-cluster path, so
-              # running them outside their source directory is fine.
-              nix build --print-build-logs '.#rpc-quickstart-haskell'
-              ./result/bin/cardano-rpc-quickstart
-              ./result/bin/send-lovelace
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # `accept-flake-config` is a global setting, so it also covers the
-      # `nix run` of cardano-node below and lets that flake's own
-      # cache.iog.io substituter apply.
-      - uses: cachix/install-nix-action@v31
+      # These settings mirror this flake's nixConfig. They are global, so
+      # they also cover the `nix run` of cardano-node below, whose flake
+      # uses the same cache.iog.io substituter.
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           extra_nix_config: |
-            accept-flake-config = true
+            extra-substituters = https://cache.iog.io https://cache.zw3rk.com
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
+            allow-import-from-derivation = true
 
       # Each matrix job runs on its own runner VM, so every job can boot a
       # cluster on the same ports without conflicting. cardano-node master is
@@ -124,7 +99,7 @@ jobs:
 
       - name: Enter the ${{ matrix.lang }} dev shell
         if: matrix.devshell != ''
-        uses: rrbutani/use-nix-shell-action@v1
+        uses: rrbutani/use-nix-shell-action@59a52b2b9bbfe3cc0e7deb8f9059abe37a439edf # v1.1.0
         with:
           devShell: ${{ matrix.devshell }}
 
@@ -132,7 +107,49 @@ jobs:
       # whatever sits at utxo1 and returns the change there.
       - name: Run the ${{ matrix.lang }} examples
         working-directory: ${{ matrix.dir }}
-        run: ${{ matrix.run }}
+        env:
+          QUICKSTART_LANG: ${{ matrix.lang }}
+        run: |
+          case "$QUICKSTART_LANG" in
+            typescript)
+              # The README documents `npm install`, so run exactly that even
+              # though `npm ci` would be the more CI-idiomatic choice now that
+              # package-lock.json is committed.
+              npm install
+              node send-lovelace.mjs
+              ;;
+            python)
+              # The venv paths are used directly: `source venv/bin/activate`
+              # would not survive into the next step.
+              python3 -m venv venv
+              venv/bin/pip install -r requirements.txt
+              venv/bin/python main.py
+              venv/bin/python send_lovelace.py
+              ;;
+            rust)
+              cargo run
+              cargo run --bin send-lovelace
+              ;;
+            go)
+              # Go has no send-lovelace example yet.
+              go run .
+              ;;
+            haskell)
+              # This deliberately diverges from the README's `cabal run`.
+              # Building the flake attribute substitutes the whole dependency
+              # closure from cache.iog.io, so CI only ever compiles
+              # cardano-api, cardano-rpc and the example itself. The examples
+              # read the cluster from the absolute /tmp/demo-cluster path, so
+              # running them outside their source directory is fine.
+              nix build --print-build-logs '.#rpc-quickstart-haskell'
+              ./result/bin/cardano-rpc-quickstart
+              ./result/bin/send-lovelace
+              ;;
+            *)
+              echo "::error::No examples defined for $QUICKSTART_LANG"
+              exit 1
+              ;;
+          esac
 
       - name: Dump the cluster log
         if: failure()

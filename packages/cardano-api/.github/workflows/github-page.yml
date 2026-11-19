@@ -6,8 +6,16 @@ on:
       - master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    permissions:
+      actions: read  # download the wasm demo artifact from another workflow
+      contents: write  # push to gh-pages
+      issues: write  # open/update the dead-link tracking issue
+      pull-requests: read  # identify the PR associated with the failing commit
     runs-on: ubuntu-latest
 
     defaults:
@@ -15,14 +23,18 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           extra_nix_config: |
-            accept-flake-config = true
+            extra-substituters = https://cache.iog.io https://cache.zw3rk.com
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
+            allow-import-from-derivation = true
 
-      - uses: rrbutani/use-nix-shell-action@v1
+      - uses: rrbutani/use-nix-shell-action@59a52b2b9bbfe3cc0e7deb8f9059abe37a439edf # v1.1.0
         with:
           devShell: .#ghc914
 
@@ -51,7 +63,7 @@ jobs:
           cp -r result/. website/cardano-wasm/typedoc/
 
       - name: Add wallet demo (from the latest successful master wasm build)
-        uses: dawidd6/action-download-artifact@v6
+        uses: dawidd6/action-download-artifact@a92c7ae74cf1df8810783758581e485ac3aaa309 # v28
         with:
           workflow: haskell-wasm.yml
           branch: master
@@ -64,7 +76,7 @@ jobs:
           tar -czf website.tgz -C website .
 
       - name: Upload website artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         continue-on-error: true
         with:
@@ -73,7 +85,7 @@ jobs:
 
       - name: Deploy documentation to gh-pages 🚀
         if: github.ref == 'refs/heads/master'
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN || github.token }}
           publish_dir: website
@@ -108,7 +120,7 @@ jobs:
       #                                         feature branches
       - name: Open / update dead-link tracking issue
         if: failure() && steps.fix-haddock-links.outcome == 'failure' && github.ref == 'refs/heads/master'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Marker label used to identify the rolling tracking issue.

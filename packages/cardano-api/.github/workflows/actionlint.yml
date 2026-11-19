@@ -4,22 +4,29 @@ on:
   merge_group:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   actionlint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Note that, because our Nix configuration provisions *both* shellcheck and actionlint,
       # actionlint is not going to install its own shellcheck.
       # This also makes sure that this pipeline runs using
       # the same shellcheck as the ones in Nix shells of developers.
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           extra_nix_config: |
-            accept-flake-config = true
+            extra-substituters = https://cache.iog.io https://cache.zw3rk.com
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
+            allow-import-from-derivation = true
 
-      - uses: rrbutani/use-nix-shell-action@v1
+      - uses: rrbutani/use-nix-shell-action@59a52b2b9bbfe3cc0e7deb8f9059abe37a439edf # v1.1.0
 
       - name: Run Actionlint
         run: |

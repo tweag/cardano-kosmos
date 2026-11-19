@@ -18,13 +18,16 @@ jobs:
     if: ${{ github.event_name != 'merge_group' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           extra_nix_config: |
-            accept-flake-config = true
+            extra-substituters = https://cache.iog.io https://cache.zw3rk.com
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
+            allow-import-from-derivation = true
 
-      - uses: input-output-hk/cardano-dev/actions/herald-validate@herald-validate-0.0.1.1
+      - uses: IntersectMBO/cardano-dev/actions/herald-validate@9106b37910e40be00cda65051922d6ef939fa67a # herald-validate-0.0.1.1

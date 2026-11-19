@@ -69,6 +69,7 @@ import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.Backend as V2
 import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.InMemory as InMemory
 import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.LSM as LSM
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB as PerasImmutableCertDB
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolDB
 import Ouroboros.Consensus.Tracing.Formatting ()
@@ -139,6 +140,7 @@ instance
       "Chain Selection was unstarved by " <> renderRealPoint pt
   forHuman (ChainDB.TracePerasCertDbEvent ev) = forHuman ev
   forHuman (ChainDB.TraceAddPerasCertEvent ev) = forHuman ev
+  forHuman (ChainDB.TracePerasImmutableCertDbEvent ev) = forHuman ev
 
   forMachine _ ChainDB.TraceLastShutdownUnclean =
     mconcat ["kind" .= String "LastShutdownUnclean"]
@@ -175,6 +177,8 @@ instance
     forMachine details v
   forMachine details (ChainDB.TraceAddPerasCertEvent v) =
     forMachine details v
+  forMachine details (ChainDB.TracePerasImmutableCertDbEvent v) =
+    forMachine details v
 
   asMetrics ChainDB.TraceLastShutdownUnclean = []
   asMetrics (ChainDB.TraceChainSelStarvationEvent _) = []
@@ -191,6 +195,7 @@ instance
   asMetrics (ChainDB.TraceVolatileDBEvent v) = asMetrics v
   asMetrics (ChainDB.TracePerasCertDbEvent v) = asMetrics v
   asMetrics (ChainDB.TraceAddPerasCertEvent v) = asMetrics v
+  asMetrics (ChainDB.TracePerasImmutableCertDbEvent v) = asMetrics v
 
 instance MetaTrace (ChainDB.TraceEvent blk) where
   namespaceFor ChainDB.TraceLastShutdownUnclean =
@@ -223,6 +228,8 @@ instance MetaTrace (ChainDB.TraceEvent blk) where
     nsPrependInner "PerasCertDbEvent" (namespaceFor ev)
   namespaceFor (ChainDB.TraceAddPerasCertEvent ev) =
     nsPrependInner "AddPerasCertEvent" (namespaceFor ev)
+  namespaceFor (ChainDB.TracePerasImmutableCertDbEvent ev) =
+    nsPrependInner "PerasImmCertDbEvent" (namespaceFor ev)
 
   severityFor (Namespace _ ["LastShutdownUnclean"]) _ = Just Info
   severityFor (Namespace _ ["ChainSelStarvationEvent"]) _ = Just Debug
@@ -3810,3 +3817,109 @@ instance MetaTrace (ChainDB.TraceAddPerasCertEvent blk) where
     , Namespace [] ["PerasCertBoostsBlockNotYetReceived"]
     , Namespace [] ["ChainSelectionForBoostedBlock"]
     ]
+
+instance MetaTrace (PerasImmutableCertDB.TraceEvent blk) where
+  namespaceFor msg = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Namespace [] ["OpenedDB"]
+    PerasImmutableCertDB.AddedCert{} -> Namespace [] ["AddedCert"]
+    PerasImmutableCertDB.QuarantinedCert{} -> Namespace [] ["QuarantinedCert"]
+    PerasImmutableCertDB.ClosedDB{} -> Namespace [] ["ClosedDB"]
+  severityFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just Debug
+    PerasImmutableCertDB.AddedCert{} -> Just Info
+    PerasImmutableCertDB.QuarantinedCert{} -> Just Debug
+    PerasImmutableCertDB.ClosedDB{} -> Just Debug
+  severityFor _ Nothing = Nothing
+  privacyFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just Public
+    PerasImmutableCertDB.AddedCert{} -> Just Public
+    PerasImmutableCertDB.QuarantinedCert{} -> Just Public
+    PerasImmutableCertDB.ClosedDB{} -> Just Public 
+  privacyFor _ _ = Nothing
+  detailsFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just DNormal
+    PerasImmutableCertDB.AddedCert{} -> Just DNormal
+    PerasImmutableCertDB.QuarantinedCert{} -> Just DNormal
+    PerasImmutableCertDB.ClosedDB{} -> Just DNormal
+  detailsFor _ _ = Nothing
+
+  documentFor (Namespace _ ["OpenedDB"]) = Just "Database opened"
+  documentFor (Namespace _ ["AddedCert"]) = Just "Certificate added"
+  documentFor (Namespace _ ["QuarantinedCert"]) = Just "Certificate quarantined"
+  documentFor (Namespace _ ["ClosedDB"]) = Just "Database closed"
+  documentFor _ = Nothing
+  allNamespaces =
+    [ Namespace [] ["OpenedDB"]
+    , Namespace [] ["AddedCert"]
+    , Namespace [] ["QuarantinedCert"]
+    , Namespace [] ["ClosedDB"]
+    ]
+
+instance LogFormatting (PerasImmutableCertDB.TraceEvent blk) where
+  forHuman (PerasImmutableCertDB.OpenedDB known missing) =
+    "Opened immutable cert database, known certificates: "
+      <> Text.pack (show known)
+      <> " , missing certificates: "
+      <> Text.pack (show missing)
+  forHuman (PerasImmutableCertDB.AddedCert roundNo result) =
+    "Added certificate to immutable DB "
+      <> Text.pack (show roundNo)
+      <> " with "
+      <> Text.pack (show result)
+  forHuman (PerasImmutableCertDB.QuarantinedCert roundNo reason) =
+    "Quaranteed failed certificate for round "
+      <> Text.pack (show roundNo)
+      <> " reason: "
+      <> Text.pack reason
+  forHuman (PerasImmutableCertDB.ClosedDB) =
+    "Closed immutable cert database"
+
+  forMachine _dtal (PerasImmutableCertDB.OpenedDB known missing) =
+    mconcat
+      [ "kind" .= String "OpenedDB"
+      , "knownCertCount" .= String (Text.pack $ show known)
+      , "missingCertCount" .= String (Text.pack $ show missing)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.AddedCert roundNo result) =
+    mconcat
+      [ "kind" .= String "AddedCert"
+      , "round" .= String (Text.pack $ show roundNo)
+      , "result" .= String (Text.pack $ show result)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.QuarantinedCert roundNo reason) =
+    mconcat
+      [ "kind" .= String "QuarantinedCert"
+      , "round" .= String (Text.pack $ show roundNo)
+      , "reason" .= String (Text.pack reason)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.ClosedDB) =
+    mconcat
+      [ "kind" .= String "ClosedDB"
+      ]
+  asMetrics (PerasImmutableCertDB.OpenedDB known missing) =
+    [ IntM ("perasImmutableCertDbCertsKnown") (fromIntegral known)
+    , IntM ("perasImmutableCertDbCertsMissing") (fromIntegral missing)
+    ]
+  asMetrics (PerasImmutableCertDB.AddedCert _ _) =
+    [ CounterM ("perasImmutableCertDbAddedCert") (Just 1)
+    ]
+  asMetrics (PerasImmutableCertDB.QuarantinedCert _ _) =
+    [ CounterM ("perasImmutableCertDbAddedQuarantinedCert") (Just 1)
+    ]
+  asMetrics _ = []
+
+{-
+ OpenedDB
+      -- | Number of known certificates
+      Int
+      -- | Number of missing certificates
+      Int
+  | -- | The result of attempting to add a certificate for the given round.
+    AddedCert PerasRoundNo AddPerasImmutableCertResult
+  | -- | A certificate file was found to be unreadable or corrupt and was moved
+    -- to quarantine. The 'String' describes the reason (see
+    -- 'displayCertFileError').
+    QuarantinedCert PerasRoundNo String
+  | -- | The database was closed.
+    ClosedDB
+-}

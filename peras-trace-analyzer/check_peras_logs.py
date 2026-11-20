@@ -349,7 +349,7 @@ def checks(run, test_list):
             WARN,
             detail,
         )
-    return out
+    return (out,run)
 
 
 def report(out):
@@ -358,6 +358,22 @@ def report(out):
         s = f"{colour[st]}{st:7}\033[0m" if sys.stdout.isatty() else f"{st:7}"
         print(f"[{s}] {name}\n          {detail}")
 
+def report_stats(run, here):
+    print ("Run statistics:")
+    entries = json.load(open(os.path.join(here, "topologies.json")))
+    print(f"  Total nodes: {len(run.nodes)}")
+    print(f"  Rounds with peras votes: {len(run.gen_rounds)}")
+    print(f"  Nodes:")
+    for e in entries:
+        node = e["node"]
+        stake = node.get("stake")
+
+        if stake is None:
+            text_stake = "None"
+        else:
+            text_stake = str(stake)
+
+        print(f"    {e.get("label")}: {node.get("role")} {text_stake}")
 
 def main():
     here = os.getcwd()
@@ -381,12 +397,13 @@ def main():
     if not a.no_cooldown:
         check_list.append(test_cooldown_and_recovery)
     while True:
-        out = checks(Run(a.results), check_list)
+        (out, run) = checks(Run(a.results), check_list)
         pend = [c for c in out if c[1] == PENDING]
         if not pend or time.time() >= deadline:
             break
         print(f"... {len(pend)} check(s) pending, retrying in {a.poll:.0f}s", file=sys.stderr)
         time.sleep(a.poll)
+    report_stats(run, a.results)
     report(out)
     if any(c[1] == FAIL for c in out):
         sys.exit(1)

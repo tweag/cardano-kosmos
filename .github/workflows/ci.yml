@@ -68,4 +68,5 @@ jobs:
           rm -rf dist-newstyle # temporary workaround for branch switching issues
           ./scripts/setup-testnet-env.sh devnet-env
           ./scripts/wait-until-peras.sh
+          sleep 36
           ./peras-trace-analyzer/check_peras_logs.py --no-cooldown --wait 60 --poll 10

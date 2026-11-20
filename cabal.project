@@ -45,6 +45,7 @@ package cardano-api
 -- when you are in the dev shell, you can change the path
 packages:
    -- intersectmbo
+  packages/cardano-config
 
   packages/cardano-node/cardano-node
   packages/cardano-node/cardano-node-capi

@@ -127,6 +127,9 @@ jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesi
 
 jq --argjson peras "$peras_genesis" '. * $peras' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
 
+# TODO make a configurable parameter
+jq ".perasBootstrapRound = 1" $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then

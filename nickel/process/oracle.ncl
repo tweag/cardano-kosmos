@@ -12,7 +12,4 @@ let oracle_path = "./scripts/oracle.sh" in
       echo "No oracle to run. You might want to consider adding one at %{oracle_path}."
     fi
   "%,
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
 }

@@ -59,6 +59,11 @@ testnet_config=$(echo '(import "nickel/mk-testnet-config.ncl") (import "'"$DEVEN
 
 trace_options=$(echo $testnet_config | jq -r '.trace_options')
 
+# cardano-tracer setup
+cardano_tracer_config=$(echo $testnet_config | jq -r '.cardano_tracer_config')
+echo $cardano_tracer_config > "$DEVENV_PATH/cardano-tracer-config.json"
+mkdir -p "$DEVENV_PATH/socket"
+
 read -r \
   nodes_arg \
   testnet_magic \
@@ -126,7 +131,7 @@ jq --argjson trace_options "$trace_options" \
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)
 
-  # save the list of ports for later
+# save the list of ports for later
 node1Port=$(cat "$DEVENV_PATH/node-data/node1/port")
 portsOfNodes=$(jq -r '['"$node1Port"'] + [.localRoots.[0].accessPoints[].port]' "$DEVENV_PATH/node-data/node1/topology.json")
 echo $portsOfNodes > "$DEVENV_PATH/nodes-ports.json"
@@ -143,6 +148,8 @@ testnetTopology=$(echo '((import "nickel/mk-node-topologies.ncl") "'"$ip"'" (imp
 for node_idx in $(seq 1 $num_of_nodes); do
   newTopology=$(echo $testnetTopology | jq '.node_topologies['"$((node_idx - 1))"']')
   echo $newTopology > "$DEVENV_PATH/node-data/node$node_idx/topology.json"
+  mkdir -p "$DEVENV_PATH/logs/node$node_idx"
+  mkdir -p "$DEVENV_PATH/socket/node$node_idx"
 done
 
 topologiesPath="$DEVENV_PATH/topologies.json"

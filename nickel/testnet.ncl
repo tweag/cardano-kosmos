@@ -18,7 +18,8 @@ in
   trace_options = {
     "" = {
       severity = 'Notice,
-      backends = [ '"Stdout HumanFormatColoured" ],
+      detail = 'DNormal,
+      backends = [ 'EKGBackend, 'Forwarder, '"Stdout HumanFormatColoured" ],
     },
     Peras = {
       severity = 'Debug,

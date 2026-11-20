@@ -2,9 +2,6 @@ let { ProcessConfig, .. } = import "../schemas/process-compose.ncl" in
 fun input =>
 {
   command = "victoria-logs -storageDataPath=%{input.directory}/victoria-logs-data",
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
   readiness_probe = {
     exec = {
       command = "curl -sf http://%{input.ip}:%{input.victoria.logs_port}/",

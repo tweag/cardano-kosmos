@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/IntersectMBO/cardano-config/v2/schemas/config.schema.json",
+  "Version": 2,
+  "Configuration": {
+    "Protocol": {
+      "ByronGenesisFile": "mainnet-byron-genesis.json",
+      "ByronGenesisHash": "5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb",
+      "RequiresNetworkMagic": "RequiresMagic",
+      "ShelleyGenesisFile": "injection-genesis/shelley-genesis.json",
+      "ShelleyGenesisHash": "e7f3c1e2beff18463f7340f0349b2c590184a17f21b8e32902b9ac67bab889e4",
+      "AlonzoGenesisFile": "mainnet-alonzo-genesis.json",
+      "AlonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+      "ConwayGenesisFile": "injection-genesis/conway-genesis.json",
+      "ConwayGenesisHash": "b34a74c7c093b7157136eac77d66bfb752a3671dc1b365d966b85f0700af437a"
+    }
+  }
+}

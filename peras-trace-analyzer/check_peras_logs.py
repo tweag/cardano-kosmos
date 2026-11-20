@@ -100,24 +100,25 @@ class Run:
         return F(3, 4) + margin
 
 
-# 1. keyless nodes skip voting
-def test_keyless_nodes_skip_voting(run, add_report):
+# 1. non-stake nodes skip voting
+def test_relays_nodes_skip_voting(run, add_report):
     test_name = "Node without a positive stake skips voting"
     N = run.nodes
-    keyless = run.keyless
-    if not keyless:
+    relays = run.relays
+
+    if not relays:
         add_report(test_name, PENDING, "no node without stake found")
     else:
-        bad = [n for n in keyless if N[n]["forged"]]
+        bad = [n for n in relays if N[n]["forged"]]
         add_report(test_name, FAIL if bad else PASS,
-            ", ".join(f"node{n}: {N[n]['nokey']} no-key lines, 0 votes forged" for n in keyless))
+            ", ".join(f"node{n}: {N[n]['nokey']} no-key lines, 0 votes forged" for n in relays))
 
 # 2. eligible SPOs vote
 def test_eligible_spos_vote(run, add_report):
     N = run.nodes
-    keyed = run.keyed
+    spos = run.spos
     problems, info = [], []
-    for n in keyed:
+    for n in spos:
         nd = N[n]
         vd = sorted(r for r, d in nd["dec"].items() if d == "Vote")
         fg = sorted(nd["forged"])
@@ -136,13 +137,13 @@ def test_eligible_spos_vote(run, add_report):
 # 3. not eligible -> no vote
 def test_not_eligible_skip_vote(run, add_report):
     N = run.nodes
-    keyed = run.keyed
-    nv = {n: N[n]["notvoter"] for n in keyed if N[n]["notvoter"]}
+    spos = run.spos
+    nv = {n: N[n]["notvoter"] for n in spos if N[n]["notvoter"]}
     bad = [n for n in nv if set(nv[n]) & set(N[n]["forged"])]
     if not nv:
-        add_report("keyed node skips voting when not eligible", PENDING, "no NotAVoter round seen")
+        add_report("spos node skips voting when not eligible", PENDING, "no NotAVoter round seen")
     else:
-        add_report("keyed node skips voting when not eligible", FAIL if bad else PASS,
+        add_report("spos node skips voting when not eligible", FAIL if bad else PASS,
             ", ".join(f"node{n}: {len(r)} rounds skipped" for n, r in nv.items()))
 
 # 4. non-persistent voters change
@@ -159,8 +160,8 @@ def test_non_persistent_voters_change(run, add_report):
 # 5. vote diffusion
 def test_vote_diffusion(run, add_report):
     N = run.nodes
-    keyed = run.keyed
-    seat_node = {s: n for n in keyed for (s, _) in N[n]["forged"].values()}
+    spos = run.spos
+    seat_node = {s: n for n in spos for (s, _) in N[n]["forged"].values()}
     sets = {n: set(nd["votes"]) for n, nd in N.items()}
     union = set().union(*sets.values())
     missing = {n: len(union - s) for n, s in sets.items() if union - s}
@@ -241,8 +242,8 @@ def test_cooldown_and_recovery(run, add_report):
     # 9/10. cooldown and recovery
     cd, rec = [], []
     N = run.nodes
-    keyed = run.keyed
-    for n in keyed:
+    spos = run.spos
+    for n in spos:
         d = N[n]["dec"]
         rounds = sorted(d)
         first_no = next((r for r in rounds if d[r] == "NoVote"
@@ -263,7 +264,7 @@ def test_cooldown_and_recovery(run, add_report):
         else:
             add_report("cooldown recovery", PASS, ", ".join(f"node{n}: r{a} -> r{b}" for n, a, b in rec))
 
-def checks(run, test_list):
+def checks(run, test_list, here):
     out = []
 
     def add_report(name, st, detail):
@@ -273,8 +274,30 @@ def checks(run, test_list):
     if not N:
         return [("logs found", FAIL, "no nodes under logs/")]
 
-    run.keyless = [n for n, nd in N.items() if nd["nokey"] and not nd["dec"]]
-    run.keyed = [n for n in N if n not in run.keyless]
+    entries = json.load(open(os.path.join(here, "topologies.json")))
+    spos = []
+    spo_ports = []
+    relays = []
+    relay_ports = []
+    for e in entries:
+        node = e["node"]
+        stake = node.get("stake")
+
+        if stake is None:
+            text_stake = "None"
+        else:
+            text_stake = str(stake)
+
+        if node.get("role") == "spo":
+            spos.append(node)
+            spo_ports.append(int(e.get("port")))
+        elif node.get("role") == "relay":
+            relays.append(node)
+            relay_ports.append(int(e.get("port")))
+
+    run.spos = [n for n, nd in N.items() if int(nd["port"]) in spo_ports]
+    run.relays = [n for n, nd in N.items() if int(nd["port"]) in relay_ports]
+
     run.gen_rounds = set()
     for n, nd in N.items():
         byr = collections.defaultdict(list)
@@ -360,10 +383,10 @@ def report(out):
 
 def report_stats(run, here):
     print ("Run statistics:")
-    entries = json.load(open(os.path.join(here, "topologies.json")))
     print(f"  Total nodes: {len(run.nodes)}")
     print(f"  Rounds with peras votes: {len(run.gen_rounds)}")
     print(f"  Nodes:")
+    entries = json.load(open(os.path.join(here, "topologies.json")))
     for e in entries:
         node = e["node"]
         stake = node.get("stake")
@@ -372,7 +395,6 @@ def report_stats(run, here):
             text_stake = "None"
         else:
             text_stake = str(stake)
-
         print(f"    {e.get("label")}: {node.get("role")} {text_stake}")
 
 def main():
@@ -384,7 +406,7 @@ def main():
     ap.add_argument("--no-cooldown", action="store_true", help="skip cooldown checks")
     a = ap.parse_args()
     deadline = time.time() + a.wait
-    check_list = [ test_keyless_nodes_skip_voting
+    check_list = [ test_relays_nodes_skip_voting
         , test_eligible_spos_vote
         , test_not_eligible_skip_vote
         , test_non_persistent_voters_change
@@ -397,7 +419,7 @@ def main():
     if not a.no_cooldown:
         check_list.append(test_cooldown_and_recovery)
     while True:
-        (out, run) = checks(Run(a.results), check_list)
+        (out, run) = checks(Run(a.results), check_list, a.results)
         pend = [c for c in out if c[1] == PENDING]
         if not pend or time.time() >= deadline:
             break

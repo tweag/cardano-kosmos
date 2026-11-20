@@ -218,6 +218,7 @@ cardanoConfigToPartialNodeConfiguration cfg =
                         (maybe V2InMemory fromCfgBackend
                                (strictMaybeToMaybe (Cfg.backendSelector ledgerDbCfg)))
                         noDeprecatedOptions))
+      , pncPerasEnabled = Last (Just (runIdentity (Cfg.perasEnabled perasCfg)))
       }
   where
     protoCfg = Cfg.protocolConfiguration cfg
@@ -225,6 +226,7 @@ cardanoConfigToPartialNodeConfiguration cfg =
     mempCfg = Cfg.mempoolConfiguration cfg
     storeCfg = Cfg.storageConfiguration cfg
     lcc = Cfg.localConnectionsConfig cfg
+    perasCfg = Cfg.perasConfiguration cfg
     ledgerDbCfg = runIdentity (Cfg.ledgerDbConfiguration storeCfg)
     consensusModeVal = runIdentity (Cfg.getConsensusConfiguration (Cfg.consensusConfiguration cfg))
 

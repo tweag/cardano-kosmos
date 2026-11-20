@@ -7,7 +7,9 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 
 module Ouroboros.Consensus.Storage.ChainDB.API
   ( -- * Main ChainDB API
@@ -29,8 +31,6 @@ module Ouroboros.Consensus.Storage.ChainDB.API
   , AddPerasVoteResult (..)
   , addPerasCertSync
   , addPerasVoteSync
-  , WithBoostedBlockStatus (..)
-  , forgetBoostedBlockStatus
 
     -- * Peras stateful handles
   , PerasVotingViewError (..)
@@ -93,6 +93,7 @@ module Ouroboros.Consensus.Storage.ChainDB.API
 import Control.Monad (void)
 import Control.ResourceRegistry
 import Data.Map (Map)
+import Data.Maybe.Strict (StrictMaybe)
 import Data.Set (Set)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
@@ -105,6 +106,11 @@ import Ouroboros.Consensus.HeaderStateHistory
 import Ouroboros.Consensus.HeaderValidation (HeaderWithTime (..))
 import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Extended
+import Ouroboros.Consensus.Leios.Protocol
+  ( LeiosLedgerView
+  , LeiosProtocol
+  , trivialLeiosLedgerView
+  )
 import Ouroboros.Consensus.Peras.Cert.Inclusion
   ( PerasCertInclusionRulesDecision
   , PerasCertInclusionView
@@ -118,6 +124,7 @@ import Ouroboros.Consensus.Peras.Context
 import Ouroboros.Consensus.Peras.Voting.Rules (PerasVotingRulesDecision, isPerasVotingAllowed)
 import Ouroboros.Consensus.Peras.Voting.View (PerasQryException, PerasVotingView)
 import Ouroboros.Consensus.Peras.Weight (PerasWeightSnapshot)
+import Ouroboros.Consensus.Protocol.Abstract (LedgerView)
 import Ouroboros.Consensus.Storage.ChainDB.API.Types.InvalidBlockPunishment
 import Ouroboros.Consensus.Storage.Common
 import Ouroboros.Consensus.Storage.ImmutableDB.API (SeekBlockError (..))
@@ -128,9 +135,6 @@ import Ouroboros.Consensus.Storage.LedgerDB
   )
 import Ouroboros.Consensus.Storage.PerasCertDB.API
   ( AddPerasCertResult (..)
-  , PerasCertTicketNo
-  , WithBoostedBlockStatus (..)
-  , forgetBoostedBlockStatus
   )
 import Ouroboros.Consensus.Storage.PerasVoteDB.API
   ( AddPerasVoteResult (..)
@@ -178,8 +182,18 @@ import System.FS.API.Types (FsError)
 -- The ChainDB instantiates all the various type parameters of these databases
 -- to conform to the unified interface we provide here.
 data ChainDB m blk = ChainDB
-  { addBlockAsync :: InvalidBlockPunishment m -> blk -> m (AddBlockPromise m blk)
+  { addBlockAsync ::
+      InvalidBlockPunishment m ->
+      WithOrigin SlotNo ->
+      StrictMaybe LeiosLedgerView ->
+      blk ->
+      m (AddBlockPromise m blk)
   -- ^ Add a block to the heap of blocks
+  --
+  -- The caller also supplies the slot of the block's predecessor and the Leios
+  -- part of the ledger view at the block's slot, as validating the block's
+  -- header revealed them, so that the block's Leios certificate can be checked
+  -- as soon as the block arrives.
   --
   -- We do /not/ assume that the block is valid (under the legder rules);
   -- it is the responsibility of the Chain DB itself to only select chains
@@ -456,7 +470,7 @@ data ChainDB m blk = ChainDB
   -- ^ Get the 'PerasWeightSnapshot', representing the Peras weight boosts for
   -- all blocks newer than the current immutable tip.
   , getLatestPerasCertSeen ::
-      STM m (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+      STM m (Maybe (WithArrivalTime (ValidatedPerasCert blk)))
   -- ^ Get the latest Peras certificate that has been seen by this node.
   , getLatestPerasCertOnChainRound :: STM m (Maybe PerasRoundNo)
   -- ^ Get the round number of the latest Peras certificate on the currently
@@ -468,8 +482,8 @@ data ChainDB m blk = ChainDB
   -- ^ Asynchronously insert a certificate to the DB. If this leads to a fork to
   -- be weightier than our current selection, this will trigger a fork switch.
   , getPerasCertsAfter ::
-      PerasCertTicketNo ->
-      STM m (Map PerasCertTicketNo (m (WithArrivalTime (ValidatedPerasCert blk))))
+      PerasRoundNo ->
+      STM m (Map PerasRoundNo (m (WithArrivalTime (ValidatedPerasCert blk))))
   -- ^ Get all known Peras certs with a ticket number strictly greater than the
   -- given one, in ascending order. The values are 'm' actions to allow
   -- implementations with on-disk storage.
@@ -594,9 +608,16 @@ data AddBlockResult blk
 
 -- | Add a block synchronously: wait until the block has been written to disk
 -- (see 'blockWrittenToDisk').
-addBlockWaitWrittenToDisk :: IOLike m => ChainDB m blk -> InvalidBlockPunishment m -> blk -> m Bool
-addBlockWaitWrittenToDisk chainDB punish blk = do
-  promise <- addBlockAsync chainDB punish blk
+addBlockWaitWrittenToDisk ::
+  IOLike m =>
+  ChainDB m blk ->
+  InvalidBlockPunishment m ->
+  WithOrigin SlotNo ->
+  StrictMaybe LeiosLedgerView ->
+  blk ->
+  m Bool
+addBlockWaitWrittenToDisk chainDB punish predecessorSlot leiosView blk = do
+  promise <- addBlockAsync chainDB punish predecessorSlot leiosView blk
   atomically $ blockWrittenToDisk promise
 
 -- | Add a block synchronously: wait until the block has been processed (see
@@ -606,17 +627,32 @@ addBlockWaitWrittenToDisk chainDB punish blk = do
 -- Note: this is a partial function, only to support tests.
 --
 -- PRECONDITION: the block to be added must not be from the future. See 'addBlockAsync'.
-addBlock :: IOLike m => ChainDB m blk -> InvalidBlockPunishment m -> blk -> m (AddBlockResult blk)
-addBlock chainDB punish blk = do
-  promise <- addBlockAsync chainDB punish blk
+addBlock ::
+  IOLike m =>
+  ChainDB m blk ->
+  InvalidBlockPunishment m ->
+  WithOrigin SlotNo ->
+  StrictMaybe LeiosLedgerView ->
+  blk ->
+  m (AddBlockResult blk)
+addBlock chainDB punish predecessorSlot leiosView blk = do
+  promise <- addBlockAsync chainDB punish predecessorSlot leiosView blk
   atomically $ blockProcessed promise
 
 -- | Add a block synchronously. Variant of 'addBlock' that doesn't return the
 -- new tip of the ChainDB.
 --
 -- Note: this is a partial function, only to support tests.
-addBlock_ :: IOLike m => ChainDB m blk -> InvalidBlockPunishment m -> blk -> m ()
-addBlock_ = void ..: addBlock
+addBlock_ ::
+  IOLike m =>
+  ChainDB m blk ->
+  InvalidBlockPunishment m ->
+  WithOrigin SlotNo ->
+  StrictMaybe LeiosLedgerView ->
+  blk ->
+  m ()
+addBlock_ chainDB punish predecessorSlot leiosView =
+  void . addBlock chainDB punish predecessorSlot leiosView
 
 -- | Alias for naming consistency.
 -- The short name was chosen to avoid a larger diff from alignment changes.
@@ -645,8 +681,9 @@ triggerChainSelection chainDB =
 
 -- | The outcome of processing a Peras certificate w.r.t. chain selection.
 data AddPerasCertChainSelOutcome
-  = -- | The certificate was too old to influence chain selection (the boosted
-    -- block is already immutable), so it was ignored entirely.
+  = -- | The certificate target cannot occur on any selectable chain: it is
+    -- before the immutable tip, or is another point at the immutable tip's
+    -- slot. The certificate was therefore ignored entirely.
     PerasCertIgnoredTooOld
   | -- | The certificate was not processed because the ChainDB was closing.
     PerasCertNotProcessedClosing
@@ -810,14 +847,28 @@ toChain chainDB = withRegistry $ \registry ->
 
 fromChain ::
   forall m blk.
-  IOLike m =>
+  ( IOLike m
+  , HasHeader blk
+  , LeiosProtocol (BlockProtocol blk)
+  , LedgerView (BlockProtocol blk) ~ ()
+  ) =>
   m (ChainDB m blk) ->
   Chain blk ->
   m (ChainDB m blk)
 fromChain openDB chain = do
   chainDB <- openDB
-  mapM_ (addBlock_ chainDB noPunishment) $ Chain.toOldestFirst chain
+  -- Adding the chain oldest first, so each block's predecessor is the one
+  -- added just before it.
+  sequence_ $
+    zipWith
+      (\predecessorSlot -> addBlock_ chainDB noPunishment predecessorSlot leiosView)
+      (Origin : map (NotOrigin . blockSlot) blks)
+      blks
   return chainDB
+ where
+  blks = Chain.toOldestFirst chain
+
+  leiosView = trivialLeiosLedgerView (Proxy @blk)
 
 {-------------------------------------------------------------------------------
   Iterator API

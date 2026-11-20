@@ -51,7 +51,6 @@ module Cardano.Ledger.Core (
   EraPParams (..),
   mkCoinTxOut,
   wireSizeTxF,
-  binaryUpgradeTx,
   binaryUpgradeTxBody,
   binaryUpgradeTxWits,
   binaryUpgradeTxAuxData,
@@ -60,7 +59,8 @@ module Cardano.Ledger.Core (
 
   -- * Era
   module Cardano.Ledger.Core.Era,
-  -- $erablockbody
+
+  -- * EraBlockBody
   EraBlockBody (..),
 
   -- * Re-exports
@@ -154,9 +154,6 @@ class
   , HasEraTxLevel Tx era
   , Monoid (StAnnTxCache era)
   , forall l. Typeable l => NoThunks (Tx l era)
-  , forall l. Typeable l => DecCBOR (Annotator (Tx l era))
-  , forall l. Typeable l => ToCBOR (Tx l era)
-  , forall l. EncCBOR (Tx l era)
   , forall l. NFData (Tx l era)
   , forall l. Show (Tx l era)
   , forall l. Eq (Tx l era)
@@ -623,45 +620,35 @@ hashScript =
 -- EraBlockBody
 --------------------------------------------------------------------------------
 
--- $erablockbody
--- * EraBlockBody
---
--- The idea of EraBlockBody is to alter the encoding of transactions in
--- a block such that the witnesses (the information needed to verify the
--- validity of the transactions) can be stored separately from the body (the
--- information needed to update the ledger state). In this way, a node which
--- only cares about replaying transactions need not even decode the witness
--- information.
---
--- In order to do this, we introduce two concepts:
--- - A 'BlockBody`, which represents the decoded structure of a sequence of
---   transactions as represented in the encoded block; that is, with witnessing,
---   metadata and other non-body parts split separately.
-
--- | Indicates that an era supports segregated witnessing.
---
---   This class embodies an isomorphism between 'BlockBody era' and 'StrictSeq
---   (Tx l era)', witnessed by the `txSeqBlockBodyL` lens.
+-- | Provides era-independent access to the contents of a block body: everything
+-- the rest of the ledger and consensus need from it without knowing which era
+-- it belongs to.
 class
   ( EraTx era
   , Eq (BlockBody era)
   , Show (BlockBody era)
   , Typeable (BlockBody era)
   , DecCBOR (Annotator (BlockBody era))
+  , Monoid (BlockBodyLimits era)
   ) =>
   EraBlockBody era
   where
   type BlockBody era = (r :: Type) | r -> era
 
+  type BlockBodyLimits era = (r :: Type) | r -> era
+
   type ProtocolEraBlockHeader h era :: Constraint
 
   mkBasicBlockBody :: BlockBody era
 
+  -- | Access the sequence of top level transactions in the block body.
   txSeqBlockBodyL :: Lens' (BlockBody era) (StrictSeq (Tx TopTx era))
 
-  -- | Get the block body hash from the BlockBody. Note that this is not a regular
-  -- "hash the stored bytes" function since the block body hash forms a small
-  -- Merkle tree.
+  -- | The hash of the block body that the block header commits to.
+  --
+  -- It is not in general the hash of the block body's encoding, so it must
+  -- always be obtained through this function rather than computed from the
+  -- bytes.
   hashBlockBody :: BlockBody era -> Hash.Hash HASH EraIndependentBlockBody
 
   blockBodySize :: ProtVer -> BlockBody era -> Int
@@ -674,8 +661,12 @@ txIdTx tx = txIdTxBody (tx ^. bodyTxL)
 txIdTxBody :: EraTxBody era => TxBody l era -> TxId
 txIdTxBody = TxId . hashAnnotated
 
--- | txsize computes the length of the serialised bytes (actual size)
-wireSizeTxF :: forall era l. EraTx era => SimpleGetter (Tx l era) Word32
+-- | Size of a transaction in its chosen wire representation. Use `MempoolTx` for the
+-- mempool format and `Tx` for the block format where its codec is available.
+wireSizeTxF ::
+  forall era tx.
+  (Era era, EncCBOR (tx era)) =>
+  SimpleGetter (tx era) Word32
 wireSizeTxF =
   to $
     checkedFromIntegral
@@ -688,14 +679,6 @@ wireSizeTxF =
         then fromIntegral n
         else error $ "Impossible: Size of the transaction is too big: " ++ show n
 {-# INLINEABLE wireSizeTxF #-}
-
--- | Translate a transaction through its binary representation from previous to current era.
-binaryUpgradeTx ::
-  forall era l.
-  (Era era, ToCBOR (Tx l (PreviousEra era)), DecCBOR (Annotator (Tx l era))) =>
-  Tx l (PreviousEra era) ->
-  Except DecoderError (Tx l era)
-binaryUpgradeTx = translateViaCBORAnnotator (eraProtVerLow @era) (withEraName @era "Tx")
 
 -- | Translate a tx body through its binary representation from previous to current era.
 binaryUpgradeTxBody ::

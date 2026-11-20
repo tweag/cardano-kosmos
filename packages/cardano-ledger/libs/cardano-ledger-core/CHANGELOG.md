@@ -1,8 +1,20 @@
 # Version history for `cardano-ledger-core`
 
-## 1.23.0.0
+## 1.24.0.0
 
+* Add `ebReferencesAnnouncementHashL` and `ebReferencesAnnouncementSizeL` to `Cardano.Ledger.Block`
+* Add `ebAnnouncementL`, `ebAnnouncementSlotNoL`, `ebAnnouncedInBlockHeaderL` and `ebIsAppliedL` to `Cardano.Ledger.State`
+* Change the `Tx t era` argument of `getScriptsProvided` to `Tx TopTx era`
+* Add `calcMinFeeStAnnTx` to `EraUTxO`
+* Add a `PState` argument to `calcMinFeeTx` and `calcMinFeeTxNativeScriptWits`
+* Add `Cardano.Ledger.MempoolTx` with the abstract `MempoolTx` wrapper and `unwrapMempoolTx`
+* Add `Cardano.Ledger.MempoolTx.Internal` with the `UnsafeMkMempoolTx` constructor
+* Generalize `wireSizeTxF` to accept an era-indexed transaction representation
+* Replace `binaryUpgradeTx` with new function `binaryUpgradeMempoolTx`
+* Remove the `EncCBOR`, `ToCBOR` and annotator `DecCBOR` superclass requirements for `Tx l era` from `EraTx`
+* Add `BlockBodyLimits` type to `EraBlockBody` typeclass
 * Re-export `Cardano.Ledger.Plutus.ToPlutusData` module from `Cardano.Ledger.Plutus`
+* Add `sppIdL`, `sppAccountAddressL`, `sppBlsKeyL`, `sppPledgeL`, `sppMarginL`, `sppOwnersL` and `sppRelaysL` to `Cardano.Ledger.State.StakePool`
 * Add `blockBodyContainsLeiosCertBlockHeaderL` to `LeiosEraBlockHeader`
 * Add `EbAnnouncement` to `Cardano.Ledger.State`
 * Add `blockHeaderHashBlockHeaderG` to `EraBlockHeader`
@@ -32,12 +44,32 @@
 
 ### `testlib`
 
+* Replace the `Arbitrary (Tx TopTx era)` and `DecCBOR (Tx TopTx era)` constraints on `roundTripCoreEraTypesSpec` with `Arbitrary (MempoolTx era)`, `EncCBOR (MempoolTx era)`, `DecCBOR (MempoolTx era)` and `DecCBOR (Annotator (MempoolTx era))`
+* Replace the `Arbitrary (Tx TopTx era)` constraint on `decoderEquivalenceCoreEraTypesSpec` with `Arbitrary (MempoolTx era)`, `EncCBOR (MempoolTx era)` and `DecCBOR (Annotator (MempoolTx era))`
+* Replace the `DecCBOR (Tx TopTx era)` superclass of `EraTest` with `EncCBOR (MempoolTx era)`, `DecCBOR (MempoolTx era)` and `DecCBOR (Annotator (MempoolTx era))`, and add an `Arbitrary (MempoolTx era)` superclass
+* Add `Arbitrary` and `ToExpr` instances for `MempoolTx era`
+* Add `Eq` and `Show` instances for `TestBlockHeader`
 * Add `sameAsToBuiltinDataSpec`
 * Add `tbhBlockBodyContainsLeiosCert` to `TestBlockHeader`
 * Add `tbhHash` field to `TestBlockHeader`
 * Add `Arbitrary` instances for `EbAnnouncement` and `EbReferencesAnnouncement` (moved from `cardano-protocol:testlib`)
 * Add `ToExpr` instance for `EbAnnouncement`
 * Add `Arbitrary` and `ToExpr` instances for `BlsVerKeyHash`
+
+## 1.23.0.0
+
+* Remove `pdoLanguage` as no longer an option that can be overriden.
+* Replace `pwcCostModel` with `pwcLanguageCostModel` in `PlutusWithContext`
+* Change type signature of `getCostModelEvaluationContext`
+* Add:
+  - `LanguageCostModel`
+  - `LanguageCostModelError`
+  - `toLanguageCostModel`
+  - `encodeLanguageCostModel`
+  - `decodeLanguageCostModel`
+  - `languageCostModelParams`
+  - `languageCostModelEvaluationContext`
+* Remove `getEvaluationContext` as duplicate of `getCostModelEvaluationContext`
 
 ## 1.22.0.0
 

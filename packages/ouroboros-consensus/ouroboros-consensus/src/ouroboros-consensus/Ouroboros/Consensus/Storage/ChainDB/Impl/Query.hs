@@ -65,7 +65,6 @@ import Ouroboros.Consensus.HeaderStateHistory
   )
 import Ouroboros.Consensus.HeaderValidation (HeaderWithTime)
 import Ouroboros.Consensus.Ledger.Abstract (EmptyMK)
-import Ouroboros.Consensus.Ledger.Basics (LedgerConfig)
 import Ouroboros.Consensus.Ledger.Extended
 import Ouroboros.Consensus.Ledger.Peras (PerasState (..))
 import Ouroboros.Consensus.Ledger.SupportsProtocol (LedgerSupportsProtocol)
@@ -80,7 +79,6 @@ import Ouroboros.Consensus.Peras.Context
   )
 import Ouroboros.Consensus.Peras.Voting.View
   ( PerasVotingView
-  , WithBoostedBlockStatus
   , mkPerasVotingView
   , perasChainAtCandidateBlock
   , runPerasQry
@@ -101,10 +99,6 @@ import Ouroboros.Consensus.Storage.ImmutableDB (ImmutableDB)
 import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
-import Ouroboros.Consensus.Storage.PerasCertDB.API
-  ( PerasCertTicketNo
-  , forgetBoostedBlockStatus
-  )
 import Ouroboros.Consensus.Storage.PerasVoteDB.API
   ( PerasVoteTicketNo
   )
@@ -373,13 +367,13 @@ getPerasWeightSnapshot CDB{..} = PerasCertDB.getWeightSnapshot cdbPerasCertDB
 
 getLatestPerasCertSeen ::
   ChainDbEnv m blk ->
-  STM m (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+  STM m (Maybe (WithArrivalTime (ValidatedPerasCert blk)))
 getLatestPerasCertSeen CDB{..} = PerasCertDB.getLatestCertSeen cdbPerasCertDB
 
 getPerasCertsAfter ::
   ChainDbEnv m blk ->
-  PerasCertTicketNo ->
-  STM m (Map PerasCertTicketNo (m (WithArrivalTime (ValidatedPerasCert blk))))
+  PerasRoundNo ->
+  STM m (Map PerasRoundNo (m (WithArrivalTime (ValidatedPerasCert blk))))
 getPerasCertsAfter CDB{..} = PerasCertDB.getCertsAfter cdbPerasCertDB
 
 getPerasCertIds ::
@@ -437,9 +431,10 @@ getPerasVotingView roundNo env = case cdbPerasEpochContextResolverHandle env of
             <$> getCurrentLedger env
         let params = pecParams epochContext
         let blockMinSlots = perasBlockMinSlots params
+        let blockMaxSlots = perasBlockMaxSlots params
         case ( runPerasQry summary $
                  mkPerasVotingView params roundNo latestCertSeen latestCertOnChainRoundNo
-                   =<< perasChainAtCandidateBlock blockMinSlots roundNo currentChain
+                   =<< perasChainAtCandidateBlock blockMinSlots blockMaxSlots roundNo currentChain
              ) of
           Left err ->
             pure $ Left $ PerasVotingViewQryException err
@@ -478,17 +473,17 @@ getPerasCertInclusionView roundNo env =
                   mkPerasCertInclusionView
                     (pecParams epochContext)
                     roundNo
-                    (forgetBoostedBlockStatus latestCertSeen)
+                    latestCertSeen
                     latestCertOnChainRoundNo
                     certsInChainDB
 
 getTimeResolutionContext ::
   MonadSTM m =>
-  LedgerConfig blk ->
   ChainDbEnv m blk ->
   STM m (TimeResolutionContext blk)
-getTimeResolutionContext ledgerConfig =
-  fmap (TimeResolutionContext ledgerConfig . ledgerState) . getCurrentLedger
+getTimeResolutionContext env =
+  TimeResolutionContext (configLedger (cdbTopLevelConfig env)) . ledgerState
+    <$> getCurrentLedger env
 
 -- | Wait until the slot of the given point is smaller or equal than the immutable tip slot,
 --   and then return:

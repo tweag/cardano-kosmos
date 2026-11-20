@@ -29,6 +29,7 @@ import Cardano.Ledger.Alonzo.TxWits
 import Cardano.Ledger.Binary
 import Cardano.Ledger.Block (Block (..))
 import Cardano.Ledger.Core
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (..))
 import Cardano.Ledger.Plutus
 import Cardano.Ledger.Shelley.BlockBody (auxDataSeqDecoder)
 import qualified Codec.Serialise as Cborg
@@ -281,6 +282,22 @@ instance AlonzoEraScript era => DecCBOR (RedeemersRaw era) where
     where
       decodeMapRedeemers :: Decoder s (RedeemersRaw era)
       decodeMapRedeemers =
+        ifDecoderVersionAtLeast
+          (natVersion @12)
+          decodeMapRedeemersNoDuplicates
+          decodeMapRedeemersLastWins
+      {-# INLINE decodeMapRedeemers #-}
+      -- Starting with protocol version 12 a duplicate key is a decoding failure
+      decodeMapRedeemersNoDuplicates :: Decoder s (RedeemersRaw era)
+      decodeMapRedeemersNoDuplicates = do
+        redeemers <- decodeMapLikeEnforceNoDuplicates decodeMapLenOrIndef $ (,) <$> decCBOR <*> decCBOR
+        if Map.null redeemers
+          then fail "Expected redeemers map to be non-empty"
+          else pure $ RedeemersRaw redeemers
+      {-# INLINE decodeMapRedeemersNoDuplicates #-}
+      -- Before protocol version 12 a duplicate key overwrites the earlier entry
+      decodeMapRedeemersLastWins :: Decoder s (RedeemersRaw era)
+      decodeMapRedeemersLastWins =
         RedeemersRaw . Map.fromList . NE.toList <$> do
           (_, xs) <- decodeListLikeWithCount decodeMapLenOrIndef (:) $ \_ -> do
             ptr <- decCBOR
@@ -289,7 +306,7 @@ instance AlonzoEraScript era => DecCBOR (RedeemersRaw era) where
           case NE.nonEmpty xs of
             Nothing -> fail "Expected redeemers map to be non-empty"
             Just neList -> pure $ NE.reverse neList
-      {-# INLINE decodeMapRedeemers #-}
+      {-# INLINE decodeMapRedeemersLastWins #-}
       decodeListRedeemers :: Decoder s (RedeemersRaw era)
       decodeListRedeemers =
         RedeemersRaw . Map.fromList . NE.toList
@@ -364,7 +381,8 @@ instance Era era => DecCBOR (TxDatsRaw era) where
 
 deriving newtype instance Era era => DecCBOR (TxDats era)
 
-deriving newtype instance DecCBOR (Tx TopTx AlonzoEra)
+instance DecCBOR (MempoolTx AlonzoEra) where
+  decCBOR = UnsafeMkMempoolTx . MkAlonzoTx <$> decCBOR
 
 instance DecCBOR h => DecCBOR (Block h AlonzoEra) where
   decCBOR =

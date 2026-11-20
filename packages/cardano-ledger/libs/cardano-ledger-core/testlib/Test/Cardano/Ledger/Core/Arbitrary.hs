@@ -46,7 +46,6 @@ import Cardano.Crypto.DSIGN (
   deriveVerKeyDSIGN,
   seedSizeDSIGN,
  )
-import Cardano.Crypto.DSIGN.BLS12381.Internal (minSigPoPDST)
 import Cardano.Crypto.Hash.Class
 import Cardano.Ledger.Address
 import Cardano.Ledger.BaseTypes (
@@ -296,7 +295,7 @@ instance Arbitrary EbReferencesAnnouncement where
   arbitrary = EbReferencesAnnouncement <$> arbitrary <*> arbitrary
 
 instance Arbitrary EbAnnouncement where
-  arbitrary = EbAnnouncement <$> arbitrary <*> arbitrary <*> arbitrary
+  arbitrary = EbAnnouncement <$> arbitrary <*> arbitrary <*> arbitrary <*> arbitrary
 
 -- | Generate a 'ProtVer' whose major version falls within the era's accepted range.
 genEraProtVer :: forall era. Era era => Gen ProtVer
@@ -526,10 +525,7 @@ instance Arbitrary BlsKey where
     pure $
       BlsKey
         (deriveVerKeyDSIGN signingKey)
-        ( createPossessionProofDSIGN
-            minSigPoPDST
-            signingKey
-        )
+        (createPossessionProofDSIGN signingKey)
 
 instance Arbitrary BlsKeyState where
   arbitrary = BlsKeyState <$> arbitrary <*> arbitrary
@@ -543,7 +539,7 @@ genBlsPossessionProof :: Gen (PossessionProofDSIGN BLS12381MinSigDSIGN)
 genBlsPossessionProof = do
   seed <- arbitrarySeedOfSize (seedSizeDSIGN (Proxy @BLS12381MinSigDSIGN))
   let sk = genKeyDSIGNWithContext @BLS12381MinSigDSIGN Nothing seed
-  pure $ createPossessionProofDSIGN minSigPoPDST sk
+  pure $ createPossessionProofDSIGN sk
 
 instance Arbitrary StakePoolRelay where
   arbitrary = genericArbitraryU

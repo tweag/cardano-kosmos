@@ -10,6 +10,7 @@ module Ouroboros.Consensus.Peras.Voting.V1
 
     -- * For testing purposes
   , extractPerasStakeDistrAndPublicKeys
+  , ledgerKeyScope
   ) where
 
 import Cardano.Ledger.BaseTypes (Nonce)
@@ -20,23 +21,25 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe.Strict (StrictMaybe (..))
 import GHC.Base (Any)
 import Ouroboros.Consensus.Block.SupportsPeras (PerasCrypto)
-import Ouroboros.Consensus.Committee.Class (CryptoSupportsVotingCommittee (..))
-import qualified Ouroboros.Consensus.Committee.Crypto.BLS as BLS
-import Ouroboros.Consensus.Committee.Types
+import Cardano.Crypto.Peras.Committee.Class (CryptoSupportsVotingCommittee (..))
+import qualified Cardano.Crypto.Peras.Committee.Crypto.BLS as BLS
+import Cardano.Crypto.Peras.Committee.Types
   ( LedgerStake (..)
-  , PoolId (..)
+  , PoolId
   , TargetCommitteeSize
   )
-import Ouroboros.Consensus.Committee.WFA
+import Cardano.Crypto.Peras.Committee.WFA
   ( mkExtWFAStakeDistr
   , wFATiebreakerWithEpochNonce
   )
-import Ouroboros.Consensus.Committee.WFALS (VotingCommitteeInput (..), WFALS)
-import Ouroboros.Consensus.Peras.Crypto.BLS (PerasBLSCrypto, PerasPublicKey (..))
-import Ouroboros.Consensus.Peras.Crypto.BLS.Unsafe
-  ( unsafeExtendPerasStakeDistrWithPublicKeysFromEnv
-  )
+import Cardano.Crypto.Peras.Committee.WFALS (VotingCommitteeInput (..), WFALS)
+import Cardano.Crypto.Peras.Crypto.BLS (PerasBLSCrypto, PerasPublicKey (..))
 import qualified Ouroboros.Consensus.Peras.Error.V1 as V1
+import Ouroboros.Consensus.Peras.LedgerConversions
+  ( toCommitteeBlsKey
+  , toCommitteeNonce
+  , toCommitteePoolId
+  )
 
 type PerasVotingCommitteeScheme = WFALS
 
@@ -48,7 +51,7 @@ extractPerasStakeDistrAndPublicKeys ::
   PoolDistr ->
   Map PoolId (LedgerStake, PerasPublicKey)
 extractPerasStakeDistrAndPublicKeys =
-  Map.mapKeysMonotonic PoolId
+  Map.mapKeysMonotonic toCommitteePoolId
     . Map.mapMaybe extractEntry
     . unPoolDistr
  where
@@ -64,7 +67,7 @@ extractPerasStakeDistrAndPublicKeys =
           , PerasPublicKey
               . BLS.coercePublicKey @Any
               . BLS.publicKeyFromLedgerBlsKey ledgerKeyScope
-              $ blsKey
+              $ toCommitteeBlsKey blsKey
           )
 
 mkPerasVotingCommitteeInput ::
@@ -75,17 +78,13 @@ mkPerasVotingCommitteeInput ::
   TargetCommitteeSize ->
   Either (V1.PerasError blk) (VotingCommitteeInput (PerasCrypto blk) WFALS)
 mkPerasVotingCommitteeInput poolDistr epochNonce targetCommitteeSize = do
-  -- TODO: replace the following hack with proper on-chain key registration.
-  stakeDistrWithPublicKeys <-
-    bimap V1.PerasTemporaryPublicKeyHackError id $
-      unsafeExtendPerasStakeDistrWithPublicKeysFromEnv poolDistr
   extWFAStakeDistr <-
     bimap V1.PerasVotingWFAError id $
       mkExtWFAStakeDistr
-        (wFATiebreakerWithEpochNonce epochNonce)
-        stakeDistrWithPublicKeys
+        (wFATiebreakerWithEpochNonce (toCommitteeNonce epochNonce))
+        (extractPerasStakeDistrAndPublicKeys poolDistr)
   pure $
     WFALSVotingCommitteeInput
-      epochNonce
+      (toCommitteeNonce epochNonce)
       targetCommitteeSize
       extWFAStakeDistr

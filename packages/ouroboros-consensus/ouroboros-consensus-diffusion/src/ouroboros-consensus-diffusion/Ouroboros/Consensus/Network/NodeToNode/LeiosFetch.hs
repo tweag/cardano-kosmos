@@ -16,13 +16,15 @@ import Cardano.Network.NodeToNode (addSafetyMargin)
 import Cardano.Network.PeerSelection (PeerTrustable)
 import Control.Tracer (Tracer, traceWith)
 import qualified Data.ByteString as BS
-import qualified Data.IntSet as IntSet
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Vector.Strict as V
 import Ouroboros.Consensus.Leios.Types
   ( EndorserBlock
   , LeiosPoint (..)
   , LeiosTx (..)
-  , mkEndorserBlock
+  , Serialised (..)
   )
 import Ouroboros.Consensus.MiniProtocol.LeiosFetch.Client
   ( LeiosFetchClientPeer
@@ -62,7 +64,7 @@ import Ouroboros.Network.Mux
 leiosFetchClient ::
   MonadSTM m =>
   ControlMessageSTM m ->
-  LeiosFetchClientPeer LeiosPoint EndorserBlock LeiosTx m ()
+  LeiosFetchClientPeer LeiosPoint (Serialised EndorserBlock) LeiosTx m ()
 leiosFetchClient controlMessageSTM =
   leiosFetchClientPeerIdle $
     controlMessageSTM >>= \case
@@ -76,7 +78,7 @@ leiosFetchServer ::
   MonadCatch m =>
   Tracer m TraceLeiosFetchServerEvent ->
   LeiosDbReader m ->
-  LeiosFetchServerPeer LeiosPoint EndorserBlock LeiosTx m ()
+  LeiosFetchServerPeer LeiosPoint (Serialised EndorserBlock) LeiosTx m ()
 leiosFetchServer tracer reader =
   leiosFetchServerPeer $ MkLeiosFetchRequestHandler $ \case
     MsgLeiosBlockRequest point ->
@@ -95,18 +97,17 @@ serveEb ::
   Tracer m TraceLeiosFetchServerEvent ->
   LeiosDbReader m ->
   LeiosPoint ->
-  m EndorserBlock
+  m (Serialised EndorserBlock)
 serveEb tracer reader point = do
   -- TODO Disconnect a client that requests what the node never offered it.
   traceWith tracer $ TraceLeiosFetchServerBlockRequested point
-  -- The one body's tx references, in order. A stored body is never empty, so
-  -- no references means the node does not hold the body.
-  lookupEbBody reader (pointEbHash point) >>= \case
-    [] -> throwIO $ ExnLeiosUnknownBlockRequested point
-    refs -> do
-      let n = length refs
-      traceWith tracer $ TraceLeiosFetchServerBlockServed point n
-      pure $ mkEndorserBlock refs
+  lookupEbBody reader point >>= \case
+    Nothing -> throwIO $ ExnLeiosUnknownBlockRequested point
+    -- The bytes as they arrived, sent without decoding them.
+    Just eb -> do
+      traceWith tracer $
+        TraceLeiosFetchServerBlockServed point (fromIntegral (BSL.length (unSerialised eb)))
+      pure eb
 
 serveTxs ::
   MonadThrow m =>
@@ -118,18 +119,16 @@ serveTxs ::
 serveTxs tracer reader point bitmaps = do
   -- TODO Disconnect a client that requests what the node never offered it.
   traceWith tracer $ TraceLeiosFetchServerTxsRequested point (length offsets)
-  -- One row for each requested offset that the endorser block has, with its
-  -- bytes if the node holds them.
-  rows <- batchRetrieveTxs reader (pointEbHash point) offsets
-  case traverse (\(_offset, _txHash, mbBytes) -> MkLeiosTx <$> mbBytes) rows of
-    Just txs | length txs == length offsets -> do
-      let n = length txs
+  -- The bytes of each requested offset the node holds.
+  held <- batchRetrieveTxs reader point (Set.fromList offsets)
+  if Map.size held == length offsets
+    then do
+      let txs = map MkLeiosTx (Map.elems held)
+          n = length txs
       traceWith tracer $
         TraceLeiosFetchServerTxsServed point n (sum [BS.length (leiosTxBytes tx) | tx <- txs])
       pure $ V.fromListN n txs
-    _ -> do
-      let held = IntSet.fromList [offset | (offset, _txHash, Just _bytes) <- rows]
-      throwIO $ ExnLeiosUnknownTxsRequested point (filter (`IntSet.notMember` held) offsets)
+    else throwIO $ ExnLeiosUnknownTxsRequested point (filter (`Map.notMember` held) offsets)
  where
   offsets = bitmapOffsets bitmaps
 

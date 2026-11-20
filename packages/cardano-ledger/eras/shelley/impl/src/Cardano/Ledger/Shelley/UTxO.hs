@@ -26,6 +26,7 @@ module Cardano.Ledger.Shelley.UTxO (
   getShelleyMinFeeTxUtxo,
   getShelleyWitsVKeyNeeded,
   getShelleyWitsVKeyNeededNoGov,
+  getShelleyWitsVKeyNeededNoGovWith,
   module UTxO,
 ) where
 
@@ -178,6 +179,8 @@ instance EraUTxO ShelleyEra where
 
   getMinFeeTxUtxo pp tx _ = getShelleyMinFeeTxUtxo pp tx
 
+  calcMinFeeStAnnTx = getShelleyMinFeeTxUtxo
+
 -- We don't consider the reference scripts in the calculation before Conway
 getShelleyMinFeeTxUtxo :: EraTx era => PParams era -> Tx l era -> Coin
 getShelleyMinFeeTxUtxo pparams tx = getMinFeeTx pparams tx 0
@@ -207,7 +210,17 @@ getShelleyWitsVKeyNeededNoGov ::
   UTxO era ->
   TxBody l era ->
   Set (KeyHash Witness)
-getShelleyWitsVKeyNeededNoGov utxo' txBody =
+getShelleyWitsVKeyNeededNoGov = getShelleyWitsVKeyNeededNoGovWith (const True)
+
+getShelleyWitsVKeyNeededNoGovWith ::
+  EraTx era =>
+  -- | Predicate that decides if the owners listed in a pool registration
+  -- certificate must sign the transaction
+  (StakePoolParams era -> Bool) ->
+  UTxO era ->
+  TxBody l era ->
+  Set (KeyHash Witness)
+getShelleyWitsVKeyNeededNoGovWith ownersWitnessRequired utxo' txBody =
   certAuthors
     `Set.union` inputAuthors
     `Set.union` owners
@@ -237,10 +250,11 @@ getShelleyWitsVKeyNeededNoGov utxo' txBody =
     owners :: Set (KeyHash Witness)
     owners = foldr' accum Set.empty (txBody ^. certsTxBodyL)
       where
-        accum (RegPoolTxCert pool) !ans =
-          Set.union
-            (Set.map asWitness (sppOwners pool))
-            ans
+        accum (RegPoolTxCert pool) !ans
+          | ownersWitnessRequired pool =
+              Set.union
+                (Set.map asWitness (sppOwners pool))
+                ans
         accum _cert ans = ans
     certAuthors :: Set (KeyHash Witness)
     certAuthors = foldr' accum Set.empty (txBody ^. certsTxBodyL)

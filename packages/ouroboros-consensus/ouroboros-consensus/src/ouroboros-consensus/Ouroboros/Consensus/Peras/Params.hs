@@ -17,6 +17,7 @@ module Ouroboros.Consensus.Peras.Params
   ( -- * Protocol parameters
     PerasIgnoranceRounds (..)
   , PerasCooldownRounds (..)
+  , PerasBlockMaxSlots (..)
   , PerasBlockMinSlots (..)
   , PerasCertMaxRounds (..)
   , PerasCertArrivalThreshold (..)
@@ -25,7 +26,9 @@ module Ouroboros.Consensus.Peras.Params
   , maxRollbackWeight
   , PerasQuorumWeightThreshold (..)
   , PerasQuorumWeightThresholdSafetyMargin (..)
-  , PerasBootstrapRound (..)
+  , PerasBootstrapStatus (..)
+  , perasBootstrapStatusFromMaybe
+  , perasBootstrapStatusToMaybe
 
     -- * Protocol parameters bundle
   , PerasParams (..)
@@ -63,6 +66,7 @@ import Cardano.Ledger.BaseTypes
   , BoundedRational (..)
   , activeSlotVal
   , mkActiveSlotCoeff
+  , strictMaybeToMaybe
   )
 import Cardano.Ledger.BaseTypes.NonZero (NonZero (..), unsafeNonZero)
 import Cardano.Slotting.Slot (SlotInterval (..))
@@ -72,20 +76,16 @@ import Data.Coerce (coerce)
 import Data.Maybe (fromMaybe)
 import Data.Maybe.Strict (StrictMaybe (..))
 import Data.Ratio ((%))
-import Data.Semigroup (Sum (..))
 import Data.Typeable (Typeable)
 import Data.Word (Word16, Word32, Word64)
 import GHC.Generics (Generic)
-import GHC.IO.Unsafe (unsafePerformIO)
-import qualified Ouroboros.Consensus.Committee.Types as Committee
+import qualified Cardano.Crypto.Peras.Committee.Types as Committee
 import Ouroboros.Consensus.Config.SecurityParam (SecurityParam (..))
 import Ouroboros.Consensus.Peras.Protocol (PerasLedgerView (..))
-import Ouroboros.Consensus.Peras.Types (PerasCertSize (..))
+import Ouroboros.Consensus.Peras.Types (PerasCertSize (..), PerasRoundNo (..))
 import Ouroboros.Consensus.Util.Condense (Condense (..))
 import Ouroboros.Consensus.Util.IOLike (NoThunks)
 import Quiet (Quiet (..))
-import System.Environment (lookupEnv)
-import Text.Read (readMaybe)
 
 -- * Protocol parameters
 
@@ -110,6 +110,14 @@ newtype PerasCooldownRounds
 newtype PerasBlockMinSlots
   = PerasBlockMinSlots {unPerasBlockMinSlots :: Word64}
   deriving Show via Quiet PerasBlockMinSlots
+  deriving stock Generic
+  deriving newtype (Enum, Eq, Ord, NoThunks, Condense, FromCBOR, ToCBOR)
+
+-- | Maximum age in slots of a block after which it can no longer be voted for
+-- in order to get a boost.
+newtype PerasBlockMaxSlots
+  = PerasBlockMaxSlots {unPerasBlockMaxSlots :: Word64}
+  deriving Show via Quiet PerasBlockMaxSlots
   deriving stock Generic
   deriving newtype (Enum, Eq, Ord, NoThunks, Condense, FromCBOR, ToCBOR)
 
@@ -142,8 +150,19 @@ newtype PerasWeight
   deriving stock Generic
   deriving newtype (Enum, Eq, Ord, NoThunks, Condense, FromCBOR, ToCBOR)
 
-deriving via Sum Word64 instance Semigroup PerasWeight
-deriving via Sum Word64 instance Monoid PerasWeight
+-- Weight participates directly in chain ordering. Plain 'Word64' addition
+-- would allow an additional positive certificate to wrap a very large weight
+-- back to a small value and thereby make a chain less preferable. Saturating
+-- addition preserves the monotonicity expected of certificate boosts.
+instance Semigroup PerasWeight where
+  PerasWeight a <> PerasWeight b =
+    PerasWeight $
+      if maxBound - a < b
+        then maxBound
+        else a + b
+
+instance Monoid PerasWeight where
+  mempty = PerasWeight 0
 
 -- | The maximum amount of weight we can roll back.
 maxRollbackWeight :: SecurityParam -> PerasWeight
@@ -171,11 +190,36 @@ newtype PerasQuorumWeightThresholdSafetyMargin
 --
 -- NOTE: this is used to resynchronize the round of the latest certificate on
 -- chain across nodes should something go wrong.
-newtype PerasBootstrapRound
-  = PerasBootstrapRound {unPerasBootstrapRound :: Word64}
-  deriving Show via Quiet PerasBootstrapRound
-  deriving stock Generic
-  deriving newtype (Eq, Ord, NoThunks, Condense, FromCBOR, ToCBOR)
+data PerasBootstrapStatus
+  = PerasBootstrapDisabled
+  | PerasBootstrapEnabled !PerasRoundNo
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving anyclass NoThunks
+
+-- | This instance is mainly used to allow `orUnsafeEnv` to parse
+-- `PerasBootstrapStatus` from environment variables.
+instance Read PerasBootstrapStatus where
+  readsPrec d s =
+    [(PerasBootstrapDisabled, rest) | ("PerasBootstrapDisabled", rest) <- lex s]
+      ++ [ (PerasBootstrapEnabled (PerasRoundNo r), rest)
+         | ("PerasBootstrapEnabled", rest1) <- lex s
+         , (r, rest) <- readsPrec d rest1
+         ]
+
+instance ToCBOR PerasBootstrapStatus where
+  toCBOR bootstrap = toCBOR (perasBootstrapStatusToMaybe bootstrap)
+instance FromCBOR PerasBootstrapStatus where
+  fromCBOR = perasBootstrapStatusFromMaybe <$> fromCBOR
+
+perasBootstrapStatusFromMaybe :: Maybe Word32 -> PerasBootstrapStatus
+perasBootstrapStatusFromMaybe = \case
+  Nothing -> PerasBootstrapDisabled
+  Just r -> PerasBootstrapEnabled (PerasRoundNo r)
+
+perasBootstrapStatusToMaybe :: PerasBootstrapStatus -> Maybe Word32
+perasBootstrapStatusToMaybe = \case
+  PerasBootstrapDisabled -> Nothing
+  PerasBootstrapEnabled (PerasRoundNo r) -> Just r
 
 -- * Protocol parameters bundle
 
@@ -187,21 +231,23 @@ data PerasParams blk = PerasParams
   { perasIgnoranceRounds :: !PerasIgnoranceRounds
   , perasCooldownRounds :: !PerasCooldownRounds
   , perasBlockMinSlots :: !PerasBlockMinSlots
+  , perasBlockMaxSlots :: !PerasBlockMaxSlots
   , perasCertMaxRounds :: !PerasCertMaxRounds
   , perasCertArrivalThreshold :: !PerasCertArrivalThreshold
   , perasWeight :: !PerasWeight
   , perasQuorumWeightThreshold :: !PerasQuorumWeightThreshold
   , perasQuorumWeightThresholdSafetyMargin :: !PerasQuorumWeightThresholdSafetyMargin
   , perasTargetCommitteeSize :: !Committee.TargetCommitteeSize
-  , perasBootstrapRound :: !(StrictMaybe PerasBootstrapRound)
+  , perasBootstrapStatus :: !PerasBootstrapStatus
   }
   deriving (Show, Eq, Generic, NoThunks)
 
 instance Typeable blk => FromCBOR (PerasParams blk) where
   fromCBOR = do
-    decodeListLenOf 10
+    decodeListLenOf 11
     PerasParams
       <$> fromCBOR
+      <*> fromCBOR
       <*> fromCBOR
       <*> fromCBOR
       <*> fromCBOR
@@ -214,17 +260,18 @@ instance Typeable blk => FromCBOR (PerasParams blk) where
 
 instance Typeable blk => ToCBOR (PerasParams blk) where
   toCBOR params =
-    encodeListLen 10
+    encodeListLen 11
       <> toCBOR (perasIgnoranceRounds params)
       <> toCBOR (perasCooldownRounds params)
       <> toCBOR (perasBlockMinSlots params)
+      <> toCBOR (perasBlockMaxSlots params)
       <> toCBOR (perasCertMaxRounds params)
       <> toCBOR (perasCertArrivalThreshold params)
       <> toCBOR (perasWeight params)
       <> toCBOR (perasQuorumWeightThreshold params)
       <> toCBOR (perasQuorumWeightThresholdSafetyMargin params)
       <> toCBOR (perasTargetCommitteeSize params)
-      <> toCBOR (perasBootstrapRound params)
+      <> toCBOR (perasBootstrapStatus params)
 
 -- | Retag a 'PerasParams' with a new phantom @blk@ type.
 castPerasParams :: forall blk' blk. PerasParams blk -> PerasParams blk'
@@ -245,45 +292,37 @@ mkPerasParams ::
 mkPerasParams securityParam activeSlotCoeff plv =
   PerasParams
     { perasIgnoranceRounds =
-        PerasIgnoranceRounds $
+        PerasIgnoranceRounds
           ignoranceRounds
-            `orUnsafeEnv` "PERAS_IGNORANCE_ROUNDS"
     , perasCooldownRounds =
-        PerasCooldownRounds $
+        PerasCooldownRounds
           cooldownRounds
-            `orUnsafeEnv` "PERAS_COOLDOWN_ROUNDS"
     , perasBlockMinSlots =
-        PerasBlockMinSlots $
+        PerasBlockMinSlots
           blockMinSlots
-            `orUnsafeEnv` "PERAS_BLOCK_MIN_SLOTS"
+    , perasBlockMaxSlots =
+        PerasBlockMaxSlots
+          blockMaxSlots
     , perasCertMaxRounds =
-        PerasCertMaxRounds $
+        PerasCertMaxRounds
           certMaxRounds
-            `orUnsafeEnv` "PERAS_CERT_MAX_ROUNDS"
     , perasCertArrivalThreshold =
-        PerasCertArrivalThreshold $
+        PerasCertArrivalThreshold
           certArrivalThreshold
-            `orUnsafeEnv` "PERAS_CERT_ARRIVAL_THRESHOLD"
     , perasWeight =
-        PerasWeight $
+        PerasWeight
           weight
-            `orUnsafeEnv` "PERAS_WEIGHT"
     , perasQuorumWeightThreshold =
-        PerasQuorumWeightThreshold $
+        PerasQuorumWeightThreshold
           quorumWeightThreshold
-            `orUnsafeEnv` "PERAS_QUORUM_WEIGHT_THRESHOLD"
     , perasQuorumWeightThresholdSafetyMargin =
-        PerasQuorumWeightThresholdSafetyMargin $
+        PerasQuorumWeightThresholdSafetyMargin
           quorumWeightThresholdSafetyMargin
-            `orUnsafeEnv` "PERAS_QUORUM_WEIGHT_THRESHOLD_SAFETY_MARGIN"
     , perasTargetCommitteeSize =
-        Committee.TargetCommitteeSize $
+        Committee.TargetCommitteeSize
           targetCommitteeSize
-            `orUnsafeEnv` "PERAS_TARGET_COMMITTEE_SIZE"
-    , perasBootstrapRound =
-        PerasBootstrapRound
-          <$> bootstrapRound
-            `orUnsafeEnv` "PERAS_BOOTSTRAP_ROUND"
+    , perasBootstrapStatus =
+        (perasBootstrapStatusFromMaybe maybeBootstrapRound)
     }
  where
   k :: Word64
@@ -321,6 +360,9 @@ mkPerasParams securityParam activeSlotCoeff plv =
   blockMinSlots :: Word64
   blockMinSlots = fromIntegral @Word32 @Word64 (unSlotInterval (plvMinCandidateBlockAge plv))
 
+  blockMaxSlots :: Word64
+  blockMaxSlots = ceiling tCQ
+
   certMaxRounds :: Word64
   certMaxRounds = ceiling ((tHeal + tCQ) / roundLength)
 
@@ -336,20 +378,8 @@ mkPerasParams securityParam activeSlotCoeff plv =
   targetCommitteeSize :: Word64
   targetCommitteeSize = fromIntegral @Word16 @Word64 (plvTargetCommitteeSize plv)
 
-  bootstrapRound :: StrictMaybe Word64
-  bootstrapRound = fromIntegral @Word32 @Word64 <$> plvBootstrapRound plv
-
--- | Temporary hack to allow overriding default Peras parameters via env vars.
-orUnsafeEnv :: Read a => a -> String -> a
-orUnsafeEnv def var =
-  unsafePerformIO $
-    lookupEnv var >>= \case
-      Nothing -> pure def
-      Just str ->
-        case readMaybe str of
-          Nothing -> pure def
-          Just x -> pure x
-{-# NOINLINE orUnsafeEnv #-}
+  maybeBootstrapRound :: Maybe Word32
+  maybeBootstrapRound = strictMaybeToMaybe (plvBootstrapRound plv)
 
 -- | Instantiate default Peras protocol parameters.
 --

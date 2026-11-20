@@ -15,6 +15,13 @@
 module Cardano.Ledger.Dijkstra (
   DijkstraEra,
   ApplyTxError (..),
+  DijkstraApplyBlock (..),
+  applyEndorserBlockEither,
+  applyEndorserBlockNoValidation,
+  InvalidEndorserBlockReferences (..),
+  EndorserBlockTransitionError (EndorserBlockTransitionError),
+  mkDijkstraBlockEnv,
+  mkDijkstraBlockEnvWithPerasContext,
   mkDijkstraStAnnTopTx,
   DijkstraForecast (..),
   DijkstraEraForecast (..),
@@ -40,7 +47,13 @@ import Cardano.Ledger.BaseTypes (Inject (inject), TxIx (..))
 import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
 import Cardano.Ledger.Block (EraBlockHeader, LeiosBbodySignal (..), LeiosEraBlockHeader)
 import Cardano.Ledger.Conway.Governance (RunConwayRatify)
-import Cardano.Ledger.Dijkstra.Block ()
+import Cardano.Ledger.Dijkstra.Block (
+  DijkstraApplyBlock (..),
+  EndorserBlockTransitionError (..),
+  InvalidEndorserBlockReferences (..),
+  applyEndorserBlockEither,
+  applyEndorserBlockNoValidation,
+ )
 import Cardano.Ledger.Dijkstra.Block.Endorser ()
 import Cardano.Ledger.Dijkstra.BlockBody ()
 import Cardano.Ledger.Dijkstra.Core
@@ -55,6 +68,7 @@ import Cardano.Ledger.Dijkstra.Rules (
   DijkstraLedgerPredFailure,
   DijkstraMempoolPredFailure (LedgerFailure),
  )
+import qualified Cardano.Ledger.Dijkstra.Rules as Dijkstra
 import Cardano.Ledger.Dijkstra.Scripts ()
 import Cardano.Ledger.Dijkstra.State.CertState ()
 import Cardano.Ledger.Dijkstra.State.Stake ()
@@ -64,16 +78,18 @@ import Cardano.Ledger.Dijkstra.Tx (DijkstraStAnnTx (..))
 import Cardano.Ledger.Dijkstra.TxBody ()
 import Cardano.Ledger.Dijkstra.TxInfo ()
 import Cardano.Ledger.Dijkstra.TxWits ()
-import Cardano.Ledger.Dijkstra.UTxO ()
+import Cardano.Ledger.Dijkstra.UTxO (batchNonDistinctRefScriptsSize)
 import Cardano.Ledger.Plutus (Language (..), plutusLanguage)
 import Cardano.Ledger.Shelley.API (
   ApplyBlock (..),
   ApplyTick (..),
   ApplyTx (..),
+  PerasBlockContext,
   defaultApplyTxWithValidation,
   defaultReapplyValidatedTx,
  )
-import Cardano.Ledger.State (EraUTxO (..), ScriptsProvided, UTxO)
+import Cardano.Ledger.Shelley.LedgerState
+import Cardano.Ledger.Shelley.State
 import Cardano.Slotting.EpochInfo (EpochInfo)
 import Cardano.Slotting.Time (SystemStart)
 import Data.Foldable (toList)
@@ -98,7 +114,14 @@ instance ApplyTx DijkstraEra where
 instance ApplyTick DijkstraEra
 
 instance (EraBlockHeader h DijkstraEra, LeiosEraBlockHeader h DijkstraEra) => ApplyBlock h DijkstraEra where
+  type BlockEnv DijkstraEra = Dijkstra.BbodyEnv DijkstraEra
+  mkBlockEnv = mkDijkstraBlockEnv
+  mkBlockEnvWithPerasContext = mkDijkstraBlockEnvWithPerasContext
   wrapBlockSignal = LeiosBbodySignal
+
+instance
+  (EraBlockHeader h DijkstraEra, LeiosEraBlockHeader h DijkstraEra) =>
+  DijkstraApplyBlock h DijkstraEra
 
 instance RunConwayRatify DijkstraEra
 
@@ -107,6 +130,34 @@ instance Inject (NonEmpty (DijkstraMempoolPredFailure DijkstraEra)) (ApplyTxErro
 
 instance Inject (NonEmpty (DijkstraLedgerPredFailure DijkstraEra)) (ApplyTxError DijkstraEra) where
   inject = DijkstraApplyTxError . fmap LedgerFailure
+
+mkDijkstraBlockEnv ::
+  EraGov era =>
+  NewEpochState era ->
+  Dijkstra.BbodyEnv era
+mkDijkstraBlockEnv = mkDijkstraBlockEnvWithPerasContext Nothing
+
+-- | Same as 'mkDijkstraBlockEnv', with the block application context needed to
+-- validate Peras certificates (see 'PerasBlockContext').
+mkDijkstraBlockEnvWithPerasContext ::
+  EraGov era =>
+  Maybe PerasBlockContext ->
+  NewEpochState era ->
+  Dijkstra.BbodyEnv era
+mkDijkstraBlockEnvWithPerasContext perasContext nes@NewEpochState {nesEs} =
+  Dijkstra.BbodyEnv
+    { Dijkstra.bbePParams = nesEs ^. curPParamsEpochStateL
+    , Dijkstra.bbeChainAccountState = esChainAccountState nesEs
+    , Dijkstra.bbeLeiosCommittee = nesEs ^. esSnapshotsL . ssStakeSetL . ssLeiosCommitteeL
+    , -- Lazy: only forced when a block carries a Peras certificate
+      Dijkstra.bbePeras =
+        Dijkstra.PerasBbodyEnv
+          { Dijkstra.pbePerasContext = perasContext
+          , Dijkstra.pbePoolDistr = nes ^. nesStakePoolDistrG
+          , Dijkstra.pbePrevPParams = nesEs ^. prevPParamsEpochStateL
+          , Dijkstra.pbePrevPoolDistr = calculatePoolDistr . gsSnapShot . ssStakeGo $ esSnapshots nesEs
+          }
+    }
 
 mkDijkstraStAnnTopTx ::
   ( AlonzoEraUTxO era
@@ -158,6 +209,8 @@ mkDijkstraStAnnTopTx ei sysStart pp utxo stAnnTxCache tx =
    in
     DijkstraStAnnTopTx
       { dsattTx = tx
+      , dsattRefScriptsSize = batchNonDistinctRefScriptsSize utxo tx
+      , dsattExUnits = getTotalExUnits tx
       , dsattScriptsNeeded = scriptsNeeded
       , dsattScriptsProvided = scriptsProvided
       , dsattPlutusLegacyMode = not $ Set.null $ Set.filter (<= PlutusV3) languagesUsed
@@ -166,6 +219,7 @@ mkDijkstraStAnnTopTx ei sysStart pp utxo stAnnTxCache tx =
       , dsattPlutusScriptsWithContext =
           scriptsWithContextFromLedgerTxInfo ledgerTxInfo (pp ^. ppCostModelsL)
       , dsattSubTransactions = stAnnSubTxs
+      , dsattUTxO = utxo
       }
 
 mkDijkstraStAnnSubTx ::

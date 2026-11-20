@@ -54,6 +54,7 @@ module Ouroboros.Consensus.Storage.ChainDB.Impl.Types
   , ChainSelQueue -- opaque
   , addBlockToAdd
   , addPerasCertToQueue
+  , addReprocessLeiosEb
   , addReprocessLoEBlocks
   , closeChainSelQueue
   , getChainSelMessage
@@ -102,6 +103,8 @@ import Ouroboros.Consensus.HeaderValidation (HeaderWithTime (..))
 import Ouroboros.Consensus.Ledger.Extended (ExtValidationError)
 import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.SupportsProtocol
+import Ouroboros.Consensus.Leios.Protocol (LeiosLedgerView)
+import Ouroboros.Consensus.Leios.Types (EndorserBlockHash)
 import Ouroboros.Consensus.Peras.Context (PerasEpochContextResolverHandle)
 import Ouroboros.Consensus.Peras.SelectView (WeightedSelectView, WithEmptyFragment)
 import Ouroboros.Consensus.Protocol.Abstract
@@ -121,6 +124,7 @@ import Ouroboros.Consensus.Storage.ChainDB.API
 import Ouroboros.Consensus.Storage.ChainDB.API.Types.InvalidBlockPunishment
   ( InvalidBlockPunishment
   )
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Leios (AcquiredEbs, LeiosValidClaims)
 import Ouroboros.Consensus.Storage.ImmutableDB
   ( ImmutableDB
   , ImmutableDbSerialiseConstraints
@@ -134,6 +138,8 @@ import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
 import Ouroboros.Consensus.Storage.PerasCertDB (PerasCertDB)
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import Ouroboros.Consensus.Storage.PerasImmutableCertDB (PerasImmutableCertDB)
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB as PerasImmutableCertDB
 import Ouroboros.Consensus.Storage.PerasVoteDB (PerasVoteDB)
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
 import Ouroboros.Consensus.Storage.Serialisation
@@ -165,6 +171,9 @@ class
   , VolatileDbSerialiseConstraints blk
   , -- Needed for Follower
     EncodeDiskDep (NestedCtxt Header) blk
+  , -- Needed for the PerasImmutableCertDB
+    EncodeDisk blk (PerasCert blk)
+  , DecodeDisk blk (PerasCert blk)
   ) =>
   SerialiseDiskConstraints blk
 
@@ -306,6 +315,13 @@ data ChainDbEnv m blk = CDB
   { cdbImmutableDB :: !(ImmutableDB m blk)
   , cdbImmutableDBLock :: !(RAWLock m ())
   , cdbVolatileDB :: !(VolatileDB m blk)
+  -- ^ INVARIANT: this contains the block at the tip of the ImmutableDB, if
+  -- any. So it contains the predecessor of every block ChainSel could select.
+  --
+  -- Opening the ChainDB copies that block here if it is missing, as it is
+  -- after a Mithril bootstrap, a db-truncater run or the loss of VolatileDB
+  -- files. The garbage collection removes only blocks from slots before the
+  -- ImmutableDB tip's.
   , cdbLedgerDB :: !(LedgerDB' m blk)
   , cdbChain :: !(StrictTVar m (InternalChain blk))
   -- ^ Contains the current chain fragment.
@@ -407,6 +423,14 @@ data ChainDbEnv m blk = CDB
   -- to the VoteDB and exposed via the ChainDB API.
   , cdbLeiosDb :: !(LeiosDbHandle m)
   -- ^ The node's LeiosDB. Whoever opened it closes it, not the ChainDB.
+  , cdbAcquiredEbs :: !(StrictTVar m AcquiredEbs)
+  -- ^ The endorser blocks whose closure the LeiosDB holds, so that ChainSel
+  -- can park the blocks certifying the others. Seeded from the LeiosDB at
+  -- open, then grown from its notifications.
+  , cdbLeiosValidClaims :: !(StrictTVar m LeiosValidClaims)
+  -- ^ The claims that the Leios certificates of arriving blocks established;
+  -- see 'LeiosValidClaims'.
+  , cdbPerasImmutableCertDB :: !(PerasImmutableCertDB m blk)
   }
   deriving Generic
 
@@ -434,8 +458,11 @@ data Internal m blk = Internal
   --
   -- The 'SlotNo' of the tip of the ImmutableDB after copying the blocks is
   -- returned. This can be used for a garbage collection on the VolatileDB.
+  , intGetPerasImmutableCertsAfter ::
+      PerasRoundNo -> Word64 -> m [ValidatedPerasCert blk]
+  -- ^ Query the open historical certificate database in tests.
   , intGarbageCollect :: SlotNo -> m ()
-  -- ^ Perform garbage collection for blocks <= the given 'SlotNo'.
+  -- ^ Perform garbage collection for blocks < the given 'SlotNo'.
   , intTryTakeSnapshot :: m ()
   -- ^ Write a new LedgerDB snapshot to disk and remove the oldest one(s), if
   -- the 'SnapshotPolicy' indicates so.
@@ -448,6 +475,8 @@ data Internal m blk = Internal
   -- thread.
   , intKillBgThreads :: StrictTVar m (m ())
   -- ^ A handle to kill the background threads.
+  , intImmutableTipInVolatileDB :: STM m Bool
+  -- ^ Whether the invariant on 'cdbVolatileDB' holds.
   }
 
 {-------------------------------------------------------------------------------
@@ -618,6 +647,11 @@ data BlockToAdd m blk = BlockToAdd
   -- ^ Executed immediately upon determining this block or one from its prefix
   -- is invalid.
   , blockToAdd :: !blk
+  , blockPredecessorSlot :: !(WithOrigin SlotNo)
+  -- ^ The slot of the block's predecessor, as validating its header revealed it
+  , blockLeiosLedgerView :: !(StrictMaybe LeiosLedgerView)
+  -- ^ The Leios part of the ledger view at the block's slot, as validating its
+  -- header revealed it
   , varBlockWrittenToDisk :: !(StrictTMVar m Bool)
   -- ^ Used for the 'blockWrittenToDisk' field of 'AddBlockPromise'.
   , varBlockProcessed :: !(StrictTMVar m (AddBlockResult blk))
@@ -637,6 +671,9 @@ data ChainSelMessage m blk
     ChainSelReprocessLoEBlocks
       -- | Used for 'ChainSelectionPromise'.
       !(StrictTMVar m ())
+  | -- | Reprocess the blocks parked on the endorser block with this hash, whose
+    -- closure is now acquired.
+    ChainSelReprocessLeiosEb !EndorserBlockHash
 
 -- | Create a new 'ChainSelQueue' with the given size.
 newChainSelQueue :: (IOLike m, StandardHash blk, Typeable blk) => Word -> m (ChainSelQueue m blk)
@@ -655,15 +692,19 @@ addBlockToAdd ::
   Tracer m (TraceAddBlockEvent blk) ->
   ChainSelQueue m blk ->
   InvalidBlockPunishment m ->
+  WithOrigin SlotNo ->
+  StrictMaybe LeiosLedgerView ->
   blk ->
   m (AddBlockPromise m blk)
-addBlockToAdd tracer (ChainSelQueue{varChainSelQueue, varChainSelPoints}) punish blk = do
+addBlockToAdd tracer (ChainSelQueue{varChainSelQueue, varChainSelPoints}) punish predecessorSlot leiosView blk = do
   varBlockWrittenToDisk <- newEmptyTMVarIO
   varBlockProcessed <- newEmptyTMVarIO
   let !toAdd =
         BlockToAdd
           { blockPunish = punish
           , blockToAdd = blk
+          , blockPredecessorSlot = predecessorSlot
+          , blockLeiosLedgerView = leiosView
           , varBlockWrittenToDisk
           , varBlockProcessed
           }
@@ -722,6 +763,12 @@ addReprocessLoEBlocks tracer ChainSelQueue{varChainSelQueue} = do
     AddedReprocessLoEBlocksToQueue (FallingEdgeWith (fromIntegral queueSize))
   return $ ChainSelectionPromise waitUntilRan
 
+-- | Enqueue a reprocess of the blocks parked on the endorser block with the
+-- given hash.
+addReprocessLeiosEb :: IOLike m => ChainSelQueue m blk -> EndorserBlockHash -> m ()
+addReprocessLeiosEb ChainSelQueue{varChainSelQueue} ebHash =
+  atomically $ writeTBQueue varChainSelQueue (ChainSelReprocessLeiosEb ebHash)
+
 -- | Get the oldest message from the 'ChainSelQueue' queue. Can block when the
 -- queue is empty; in that case, reports the starvation (and its end) via the
 -- given tracer.
@@ -760,6 +807,7 @@ getChainSelMessage starvationTracer starvationVar chainSelQueue =
       atomically . writeTVar starvationVar . ChainSelStarvationEndedAt =<< getMonotonicTime
     ChainSelAddPerasCert{} -> pure ()
     ChainSelReprocessLoEBlocks{} -> pure ()
+    ChainSelReprocessLeiosEb{} -> pure ()
 
 -- | Flush the 'ChainSelQueue' queue and notify the waiting threads.
 closeChainSelQueue :: IOLike m => ChainSelQueue m blk -> STM m ()
@@ -773,6 +821,8 @@ closeChainSelQueue ChainSelQueue{varChainSelQueue = queue} = do
       tryPutTMVar varProcessed PerasCertNotProcessedClosing
     ChainSelReprocessLoEBlocks varProcessed ->
       tryPutTMVar varProcessed ()
+    ChainSelReprocessLeiosEb{} ->
+      pure True
 
 -- | To invoke when the given 'ChainSelMessage' has been processed by ChainSel.
 -- This is used to remove the respective point from the multiset of points in
@@ -788,6 +838,8 @@ processedChainSelMessage ChainSelQueue{varChainSelPoints} = \case
   ChainSelAddPerasCert{} ->
     pure ()
   ChainSelReprocessLoEBlocks{} ->
+    pure ()
+  ChainSelReprocessLeiosEb{} ->
     pure ()
 
 -- | Return a function to test the membership
@@ -829,6 +881,7 @@ data TraceEvent blk
   | TraceImmutableDBEvent (ImmutableDB.TraceEvent blk)
   | TraceVolatileDBEvent (VolatileDB.TraceEvent blk)
   | TracePerasCertDbEvent (PerasCertDB.TraceEvent blk)
+  | TracePerasImmutableCertDbEvent (PerasImmutableCertDB.TraceEvent blk)
   | TracePerasVoteDbEvent (PerasVoteDB.TraceEvent blk)
   | TraceLastShutdownUnclean
   | TraceChainSelStarvationEvent (TraceChainSelStarvationEvent blk)
@@ -947,6 +1000,9 @@ data TraceAddBlockEvent blk
     AddedReprocessLoEBlocksToQueue (Enclosing' Word)
   | -- | ChainSel will reprocess blocks that were postponed by the LoE.
     PoppedReprocessLoEBlocksFromQueue
+  | -- | ChainSel reconsiders this many blocks parked on the endorser block
+    -- with this hash, whose closure the LeiosDB now holds.
+    ReconsideredParkedBlocks EndorserBlockHash Int
   | -- | A block was added to the Volatile DB
     AddedBlockToVolatileDB (RealPoint blk) BlockNo IsEBB Enclosing
   | -- | The block fits onto the current chain, we'll try to use it to extend
@@ -1160,8 +1216,8 @@ data TraceAddPerasCertEvent blk
     -- popped from the queue.
     PoppedPerasCertFromQueue PerasRoundNo (Point blk)
   | -- | The Peras certificate from the given round boosting the given block was
-    -- too old, ie its slot was older than the current immutable slot (the third
-    -- argument).
+    -- too old: its target is before the immutable tip, or is another point at
+    -- the immutable tip's slot. The third argument is the immutable tip.
     IgnorePerasCertTooOld PerasRoundNo (Point blk) (Anchor blk)
   | -- | The Peras certificate from the given round boosts a block on the
     -- current selection.

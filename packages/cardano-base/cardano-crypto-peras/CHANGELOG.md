@@ -1,0 +1,31 @@
+# Changelog for `cardano-crypto-peras`
+
+## 0.2.0.0
+
+* Add the Peras certificate types
+* Add `PerasVotersBitmap`, the voters bitmap with its inclusive upper bound, built on
+  `Data.Bitmap` from `cardano-strict-containers`
+* Remove the placeholder `BoostedBlock`; rename `pcBostedBlock` to `pcBoostedBlock`
+* No CBOR instances, matching `cardano-crypto-leios`: `EncCBOR`/`DecCBOR` instances are
+  provided by `cardano-ledger-binary`
+* Change `PerasRoundNo`'s representation from `Word64` to `Word32`
+* Add `Cardano.Crypto.Peras.Vote` (`PerasVote`, `PerasVoteEligibilityProof`)
+* Add `PerasCertSize` and `perasCertSizeUpperBound` to `Cardano.Crypto.Peras.Cert`
+* Add `maxPerasCertSize`, the shared 40,000-byte certificate size policy limit
+* Add the voting committees (`Cardano.Crypto.Peras.Committee.*`: wFA^LS and everyone-votes)
+  and the BLS crypto scheme `PerasBLSCrypto` (`Cardano.Crypto.Peras.Crypto.BLS`), moved from
+  `ouroboros-consensus` (`Ouroboros.Consensus.Committee.*` and
+  `Ouroboros.Consensus.Peras.Crypto.BLS`). The code is unchanged; the ledger types it uses
+  are mirrored, under the same names, in `Cardano.Crypto.Peras.Committee.Base`
+* Add `Cardano.Crypto.Peras.Cert.WFALS`, the conversion of certificates to wFA^LS ones
+* Add `Cardano.Crypto.Peras.Validation`: `mkPerasCertValidationContext` builds the
+  validation context of an epoch, `verifyPerasCert` verifies a certificate against it
+
+### `testlib`
+
+* Add `Test.Cardano.Crypto.Peras.Gen`
+* Add `genPerasVote`, `genPerasVoteEligibilityProof`
+
+## 0.1.0.0
+
+* Initial version released on [CHaP](https://github.com/input-output-hk/cardano-haskell-packages)

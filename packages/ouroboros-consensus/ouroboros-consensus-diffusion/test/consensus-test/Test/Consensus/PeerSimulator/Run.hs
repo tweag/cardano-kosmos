@@ -34,7 +34,7 @@ import Ouroboros.Consensus.Ledger.Inspect (InspectLedger)
 import Ouroboros.Consensus.Ledger.SupportsProtocol
   ( LedgerSupportsProtocol
   )
-import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
+import Ouroboros.Consensus.MiniProtocol.BlockFetch.ClientInterface (MatchedBlock)
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
   ( CSJConfig (..)
   , CSJEnabledConfig (..)
@@ -46,6 +46,9 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
   , viewChainSyncState
   )
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CSClient
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound.State
+  ( ObjectDiffusionInboundHandleCollection (..)
+  )
 import qualified Ouroboros.Consensus.Node.GsmState as GSM
 import Ouroboros.Consensus.Node.ProtocolInfo (ProtocolInfo (..))
 import Ouroboros.Consensus.Peras.Context (StateSupportsPerasEpochContext)
@@ -183,7 +186,7 @@ startChainSyncConnectionThread ::
   Tracer m (TraceEvent blk) ->
   TopLevelConfig blk ->
   ChainDbView m blk ->
-  FetchClientRegistry PeerId (HeaderWithTime blk) blk blk m ->
+  FetchClientRegistry PeerId (HeaderWithTime blk) blk (MatchedBlock blk) m ->
   SharedResources m blk ->
   ChainSyncResources m blk ->
   ChainSyncTimeout ->
@@ -233,7 +236,7 @@ startBlockFetchConnectionThread ::
   ResourceRegistry m ->
   Tracer m (TraceEvent blk) ->
   StateViewTracers blk m ->
-  FetchClientRegistry PeerId (HeaderWithTime blk) blk blk m ->
+  FetchClientRegistry PeerId (HeaderWithTime blk) blk (MatchedBlock blk) m ->
   KeepAliveRegistry PeerId m ->
   ControlMessageSTM m ->
   SharedResources m blk ->
@@ -400,9 +403,9 @@ mkStateTracer ::
   PeerSimulatorResources m blk ->
   ChainDB m blk ->
   m (Tracer m ())
-mkStateTracer schedulerConfig GenesisTest{gtBlockTree} PeerSimulatorResources{psrHandles, psrPeers} chainDb
+mkStateTracer schedulerConfig GenesisTest{gtBlockTree} PeerSimulatorResources{psrCSHandles, psrPeers} chainDb
   | scTraceState schedulerConfig
-  , let getCandidates = viewChainSyncState (cschcMap psrHandles) CSClient.csCandidate
+  , let getCandidates = viewChainSyncState (cschcMap psrCSHandles) CSClient.csCandidate
         getCurrentChain = ChainDB.getCurrentChain chainDb
         getPoints = traverse readTVar (srCurrentState . prShared <$> psrPeers) =
       peerSimStateDiagramSTMTracerDebug
@@ -436,7 +439,8 @@ startNode ::
   LiveInterval blk m ->
   m ()
 startNode protocolInfo schedulerConfig genesisTest interval = do
-  let handles = psrHandles lrPeerSim
+  let csHandles = psrCSHandles lrPeerSim
+      cdHandles = psrCDHandles lrPeerSim
   fetchClientRegistry <- newFetchClientRegistry
   keepAliveRegistry <- newKeepAliveRegistry
   let chainDbView = CSClient.defaultChainDbView lnChainDb
@@ -468,7 +472,7 @@ startNode protocolInfo schedulerConfig genesisTest interval = do
             chainSyncLoPBucketConfig
             csjConfig
             lnStateViewTracers
-            handles
+            csHandles
         BlockFetch.startKeepAliveThread peerRegistry keepAliveRegistry pid
         (bfClient, bfServer) <-
           startBlockFetchConnectionThread
@@ -493,7 +497,7 @@ startNode protocolInfo schedulerConfig genesisTest interval = do
     lnChainDb
     fetchClientRegistry
     keepAliveRegistry
-    handles
+    csHandles
 
   for_ lrLoEVar $ \var -> do
     forkLinkedWatcher lrRegistry "LoE updater background" $
@@ -506,12 +510,13 @@ startNode protocolInfo schedulerConfig genesisTest interval = do
         -- It is similar to the setting of bfcDecisionLoopInterval in
         -- Test.Consensus.PeerSimulator.BlockFetch
         (pure GSM.Syncing) -- TODO actually run GSM
-        (cschcMap handles)
+        (cschcMap csHandles)
+        (odihcMap cdHandles)
         var
 
   void $
     forkLinkedWatcher lrRegistry "CSJ invariants watcher" $
-      CSJInvariants.watcher (cschcMap handles)
+      CSJInvariants.watcher (cschcMap csHandles)
  where
   LiveResources{lrRegistry, lrTracer, lrConfig, lrPeerSim, lrLoEVar} = resources
 
@@ -569,10 +574,10 @@ nodeLifecycle ::
   , ShowProxy (Header blk)
   , ConfigSupportsNode blk
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , StateSupportsPerasEpochContext blk
   , ChainDB.SerialiseDiskConstraints blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , BlockSupportsPeras blk
   , InspectLedger blk
   , ConvertRawHash blk
@@ -632,10 +637,10 @@ runPointSchedule ::
   , ShowProxy (Header blk)
   , ConfigSupportsNode blk
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , StateSupportsPerasEpochContext blk
   , ChainDB.SerialiseDiskConstraints blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , BlockSupportsPeras blk
   , InspectLedger blk
   , ConvertRawHash blk
@@ -660,7 +665,7 @@ runPointSchedule protocolInfoArgs schedulerConfig genesisTest tracer0 =
     (chainDb, stateViewTracers) <-
       runScheduler
         (mkTracer $ traceWith tracer . TraceSchedulerEvent)
-        (cschcMap (psrHandles peerSim))
+        (cschcMap (psrCSHandles peerSim))
         gtSchedule
         (psrPeers peerSim)
         lifecycle

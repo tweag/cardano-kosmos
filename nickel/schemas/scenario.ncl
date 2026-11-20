@@ -92,6 +92,7 @@ let export = {
     num_dreps | Number,
     max_lovelace_supply | Number,
     start_directly_in_dijkstra | Bool | default = true,
+    peras | { _ | Dyn } | default = {},
   },
 
   Fault = [|

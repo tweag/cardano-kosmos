@@ -1,0 +1,13 @@
+{
+    "$schema": "https://raw.githubusercontent.com/IntersectMBO/cardano-config/v2/schemas/config.schema.json",
+    "Version": 2,
+    "Configuration": {
+        "Storage": {
+            "LedgerDB": {
+                "Snapshots": {
+                    "Interval": 864
+                }
+            }
+        }
+    }
+}

@@ -15,6 +15,7 @@ import Control.ResourceRegistry (ResourceRegistry)
 import Control.Tracer (nullTracer)
 import Ouroboros.Consensus.Config
   ( TopLevelConfig (topLevelConfigLedger)
+  , configBlock
   , configCodec
   )
 import Ouroboros.Consensus.HardFork.History.EraParams (eraEpochSize)
@@ -25,6 +26,7 @@ import Ouroboros.Consensus.Storage.ChainDB hiding
   ( TraceFollowerEvent (..)
   )
 import Ouroboros.Consensus.Storage.ChainDB.Impl.Args
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Leios (leiosBlockInfo)
 import Ouroboros.Consensus.Storage.ImmutableDB
 import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
 import Ouroboros.Consensus.Storage.LedgerDB
@@ -33,6 +35,10 @@ import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.Backend as V2
 import Ouroboros.Consensus.Storage.LedgerDB.V2.InMemory
 import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
 import Ouroboros.Consensus.Storage.PerasCertDB (PerasCertDbArgs (..))
+import Ouroboros.Consensus.Storage.PerasImmutableCertDB
+  ( PerasImmutableCertDbArgs (..)
+  , PerasImmutableCertDbIntegrityCheckPolicy (..)
+  )
 import Ouroboros.Consensus.Storage.PerasVoteDB (PerasVoteDbArgs (..))
 import Ouroboros.Consensus.Storage.VolatileDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
@@ -55,6 +61,7 @@ data NodeDBs db = NodeDBs
   , nodeDBsVol :: db
   , nodeDBsLgr :: db
   , nodeDBsGsm :: db
+  , nodeDBsPerasImmCert :: db
   }
   deriving (Functor, Foldable, Traversable)
 
@@ -63,6 +70,7 @@ emptyNodeDBs =
   atomically $
     NodeDBs
       <$> newTMVar Mock.empty
+      <*> newTMVar Mock.empty
       <*> newTMVar Mock.empty
       <*> newTMVar Mock.empty
       <*> newTMVar Mock.empty
@@ -77,8 +85,9 @@ data MinimalChainDbArgs m blk = MinimalChainDbArgs
   , mcdbRegistry :: ResourceRegistry m
   -- ^ Keeps track of non-lexically scoped resources.
   , mcdbNodeDBs :: NodeDBs (StrictTMVar m MockFS)
-  -- ^ File systems underlying the immutable, volatile and ledger databases.
-  -- Would be useful to default this to StrictTMVar's containing empty MockFS's.
+  -- ^ File systems underlying the immutable, volatile and ledger databases
+  -- for blocks and the immutable database for Peras certificates. Would be
+  -- useful to default this to StrictTMVar's containing empty MockFS's.
   , mcdbLeiosDb :: LeiosDbHandle m
   -- ^ The node's LeiosDB, eg an in-memory one.
   }
@@ -108,6 +117,7 @@ fromMinimalChainDbArgs MinimalChainDbArgs{..} =
             -- done in @extractBlockComponent@ in the iterator for the
             -- ImmutableDB, and in @getBlockComponent@ for the VolatileDB.
             immChunkInfo = mcdbChunkInfo
+          , immCheckExternalCompleteness = \_ _ -> pure True
           , immHasFS = SomeHasFS $ simHasFS (nodeDBsImm mcdbNodeDBs)
           , immRegistry = mcdbRegistry
           , immTracer = nullTracer
@@ -122,6 +132,7 @@ fromMinimalChainDbArgs MinimalChainDbArgs{..} =
           , volMaxBlocksPerFile = VolatileDB.mkBlocksPerFile 4
           , volTracer = nullTracer
           , volValidationPolicy = VolatileDB.ValidateAll
+          , volLeiosBlockInfo = leiosBlockInfo (configBlock mcdbTopLevelConfig)
           }
     , cdbLgrDbArgs =
         LedgerDbArgs
@@ -138,6 +149,13 @@ fromMinimalChainDbArgs MinimalChainDbArgs{..} =
     , cdbPerasCertDbArgs =
         PerasCertDbArgs
           { pcdbaTracer = nullTracer
+          }
+    , cdbPerasImmutableCertDbArgs =
+        PerasImmutableCertDbArgs
+          { picdbaCodecConfig = configCodec mcdbTopLevelConfig
+          , picdbaHasFS = SomeHasFS $ simHasFS (nodeDBsPerasImmCert mcdbNodeDBs)
+          , picdbaTracer = nullTracer
+          , picdbaIntegrityCheckPolicy = CheckOnRead
           }
     , cdbPerasVoteDbArgs =
         PerasVoteDbArgs

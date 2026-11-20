@@ -9,13 +9,13 @@ module Test.Consensus.Peras.Serialisation
 
 import Cardano.Binary (FromCBOR (..), ToCBOR (..), decodeFull, serialize)
 import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Maybe.Strict (StrictMaybe (..))
 import Data.Word (Word64)
-import qualified Ouroboros.Consensus.Committee.Types as Committee
+import qualified Cardano.Crypto.Peras.Committee.Types as Committee
 import qualified Ouroboros.Consensus.Peras.Cert.V1 as V1
 import Ouroboros.Consensus.Peras.Params
-  ( PerasBlockMinSlots (..)
-  , PerasBootstrapRound (..)
+  ( PerasBlockMaxSlots (..)
+  , PerasBlockMinSlots (..)
+  , PerasBootstrapStatus (..)
   , PerasCertArrivalThreshold (..)
   , PerasCertMaxRounds (..)
   , PerasCooldownRounds (..)
@@ -25,6 +25,7 @@ import Ouroboros.Consensus.Peras.Params
   , PerasQuorumWeightThresholdSafetyMargin (..)
   , PerasWeight (..)
   )
+import Ouroboros.Consensus.Peras.Types (PerasRoundNo (..))
 import qualified Ouroboros.Consensus.Peras.Vote.V1 as V1
 import Test.QuickCheck
   ( Gen
@@ -113,29 +114,31 @@ genPerasParams = do
   ignoranceRounds <- PerasIgnoranceRounds <$> genWord64
   cooldownRounds <- PerasCooldownRounds <$> genWord64
   blockMinSlots <- PerasBlockMinSlots <$> genWord64
+  blockMaxSlots <- PerasBlockMaxSlots <$> genWord64
   certMaxRounds <- PerasCertMaxRounds <$> genWord64
   certArrivalThreshold <- PerasCertArrivalThreshold <$> genWord64
   weight <- PerasWeight <$> genWord64
   quorumWeightThreshold <- PerasQuorumWeightThreshold <$> genRational
   quorumWeightThresholdSafetyMargin <- PerasQuorumWeightThresholdSafetyMargin <$> genRational
   targetCommitteeSize <- Committee.TargetCommitteeSize <$> genWord64
-  bootstrapRound <-
+  bootstrapStatus <-
     frequency
-      [ (1, pure SNothing)
-      , (1, SJust . PerasBootstrapRound <$> genWord64)
+      [ (1, pure PerasBootstrapDisabled)
+      , (1, PerasBootstrapEnabled . PerasRoundNo <$> arbitrary)
       ]
   pure
     PerasParams
       { perasIgnoranceRounds = ignoranceRounds
       , perasCooldownRounds = cooldownRounds
       , perasBlockMinSlots = blockMinSlots
+      , perasBlockMaxSlots = blockMaxSlots
       , perasCertMaxRounds = certMaxRounds
       , perasCertArrivalThreshold = certArrivalThreshold
       , perasWeight = weight
       , perasQuorumWeightThreshold = quorumWeightThreshold
       , perasQuorumWeightThresholdSafetyMargin = quorumWeightThresholdSafetyMargin
       , perasTargetCommitteeSize = targetCommitteeSize
-      , perasBootstrapRound = bootstrapRound
+      , perasBootstrapStatus = bootstrapStatus
       }
  where
   genWord64 :: Gen Word64

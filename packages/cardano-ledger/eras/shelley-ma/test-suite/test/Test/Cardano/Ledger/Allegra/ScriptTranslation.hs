@@ -9,10 +9,11 @@ import Cardano.Ledger.Allegra (AllegraEra)
 import Cardano.Ledger.Allegra.State
 import Cardano.Ledger.BaseTypes (StrictMaybe (..))
 import Cardano.Ledger.Genesis (NoGenesis (..))
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (UnsafeMkMempoolTx), unwrapMempoolTx)
 import Cardano.Ledger.Shelley (ShelleyEra)
 import qualified Cardano.Ledger.Shelley.API as S
 import Cardano.Ledger.Shelley.Core
-import Cardano.Ledger.Shelley.LedgerState (LedgerState (..))
+import Cardano.Ledger.Shelley.LedgerState (LedgerState (..), LedgerStateWithLimits (..))
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Cardano.Ledger.Shelley.Scripts (
   MultiSig,
@@ -74,11 +75,13 @@ testScriptPostTranslation =
               & ttlTxBodyL .~ SlotNo 1
           wits = mkBasicTxWits & scriptTxWitsL .~ Map.singleton scriptHash script
           txs = mkBasicTx txb & witsTxL .~ wits
-          txa = fromRight . runExcept $ translateEra @AllegraEra NoGenesis txs
+          txa =
+            unwrapMempoolTx . fromRight . runExcept $
+              translateEra @AllegraEra NoGenesis (UnsafeMkMempoolTx txs)
           result =
             runShelleyBase $
               applySTSTest @(Shelley.LEDGER AllegraEra)
-                (TRC (env, LedgerState utxoStAllegra def SNothing, txa))
+                (TRC (env, LedgerStateWithLimits (LedgerState utxoStAllegra def SNothing) mempty, txa))
        in case result of
             Left e -> error $ show e
             Right _ -> pure ()

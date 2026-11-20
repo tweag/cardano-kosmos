@@ -32,9 +32,11 @@ import Ouroboros.Consensus.Ledger.SupportsProtocol
   ( LedgerSupportsProtocol
   )
 import Ouroboros.Consensus.Ledger.Tables.MapKind (ValuesMK)
-import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
 import Ouroboros.Consensus.MiniProtocol.ChainSync.Client
   ( ChainSyncClientHandleCollection (..)
+  )
+import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.Inbound.State
+  ( ObjectDiffusionInboundHandleCollection (..)
   )
 import Ouroboros.Consensus.Peras.Context (StateSupportsPerasEpochContext)
 import Ouroboros.Consensus.Storage.ChainDB.API
@@ -141,10 +143,10 @@ mkChainDb ::
   IOLike m =>
   ( All Top (HardForkIndices blk)
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , StateSupportsPerasEpochContext blk
   , ChainDB.SerialiseDiskConstraints blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , BlockSupportsPeras blk
   , InspectLedger blk
   , ConvertRawHash blk
@@ -197,10 +199,10 @@ restoreNode ::
   ( IOLike m
   , All Top (HardForkIndices blk)
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , StateSupportsPerasEpochContext blk
   , ChainDB.SerialiseDiskConstraints blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , BlockSupportsPeras blk
   , InspectLedger blk
   , ConvertRawHash blk
@@ -229,10 +231,10 @@ lifecycleStart ::
   ( IOLike m
   , All Top (HardForkIndices blk)
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , StateSupportsPerasEpochContext blk
   , ChainDB.SerialiseDiskConstraints blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , BlockSupportsPeras blk
   , InspectLedger blk
   , ConvertRawHash blk
@@ -271,7 +273,8 @@ lifecycleStop resources LiveNode{lnStateViewTracers, lnCopyToImmDb, lnPeers} = d
   releaseAll lrRegistry
   -- Reset the resources in TVars that were allocated by the simulator
   atomically $ do
-    cschcRemoveAllHandles psrHandles
+    cschcRemoveAllHandles psrCSHandles
+    odihcRemoveAllHandles psrCDHandles
     case lrLoEVar of
       LoEEnabled var -> modifyTVar var (const (AF.Empty AF.AnchorGenesis))
       LoEDisabled -> pure ()
@@ -282,6 +285,6 @@ lifecycleStop resources LiveNode{lnStateViewTracers, lnCopyToImmDb, lnPeers} = d
   LiveResources
     { lrRegistry
     , lrTracer
-    , lrPeerSim = PeerSimulatorResources{psrHandles}
+    , lrPeerSim = PeerSimulatorResources{psrCSHandles, psrCDHandles}
     , lrLoEVar
     } = resources

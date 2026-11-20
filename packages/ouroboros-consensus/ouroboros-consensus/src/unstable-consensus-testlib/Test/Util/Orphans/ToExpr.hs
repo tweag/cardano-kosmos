@@ -18,13 +18,14 @@ import Data.TreeDiff
 import GHC.Generics (Generic)
 import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.BlockchainTime.WallClock.Types (RelativeTime, WithArrivalTime)
-import Ouroboros.Consensus.Committee.Class (VotingCommittee)
-import Ouroboros.Consensus.Committee.WFA (SeatIndex)
+import Cardano.Crypto.Peras.Committee.Class (VotingCommittee)
+import Cardano.Crypto.Peras.Committee.WFA (SeatIndex)
 import Ouroboros.Consensus.HeaderValidation
 import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Extended
 import Ouroboros.Consensus.Ledger.Peras (PerasState)
 import Ouroboros.Consensus.Ledger.SupportsMempool
+import Ouroboros.Consensus.Leios.Cert (LeiosCertRejection)
 import Ouroboros.Consensus.Mempool.API
 import Ouroboros.Consensus.Mempool.TxSeq
 import Ouroboros.Consensus.Peras.Cert.Mock (MockPerasCert)
@@ -168,6 +169,9 @@ instance
   toExpr = defaultExprViaShow
 
 deriving anyclass instance ToExpr PerasEpochContextNotFoundForRound
+
+instance ToExpr LeiosCertRejection where
+  toExpr = defaultExprViaShow
 
 deriving anyclass instance ToExpr SeatIndex
 deriving anyclass instance ToExpr PerasSeatIndex

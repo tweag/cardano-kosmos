@@ -37,6 +37,7 @@ import Cardano.Ledger.Conway.Governance
 import qualified Cardano.Ledger.Conway.Rules as Conway
 import Cardano.Ledger.Dijkstra (DijkstraEra)
 import Cardano.Ledger.Dijkstra.Tx (DijkstraStAnnTx (..))
+import Cardano.Ledger.MempoolTx (MempoolTx)
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Cardano.Ledger.State (ScriptsNeeded, ScriptsProvided)
@@ -104,7 +105,7 @@ instance
   ( EraPParams era
   , EraCertState era
   , EncCBOR (TxOut era)
-  , EncCBOR (Tx TopTx era)
+  , EncCBOR (MempoolTx era)
   ) =>
   EncCBOR (DijkstraLedgerExecContext era)
   where
@@ -128,16 +129,19 @@ instance
   ) =>
   NFData (DijkstraStAnnTx TopTx era)
   where
-  rnf stAnnTx@(DijkstraStAnnTopTx _ _ _ _ _ _ _ _) =
+  rnf stAnnTx@(DijkstraStAnnTopTx _ _ _ _ _ _ _ _ _ _ _) =
     let DijkstraStAnnTopTx {..} = stAnnTx
      in dsattTx `deepseq`
-          dsattScriptsNeeded `deepseq`
-            dsattScriptsProvided `deepseq`
-              dsattPlutusLegacyMode `deepseq`
-                dsattPlutusLanguagesUsed `deepseq`
-                  dsattPlutusRunnableCache `deepseq`
-                    dsattPlutusScriptsWithContext `deepseq`
-                      rnf dsattSubTransactions
+          dsattRefScriptsSize `deepseq`
+            dsattExUnits `deepseq`
+              dsattScriptsNeeded `deepseq`
+                dsattScriptsProvided `deepseq`
+                  dsattPlutusLegacyMode `deepseq`
+                    dsattPlutusLanguagesUsed `deepseq`
+                      dsattPlutusRunnableCache `deepseq`
+                        dsattPlutusScriptsWithContext `deepseq`
+                          dsattUTxO `seq`
+                            rnf dsattSubTransactions
 
 instance
   ( AlonzoEraTx era
@@ -159,6 +163,8 @@ instance
                     dsastPlutusRunnableCache `deepseq`
                       rnf dsastPlutusScriptsWithContext
 
+-- | The transaction is serialized in its block format, so that the dump is
+-- lossless about the phase 2 validity flag.
 instance EncCBOR (Tx TopTx era) => EncCBOR (DijkstraStAnnTx TopTx era) where
   encCBOR DijkstraStAnnTopTx {dsattTx} = encCBOR dsattTx
 
@@ -169,15 +175,18 @@ instance
   , ToExpr (ScriptsProvided era)
   , ToExpr (ContextError era)
   , ToExpr (PlutusPurpose AsItem era)
+  , ToExpr (TxOut era)
   , ToExpr (TxCert era)
   ) =>
   ToExpr (DijkstraStAnnTx TopTx era)
   where
-  toExpr stAnnTx@(DijkstraStAnnTopTx _ _ _ _ _ _ _ _) =
+  toExpr stAnnTx@(DijkstraStAnnTopTx _ _ _ _ _ _ _ _ _ _ _) =
     let DijkstraStAnnTopTx {..} = stAnnTx
      in TD.Rec "DijkstraStAnnTopTx" $
           OMap.fromList
             [ ("dsattTx", toExpr dsattTx)
+            , ("dsattRefScriptsSize", toExpr dsattRefScriptsSize)
+            , ("dsattExUnits", toExpr dsattExUnits)
             , ("dsattScriptsNeeded", toExpr dsattScriptsNeeded)
             , ("dsattScriptsProvided", toExpr dsattScriptsProvided)
             , ("dsattPlutusLegacyMode", toExpr dsattPlutusLegacyMode)
@@ -185,6 +194,7 @@ instance
             , ("dsattPlutusLanguagesUsed", toExpr dsattPlutusLanguagesUsed)
             , ("dsattPlutusScriptsWithContext", toExpr dsattPlutusScriptsWithContext)
             , ("dsattSubTransactions", toExpr dsattSubTransactions)
+            , ("dsattUTxO", toExpr dsattUTxO)
             ]
 
 -- | Note: 'dsastTxInfoResult' renders as a placeholder since 'TxInfoResult'
@@ -230,7 +240,7 @@ instance ExecSpecRule "LEDGER" DijkstraEra where
      in runFromAgdaFunction (Agda.ledgerStep externalFunctions') trc
 
 instance ExecSpecTopLevelRule "LEDGER" DijkstraEra where
-  mkRuleExecContext globals (TRC (env, state, signal)) =
+  mkRuleExecContext globals (TRC (env, LedgerStateWithLimits state _, signal)) =
     DijkstraLedgerExecContext
       { dlecGuardrailsScriptHash =
           state ^. lsUTxOStateL . utxosGovStateL . constitutionGovStateL . constitutionGuardrailsScriptHashL

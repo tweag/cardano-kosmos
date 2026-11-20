@@ -47,6 +47,7 @@ import Cardano.Ledger.Dijkstra.Rules.SubCerts (
   DijkstraSubCertsPredFailure,
   SubCertsEnv (..),
  )
+import Cardano.Ledger.Dijkstra.Rules.SubPool (DijkstraSubPoolPredFailure)
 import Cardano.Ledger.Dijkstra.Scripts (AccountBalanceInterval)
 import Cardano.Ledger.Dijkstra.TxBody (
   DijkstraEraTxBody,
@@ -203,6 +204,9 @@ instance InjectRuleFailure "SUBENTITIES" EntitiesPredFailure DijkstraEra where
 instance InjectRuleFailure "SUBENTITIES" Shelley.ShelleyUtxoPredFailure DijkstraEra where
   injectFailure = injectFailure @"SUBENTITIES" @EntitiesPredFailure . injectFailure @"ENTITIES"
 
+instance InjectRuleFailure "SUBENTITIES" DijkstraSubPoolPredFailure DijkstraEra where
+  injectFailure = SubCertsFailure . injectFailure
+
 instance
   ( EraTx era
   , DijkstraEraTxBody era
@@ -251,7 +255,7 @@ dijkstraSubEntitiesTransition = do
   let withdrawals = tx ^. bodyTxL . withdrawalsTxBodyL
       directDeposits = tx ^. bodyTxL . directDepositsTxBodyL
       accounts = certState ^. certDStateL . accountsL
-      subCertsEnv = SubCertsEnv tx pp curEpoch committee committeeProposals
+      subCertsEnv = SubCertsEnv pp curEpoch committee committeeProposals
 
   network <- liftSTS $ asks networkId
 

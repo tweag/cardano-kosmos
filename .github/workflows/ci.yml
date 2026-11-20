@@ -33,7 +33,9 @@ jobs:
           paths: |
             ~/.cabal/packages
             ~/.cabal/store
-            dist-newstyle
+          # we do not want to include dist-newstyle because it leads to failures
+          # when we switch between branches
+
           # do purge caches
           purge: true
           # purge all versions of the cache
@@ -63,6 +65,8 @@ jobs:
         shell: 'nix develop -c bash -e {0}'
         run: |
           cabal update
+          rm -rf dist-newstyle # temporary workaround for branch switching issues
           ./scripts/setup-testnet-env.sh devnet-env
           ./scripts/wait-until-peras.sh
+          sleep 36
           ./peras-trace-analyzer/check_peras_logs.py --no-cooldown --wait 60 --poll 10

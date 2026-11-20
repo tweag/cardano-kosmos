@@ -32,6 +32,8 @@ module Ouroboros.Consensus.Ledger.Extended
 
     -- * Peras epoch context resolver helpers
   , initPerasEpochContextResolverFromUntickedState
+  , perasApplyContext
+  , tickAndGetPerasEpochContextResolver
   , tickAndResolveRoundNo
 
     -- * Type family instances
@@ -45,6 +47,7 @@ import Codec.CBOR.Encoding (Encoding, encodeListLen)
 import Control.DeepSeq (NFData)
 import Control.Monad.Except
 import Control.Monad.Trans.Except (except)
+import qualified Control.State.Transition.Extended as STS
 import Data.Bifunctor (Bifunctor (..))
 import Data.Functor ((<&>))
 import Data.Maybe.Strict (StrictMaybe (..))
@@ -82,11 +85,14 @@ import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Peras (PerasState (..))
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils (forgetLedgerTables)
+import Ouroboros.Consensus.Leios.Cert (LeiosCertRejection)
+import Ouroboros.Consensus.Peras.ApplyContext (PerasApplyContext)
 import Ouroboros.Consensus.Peras.Context
   ( PerasEpochContextNotFoundForRound (..)
   , PerasEpochContextResolver (..)
   , StateSupportsPerasEpochContext (..)
   , initPerasEpochContextResolverFromUntickedState
+  , perasApplyContext
   , tickPerasEpochContextResolver
   , unsafeResolveRoundNo
   )
@@ -104,6 +110,8 @@ data ExtValidationError blk
   | ExtValidationErrorHeader !(HeaderError blk)
   | ExtValidationErrorPerasEpochContextResolver !PerasEpochContextNotFoundForRound
   | ExtValidationErrorPerasCertInBlock !(PerasError blk)
+  | -- | The block's Leios certificate does not establish its claim.
+    ExtValidationErrorLeiosCert !LeiosCertRejection
   deriving Generic
 
 deriving instance
@@ -173,9 +181,9 @@ instance IsLedger LedgerState blk => GetTip (ExtLedgerState blk) where
   getTip = castPoint . getTip . ledgerState
 
 -- | Read the current ledger state and slot clock, tick the ledger to that slot
--- (or skip ticking when the slot is unknown), and resolve the Peras epoch
--- context for the given round.
-tickAndResolveRoundNo ::
+-- (or skip ticking when the slot is unknown), and return its Peras epoch
+-- context resolver, with a note on how it was obtained.
+tickAndGetPerasEpochContextResolver ::
   ( MonadSTM m
   , LedgerSupportsProtocol blk
   , BlockSupportsPeras blk
@@ -189,27 +197,45 @@ tickAndResolveRoundNo ::
   -- to skip ticking and resolve against the current ledger tip (e.g. while the
   -- node is not caught up, so the current slot is unknown).
   STM m CurrentSlot ->
+  STM m (String, PerasEpochContextResolver blk)
+tickAndGetPerasEpochContextResolver cfg getLedgerState getSlot = do
+  extLedgerState <- getLedgerState
+  currentSlot <- getSlot
+  pure $ case currentSlot of
+    CurrentSlotUnknown ->
+      ( "unticked becase the current slot is unknown"
+      , perasEpochContextResolver (perasState extLedgerState)
+      )
+    CurrentSlot slotNo ->
+      ( "ticked to slot " <> show (unSlotNo slotNo)
+      , perasEpochContextResolver
+          ( tickedPerasState
+              ( applyChainTick
+                  OmitLedgerEvents
+                  (ExtLedgerCfg cfg)
+                  slotNo
+                  extLedgerState
+              )
+          )
+      )
+
+-- | Read the current ledger state and slot clock, tick the ledger to that slot
+-- (or skip ticking when the slot is unknown), and resolve the Peras epoch
+-- context for the given round.
+tickAndResolveRoundNo ::
+  ( MonadSTM m
+  , LedgerSupportsProtocol blk
+  , BlockSupportsPeras blk
+  , StateSupportsPerasEpochContext blk
+  , All Top (HardForkIndices blk)
+  ) =>
+  TopLevelConfig blk ->
+  STM m (ExtLedgerState blk EmptyMK) ->
+  STM m CurrentSlot ->
   PerasRoundNo ->
   STM m (Either PerasEpochContextNotFoundForRound (PerasEpochContext blk))
 tickAndResolveRoundNo cfg getLedgerState getSlot perasRoundNo = do
-  extLedgerState <- getLedgerState
-  currentSlot <- getSlot
-  let (extraInfoMsg, pstate) =
-        case currentSlot of
-          CurrentSlotUnknown ->
-            ( "unticked becase the current slot is unknown"
-            , perasState extLedgerState
-            )
-          CurrentSlot slotNo ->
-            ( "ticked to slot " <> show (unSlotNo slotNo)
-            , tickedPerasState
-                ( applyChainTick
-                    OmitLedgerEvents
-                    (ExtLedgerCfg cfg)
-                    slotNo
-                    extLedgerState
-                )
-            )
+  (extraInfoMsg, resolver) <- tickAndGetPerasEpochContextResolver cfg getLedgerState getSlot
   -- We can call `unsafeResolveRoundNo` here because we have properly ticked the
   -- ExtLedgerState before accessing the resolver
   pure
@@ -220,7 +246,7 @@ tickAndResolveRoundNo cfg getLedgerState getSlot perasRoundNo = do
             (reason <> " (" <> extraInfoMsg <> ")")
       )
       id
-    $ unsafeResolveRoundNo (perasEpochContextResolver pstate) perasRoundNo
+    $ unsafeResolveRoundNo resolver perasRoundNo
 
 {-------------------------------------------------------------------------------
   The extended ledger configuration
@@ -314,8 +340,10 @@ applyHelper ::
   ( HasCallStack
   , LedgerSupportsProtocol blk
   , BlockSupportsPeras blk
+  , StateSupportsPerasEpochContext blk
   ) =>
   ( HasCallStack =>
+    Maybe PerasApplyContext ->
     ComputeLedgerEvents ->
     LedgerCfg LedgerState blk ->
     blk ->
@@ -335,6 +363,9 @@ applyHelper f opts cfg blk TickedExtLedgerState{..} = do
   ledgerResult <-
     withExcept ExtValidationErrorLedger $
       f
+        -- What the ledger needs to validate the Peras certificate of the
+        -- block, from the resolver ticked to the slot of the block.
+        (perasApplyContext (perasEpochContextResolver tickedPerasState) tickedHeaderState)
         opts
         (configLedger $ getExtLedgerCfg cfg)
         blk
@@ -379,11 +410,6 @@ applyHelper f opts cfg blk TickedExtLedgerState{..} = do
     (\l -> ExtLedgerState l hdr perasState) <$> castLedgerResult ledgerResult
 
 -- | Extract and validate a Peras certificate from a block, if it exists.
---
--- This can fail in several ways:
--- 1. The block contains a Peras certificate that cannot be deserialized (temporary).
--- 2. The certificate claims to be from a round we cannot resolve.
--- 3. The certificate is invalid in the epoch resolved for its round.
 extractAndValidatePerasCertFromBlock ::
   forall blk.
   BlockSupportsPeras blk =>
@@ -391,7 +417,7 @@ extractAndValidatePerasCertFromBlock ::
   blk ->
   Except (LedgerErr ExtLedgerState blk) (Maybe (ValidatedPerasCert blk))
 extractAndValidatePerasCertFromBlock perasResolver blk = do
-  getPerasCertInBlockOrFail blk >>= \case
+  case getPerasCertInBlock blk of
     Nothing ->
       pure Nothing
     Just cert -> do
@@ -399,11 +425,6 @@ extractAndValidatePerasCertFromBlock perasResolver blk = do
       context <- resolveRoundNoOrFail roundNo
       Just <$> verifyPerasCertOrFail context cert
  where
-  getPerasCertInBlockOrFail =
-    withExcept ExtValidationErrorPerasCertInBlock
-      . except
-      . getPerasCertInBlock
-
   resolveRoundNoOrFail =
     withExcept ExtValidationErrorPerasEpochContextResolver
       . except
@@ -428,10 +449,10 @@ instance
   ApplyBlock ExtLedgerState blk
   where
   applyBlockLedgerResultWithValidation doValidate =
-    applyHelper (applyBlockLedgerResultWithValidation doValidate)
+    applyHelper (\perasContext -> applyBlockLedgerResultWithPerasContext perasContext doValidate)
 
   applyBlockLedgerResult =
-    applyHelper applyBlockLedgerResult
+    applyHelper (\perasContext -> applyBlockLedgerResultWithPerasContext perasContext STS.ValidateAll)
 
   reapplyBlockLedgerResult evs cfg blk TickedExtLedgerState{..} =
     (\l -> ExtLedgerState l hdr perasState) <$> castLedgerResult ledgerResult

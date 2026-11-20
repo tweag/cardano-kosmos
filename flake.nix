@@ -189,7 +189,6 @@
             pkgs.jq
             pkgs.gnused
             pkgs.moreutils
-            pkgs.python3
             pkgs.ripgrep
             pkgs.git-subrepo
             freshPkgs.victoriametrics
@@ -199,6 +198,7 @@
             freshPkgs.nickel
             freshPkgs.sqlite
             freshPkgs.envoy-bin
+            freshPkgs.python3
           ];
         });
       in

@@ -26,6 +26,7 @@ import Ouroboros.Consensus.Block.SupportsPeras
   ( BoostedBlock
   , IsPerasCert (..)
   , PerasBlockMinSlots (..)
+  , PerasBootstrapStatus (PerasBootstrapDisabled, PerasBootstrapEnabled)
   , PerasCertArrivalThreshold (..)
   , PerasCooldownRounds (..)
   , PerasIgnoranceRounds (..)
@@ -43,6 +44,8 @@ import Ouroboros.Consensus.Peras.Voting.Rules
   )
 import Ouroboros.Consensus.Peras.Voting.View
   ( LatestCertSeenView (..)
+  , PerasCandidate (..)
+  , PerasCandidateAge (..)
   , PerasVotingView (..)
   )
 import Ouroboros.Consensus.Util.Pred (Evidence (..), explainShallow)
@@ -60,7 +63,7 @@ import Test.Tasty.QuickCheck
   , testProperty
   )
 import Test.Util.Orphans.Arbitrary (genNominalDiffTime50Years)
-import Test.Util.Peras (genPointTestBlock)
+import Test.Util.Peras (genPerasCandidateWith, genPointTestBlock)
 import Test.Util.QuickCheck (geometric)
 import Test.Util.TestBlock (TestBlock)
 import Test.Util.TestEnv (adjustQuickCheckTests)
@@ -88,12 +91,15 @@ data PerasVotingRulesDecisionModel
   , vr1b :: Bool
   , vr2a :: Bool
   , vr2b :: Bool
+  , vr3 :: Bool
   }
 
 -- | A simplified model of the Peras voting rules, used to compare against the
 -- real implementation. The main difference is that this model computes the
 -- result of the predicate directly over the inputs, rather than using the
 -- 'Pred' combinators to produce evidence in either direction.
+-- Computation method for VR-2B is also slightly different to make it easier to
+-- catch bugs.
 --
 -- NOTE: this predicate could be lifted directly from the agda specification.
 isPerasVotingAllowedModel ::
@@ -113,10 +119,11 @@ isPerasVotingAllowedModel
       , vr1b
       , vr2a
       , vr2b
+      , vr3
       }
    where
     shouldVote
-      | (vr1a && vr1b) || (vr2a && vr2b) = Just candidateBlock
+      | ((vr1a && vr1b) || (vr2a && vr2b)) && vr3 = Just $ pcCandidate candidateBlock
       | otherwise = Nothing
 
     vr1a =
@@ -126,34 +133,46 @@ isPerasVotingAllowedModel
         NotOrigin cert ->
           currRoundNo == getPerasCertRound (lcsCert cert) + 1
         Origin ->
-          currRoundNo == PerasRoundNo 0
+          False
     vr1a2 =
       case latestCertSeen of
         NotOrigin cert ->
           lcsArrivalSlot cert <= lcsRoundStartSlot cert + _X
         Origin ->
-          True
+          False
     vr1b =
       case latestCertSeen of
         NotOrigin cert ->
           lcsCandidateBlockExtendsCert cert
         Origin ->
-          True
+          False
+
     vr2a =
       case latestCertSeen of
         NotOrigin cert ->
           getPerasCertRound (lcsCert cert) + _R <= currRoundNo
         Origin ->
-          _R <= currRoundNo
+          True
     vr2b =
-      case latestCertOnChainRound of
-        NotOrigin certRoundNo ->
-          (currRoundNo > certRoundNo)
-            && ( (currRoundNo `rmod` _K)
-                   == (certRoundNo `rmod` _K)
-               )
-        Origin ->
-          currRoundNo `rmod` _K == _K - 1
+      -- Here we deliberately use a different computation method than in the
+      -- actual voting rules implem, because we don't care about `c` and want to
+      -- make sure the two computation methods produce the same result.
+      case (perasBootstrapStatus perasParams, latestCertOnChainRound) of
+        (PerasBootstrapEnabled b, NotOrigin certRoundNo) ->
+          if b > certRoundNo
+            then (currRoundNo >= b) && ((currRoundNo `rmod` _K) == (b `rmod` _K))
+            else (currRoundNo >= certRoundNo) && ((currRoundNo `rmod` _K) == (certRoundNo `rmod` _K))
+        (PerasBootstrapEnabled b, Origin) ->
+          (currRoundNo >= b) && ((currRoundNo `rmod` _K) == (b `rmod` _K))
+        (PerasBootstrapDisabled, NotOrigin certRoundNo) ->
+          (currRoundNo >= certRoundNo) && ((currRoundNo `rmod` _K) == (certRoundNo `rmod` _K))
+        (PerasBootstrapDisabled, Origin) ->
+          False
+
+    vr3 = case (pcCandidateAge candidateBlock) of
+      PerasCandidateTooYoung -> False
+      PerasCandidateTooOld -> False
+      PerasCandidateWithRightAge -> True
 
     _X =
       SlotNo $
@@ -161,12 +180,12 @@ isPerasVotingAllowedModel
           perasCertArrivalThreshold $
             perasParams
     _R =
-      PerasRoundNo $
+      PerasRoundNo . fromIntegral $
         unPerasIgnoranceRounds $
           perasIgnoranceRounds $
             perasParams
     _K =
-      PerasRoundNo $
+      PerasRoundNo . fromIntegral $
         unPerasCooldownRounds $
           perasCooldownRounds $
             perasParams
@@ -178,7 +197,7 @@ isPerasVotingAllowedModel
 prop_isPerasVotingAllowed :: Property
 prop_isPerasVotingAllowed = forAll genPerasVotingView $ \pvv -> do
   -- Determine whether we should vote according to the model
-  let PerasVotingDecisionModel{shouldVote, vr1a, vr1b, vr2a, vr2b} =
+  let PerasVotingDecisionModel{shouldVote, vr1a, vr1b, vr2a, vr2b, vr3} =
         isPerasVotingAllowedModel pvv
   -- Some helper functions to report success/failure
   let chain = flip (foldr ($)) . reverse
@@ -188,7 +207,8 @@ prop_isPerasVotingAllowed = forAll genPerasVotingView $ \pvv -> do
           , tabulate "VR-1B" [show vr1b]
           , tabulate "VR-2A" [show vr2a]
           , tabulate "VR-2B" [show vr2b]
-          , tabulate "VR-(1A|1B|2A|2B)" [show (vr1a, vr1b, vr2a, vr2b)]
+          , tabulate "VR-3" [show vr3]
+          , tabulate "VR-(1A|1B|2A|2B|3)" [show (vr1a, vr1b, vr2a, vr2b, vr3)]
           , tabulate "Should vote according to model" [show (isJust shouldVote)]
           , tabulate "Actual result" [desc]
           ]
@@ -327,7 +347,7 @@ genPerasVotingView = do
   currRoundNo <- genPerasRoundNo
   latestCertSeen <- genWithOrigin (genLatestCertSeenView currRoundNo)
   latestCertOnChainRound <- genWithOrigin (genLatestCertOnChainRound currRoundNo)
-  candidateBlock <- genPointTestBlock
+  candidateBlock <- genPerasCandidateWith genPointTestBlock
   pure
     PerasVotingView
       { perasParams

@@ -32,16 +32,18 @@ import           Data.Monoid (Last (..))
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import           Data.Version (showVersion)
+import           Main.Utf8 (withUtf8)
 import           Options.Applicative
 import qualified Options.Applicative as Opt
 import           System.Exit (exitFailure)
 import           System.Info (arch, compilerName, compilerVersion, os)
 import           System.IO (hPutStrLn, stderr)
+import           System.IO.CodePage (withCP65001)
 
 import           Paths_cardano_node (version)
 
 main :: IO ()
-main = do
+main = withCP65001 $ withUtf8 $ do
   Crypto.cryptoInit
 
   toplevelExceptionHandler $ do

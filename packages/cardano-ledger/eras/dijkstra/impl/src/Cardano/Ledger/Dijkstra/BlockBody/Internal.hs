@@ -32,13 +32,11 @@ module Cardano.Ledger.Dijkstra.BlockBody.Internal (
   mkBasicBlockBodyDijkstra,
   DijkstraEraBlockBody (..),
   PerasCert (..),
-  PerasKey (..),
-  validatePerasCert,
 ) where
 
 import Cardano.Crypto.Leios (LeiosCert)
+import Cardano.Crypto.Peras.Cert (PerasCert (..))
 import Cardano.Ledger.Alonzo.Tx (AlonzoEraTx (..))
-import Cardano.Ledger.BaseTypes (Nonce, ProtVer (..))
 import Cardano.Ledger.Binary (
   Annotator (..),
   DecCBOR (..),
@@ -50,9 +48,9 @@ import Cardano.Ledger.Binary (
   encodeFoldableEncoder,
   encodeListLen,
   encodeNullStrictMaybe,
-  serialize',
  )
 import Cardano.Ledger.Block (LeiosEraBlockHeader)
+import Cardano.Ledger.Conway.BlockBody (ConwayBlockBodyLimits)
 import Cardano.Ledger.Core
 import Cardano.Ledger.Dijkstra.Era
 import Cardano.Ledger.Dijkstra.Tx (
@@ -74,8 +72,6 @@ import Cardano.Ledger.MemoBytes (
  )
 import Cardano.Ledger.Orphans ()
 import Control.DeepSeq (NFData)
-import Data.Array.Byte (ByteArray)
-import qualified Data.ByteString as BS
 import Data.Coerce (Coercible, coerce)
 import Data.Maybe.Strict (StrictMaybe (..))
 import Data.Sequence.Strict (StrictSeq)
@@ -107,18 +103,20 @@ data DijkstraBlockBodyRaw era = DijkstraBlockBodyRaw
   deriving (Generic)
 
 instance
-  (NFData (Tx TopTx era), NFData LeiosCert, NFData PerasCert) =>
+  NFData (Tx TopTx era) =>
   NFData (DijkstraBlockBodyRaw era)
 
 type instance MemoHashIndex (DijkstraBlockBodyRaw era) = EraIndependentBlockBody
 
 instance EraBlockBody DijkstraEra where
   type BlockBody DijkstraEra = DijkstraBlockBody DijkstraEra
+  type BlockBodyLimits DijkstraEra = ConwayBlockBodyLimits DijkstraEra
   type ProtocolEraBlockHeader h DijkstraEra = LeiosEraBlockHeader h DijkstraEra
   mkBasicBlockBody = mkBasicBlockBodyDijkstra
   txSeqBlockBodyL = lensMemoRawType @DijkstraEra dbbrTxs (\bb p -> bb {dbbrTxs = p})
   hashBlockBody (MkDijkstraBlockBody m) = extractHash $ getMemoBytesHash m
-  blockBodySize (ProtVer v _) = BS.length . serialize' v . encCBOR
+
+deriving newtype instance SafeToHash (DijkstraBlockBody era)
 
 mkBasicBlockBodyDijkstra ::
   forall era. (Era era, SafeToHash (Tx TopTx era)) => DijkstraBlockBody era
@@ -154,7 +152,7 @@ deriving instance Eq (Tx TopTx era) => Eq (DijkstraBlockBody era)
 deriving instance Show (Tx TopTx era) => Show (DijkstraBlockBody era)
 
 deriving newtype instance
-  (NFData (Tx TopTx era), NFData PerasCert) => NFData (DijkstraBlockBody era)
+  NFData (Tx TopTx era) => NFData (DijkstraBlockBody era)
 
 deriving newtype instance EncCBOR (DijkstraBlockBody era)
 
@@ -218,34 +216,3 @@ deriving via
     , DecCBOR (Annotator (TxWits era))
     ) =>
     DecCBOR (Annotator (DijkstraBlockBody era))
-
--- | Placeholder for Peras certificates
---
--- NOTE: The real type will be brought from 'cardano-base' once it's ready.
-newtype PerasCert = PerasCert ByteArray
-  deriving (Eq, Ord, Show, Generic)
-  deriving newtype (EncCBOR, DecCBOR)
-
-instance NoThunks PerasCert
-
-instance NFData PerasCert
-
--- | Placeholder for Peras public keys
---
--- NOTE: The real type will be brought from 'cardano-base' once it's ready.
-data PerasKey = PerasKey
-  deriving (Eq, Show, Generic, NoThunks)
-
--- | Mocked-up Peras certificate validation routine
---
--- NOTE: this function will be replaced with the real implementation from
--- 'cardano-base' once it's ready.
---
--- IMPORTANT: Until Peras is implemented this function must return False, which
--- effectively disables Peras certificate additon to the block body, hence
--- disables Peras all together
---
--- WARNING: re-enabled for Peras testnet. All validation still happens on the
--- Consensus side.
-validatePerasCert :: Nonce -> PerasKey -> PerasCert -> Bool
-validatePerasCert _ _ _ = True

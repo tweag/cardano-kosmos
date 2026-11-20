@@ -20,6 +20,7 @@ import qualified Cardano.Ledger.Conway.PParams as L
 import qualified Cardano.Ledger.Hashes as L
 import qualified Cardano.Ledger.Shelley.LedgerState as L
 import           Cardano.Testnet
+import           Cardano.Testnet.Test.Utils (testEra)
 
 import           Prelude
 
@@ -66,7 +67,7 @@ import qualified Hedgehog.Extras as H
 hprop_ledger_events_propose_new_constitution :: Property
 hprop_ledger_events_propose_new_constitution = integrationRetryWorkspace 2 "propose-new-constitution" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
-  conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
+  let conf@Conf { tempAbsPath } = mkConfig tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
 
@@ -90,10 +91,11 @@ hprop_ledger_events_propose_new_constitution = integrationRetryWorkspace 2 "prop
       numVotes = length allVotes
   annotateShow numVotes
 
-  let ceo = ConwayEraOnwardsConway
-      sbe = convert ceo
-      era = toCardanoEra sbe
-      cEra = AnyCardanoEra era
+  let era = testEra
+
+      ceo = convert era
+      sbe = convert era
+      cEra = AnyCardanoEra $ toCardanoEra sbe
       eraName = eraToString sbe
       creationOptions = def
         { creationEra = AnyShelleyBasedEra sbe
@@ -117,11 +119,6 @@ hprop_ledger_events_propose_new_constitution = integrationRetryWorkspace 2 "prop
           , L.ucppGovActionLifetime = EpochInterval 10
           }
       }
-
-  -- Rehash: the node validates genesis file hashes against configuration.yaml
-  conwayGenesisHash <- getShelleyGenesisHash conwayGenesisFile "ConwayGenesisHash"
-  H.rewriteJsonFile (tempAbsBasePath' </> "configuration.yaml") $
-    \(config :: Aeson.Value) -> config & Aeson._Object %~ (conwayGenesisHash <>)
 
   TestnetRuntime
     { testnetMagic
@@ -231,7 +228,7 @@ hprop_ledger_events_propose_new_constitution = integrationRetryWorkspace 2 "prop
         let execConfig' = addEnvVarsToConfig execConfig [("IPFS_GATEWAY_URI", "http://localhost:" ++ show port ++ "/")]
 
         void $ execCli' execConfig'
-          [ "conway", "governance", "action", "create-constitution"
+          [ eraToString sbe, "governance", "action", "create-constitution"
           , "--testnet"
           , "--governance-action-deposit", show minDRepDeposit
           , "--deposit-return-stake-verification-key-file", verificationKeyFp stakeKeys
@@ -249,7 +246,7 @@ hprop_ledger_events_propose_new_constitution = integrationRetryWorkspace 2 "prop
         txin2 <- findLargestUtxoForPaymentKey epochStateView sbe wallet1
 
         void $ execCli' execConfig'
-          [ "conway", "transaction", "build"
+          [ eraToString sbe, "transaction", "build"
           , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet1
           , "--tx-in", Text.unpack $ renderTxIn txin2
           , "--tx-out", Text.unpack (paymentKeyInfoAddr wallet0) <> "+" <> show @Int 5_000_000

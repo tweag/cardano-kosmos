@@ -57,6 +57,7 @@ module Ouroboros.Consensus.Node
   , ChainSyncIdleTimeout (..)
 
     -- * Internal helpers
+  , defaultMiniProtocolParameters
   , mkNodeKernelArgs
   , nodeKernelArgsEnforceInvariants
   , openChainDB
@@ -82,7 +83,8 @@ import Cardano.Network.NodeToNode
   , NodeToNodeVersionData (..)
   , RemoteAddress
   , blockFetchPipeliningMax
-  , defaultMiniProtocolParameters
+  , mkDefaultMiniProtocolParameters
+  , txSubmissionLogicVersion
   )
 import Cardano.Network.NodeToNode.Version (getLocalPerasSupport)
 import Cardano.Network.PeerSelection (ChurnMode (ChurnMode), PeerTrustable, UseBootstrapPeers (..))
@@ -122,6 +124,10 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck
   )
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( LeiosAnnouncementAgeLimits
+  , defaultLeiosAnnouncementAgeLimits
+  )
 import qualified Ouroboros.Consensus.Network.NodeToClient as NTC
 import qualified Ouroboros.Consensus.Network.NodeToNode as NTN
 import Ouroboros.Consensus.Node.DbLock
@@ -184,7 +190,7 @@ import Ouroboros.Network.PeerSelection.PeerSharing.Codec
 import Ouroboros.Network.PerasSupport (PerasSupport (..))
 import Ouroboros.Network.Protocol.Handshake.Version (Versions)
 import Ouroboros.Network.RethrowPolicy
-import Ouroboros.Network.TxSubmission.Inbound.V2 (TxSubmissionLogicVersion)
+import Ouroboros.Network.TxSubmission.Inbound.V2 (TxSubmissionLogicVersion (..))
 import Ouroboros.Network.TxSubmission.Inbound.V2.Types (TxSubmissionInitDelay)
 import qualified SafeWildCards
 import System.Exit (ExitCode (..))
@@ -397,6 +403,10 @@ data StdRunNodeArgs m blk
   -- ^ Determine whether to use the system default mempool capacity or explicitly set
   -- capacity of the mempool.
   , srnChainSyncIdleTimeout :: ChainSyncIdleTimeout
+  , srnLeiosAnnouncementAgeLimits :: Maybe LeiosAnnouncementAgeLimits
+  -- ^ Overrides 'defaultLeiosAnnouncementAgeLimits', how old an announcement
+  -- the node relays or accepts. A network whose immutable tip is only minutes
+  -- old, such as a test network, has to set its own, smaller limits.
   , -- Ad hoc values to replace default ChainDB configurations
     srnSnapshotPolicyArgs :: SnapshotPolicyArgs
   , srnQueryBatchSize :: QueryBatchSize
@@ -596,7 +606,12 @@ runWith RunNodeArgs{..} encAddrNtN decAddrNtN LowLevelRunNodeArgs{..} =
                       Nothing -> HistoricityCheck.noCheck
                       Just historicityCutoff ->
                         HistoricityCheck.mkCheck systemTime getGsmState historicityCutoff
-              fmap (nodeKernelArgsEnforceInvariants . llrnCustomiseNodeKernelArgs) $
+              fmap
+                ( withTxSubmissionLogicVersion rnTxSubmissionLogicVersion
+                    . nodeKernelArgsEnforceInvariants
+                    . llrnCustomiseNodeKernelArgs
+                )
+                $
                 mkNodeKernelArgs
                   registry
                   llrnBfcSalt
@@ -1067,7 +1082,8 @@ mkNodeKernelArgs
           , mempoolCapacityOverride = NoMempoolCapacityBytesOverride
           , mempoolTimeoutConfig = mempoolTimeoutConfig
           , miniProtocolParameters = defaultMiniProtocolParameters
-          , blockFetchConfiguration = Diffusion.defaultBlockFetchConfiguration bfcSalt
+          , blockFetchConfiguration =
+              Diffusion.mkDefaultBlockFetchConfiguration defaultMiniProtocolParameters bfcSalt
           , gsmArgs =
               GsmNodeKernelArgs
                 { gsmAntiThunderingHerd
@@ -1078,6 +1094,7 @@ mkNodeKernelArgs
           , getUseBootstrapPeers
           , keepAliveRng = kaRng
           , peerSharingRng = psRng
+          , leiosAnnouncementAgeLimits = defaultLeiosAnnouncementAgeLimits
           , publicPeerSelectionStateVar
           , genesisArgs
           , getDiffusionPipeliningSupport
@@ -1088,6 +1105,24 @@ mkNodeKernelArgs
 -- through 'llrnCustomiseNodeKernelArgs', but there are some limits to some
 -- values. This function makes sure we don't exceed those limits and that the
 -- values are consistent.
+-- | The node's default 'MiniProtocolParameters'. Their tx-submission logic
+-- version is replaced by the node's own ('withTxSubmissionLogicVersion').
+defaultMiniProtocolParameters :: MiniProtocolParameters
+defaultMiniProtocolParameters =
+  mkDefaultMiniProtocolParameters TxSubmissionLogicV1 Diffusion.defaultNodeTxSubmissionConfig
+
+-- | Run tx-submission with the node's 'TxSubmissionLogicVersion': it selects
+-- the decision policy and each connection's 'TxSubmissionConfig'.
+withTxSubmissionLogicVersion ::
+  TxSubmissionLogicVersion ->
+  NodeKernelArgs m addrNTN addrNTC blk ->
+  NodeKernelArgs m addrNTN addrNTC blk
+withTxSubmissionLogicVersion logicVersion nodeKernelArgs =
+  nodeKernelArgs
+    { miniProtocolParameters =
+        (miniProtocolParameters nodeKernelArgs){txSubmissionLogicVersion = logicVersion}
+    }
+
 nodeKernelArgsEnforceInvariants ::
   NodeKernelArgs m addrNTN (ConnectionId addrNTC) blk ->
   NodeKernelArgs m addrNTN (ConnectionId addrNTC) blk
@@ -1264,6 +1299,7 @@ stdLowLevelRunNodeArgsIO
     llrnCustomiseNodeKernelArgs =
       overBlockFetchConfiguration modifyBlockFetchConfiguration
         . modifyMempoolCapacityOverride
+        . modifyLeiosAnnouncementAgeLimits
      where
       modifyBlockFetchConfiguration =
         maybe
@@ -1279,6 +1315,11 @@ stdLowLevelRunNodeArgsIO
           id
           (\mc nka -> nka{mempoolCapacityOverride = mc})
           srnMaybeMempoolCapacityOverride
+      modifyLeiosAnnouncementAgeLimits =
+        maybe
+          id
+          (\limits nka -> nka{leiosAnnouncementAgeLimits = limits})
+          srnLeiosAnnouncementAgeLimits
 
     -- Limit the node version unless srnEnableInDevelopmentVersions is set
     limitToLatestReleasedVersion ::

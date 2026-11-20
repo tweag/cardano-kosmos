@@ -16,7 +16,7 @@
 
 module Test.Ouroboros.Storage.PerasCertDB.StateMachine (tests) where
 
-import Control.Monad (join)
+import Control.Monad (join, void)
 import Control.Monad.State
 import Control.Tracer (nullTracer)
 import Data.Containers.NonEmpty (HasNonEmpty (..))
@@ -37,7 +37,6 @@ import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
 import Ouroboros.Consensus.Storage.PerasCertDB.API
   ( AddPerasCertResult (..)
   , PerasCertDB
-  , WithBoostedBlockStatus
   )
 import Ouroboros.Consensus.Util.IOLike
 import Ouroboros.Consensus.Util.Orphans ()
@@ -76,7 +75,7 @@ instance StateModel Model where
     AddCert :: WithArrivalTime (ValidatedPerasCert TestBlock) -> Action Model AddPerasCertResult
     GetWeightSnapshot :: Action Model (PerasWeightSnapshot TestBlock)
     GetLatestCertSeen ::
-      Action Model (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert TestBlock))))
+      Action Model (Maybe (WithArrivalTime (ValidatedPerasCert TestBlock)))
     GarbageCollect :: SlotNo -> Action Model ()
 
   arbitraryAction _ (Model model)
@@ -182,7 +181,7 @@ instance RunModel Model (StateT (PerasCertDB IO TestBlock) IO) where
       lift $ atomically $ PerasCertDB.getLatestCertSeen perasCertDB
     GarbageCollect slotNo -> do
       perasCertDB <- get
-      lift $ join $ atomically $ PerasCertDB.garbageCollect perasCertDB slotNo
+      lift $ void $ join $ atomically $ PerasCertDB.garbageCollect perasCertDB slotNo
 
   postcondition (Model model, _) (AddCert cert) _ actual = do
     let expected = fst $ Model.addCert model cert

@@ -40,7 +40,7 @@ import qualified Hedgehog.Internal.Property as H
 hprop_querySlotNumber :: Property
 hprop_querySlotNumber = integrationRetryWorkspace 2 "query-slot-number" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf <- mkConf tempAbsBasePath'
+  let conf = mkConfig tempAbsBasePath'
 
   let tempBaseAbsPath' = makeTmpBaseAbsPath $ tempAbsPath conf
 
@@ -49,7 +49,7 @@ hprop_querySlotNumber = integrationRetryWorkspace 2 "query-slot-number" $ \tempA
     , testnetNodes
     } <- createAndRunTestnet def def conf
   ShelleyGenesis{sgSlotLength, sgEpochLength} <- H.noteShowM $ shelleyGenesis tr
-  SystemStart startTime <- H.noteShowM $ getStartTime tempAbsBasePath' tr
+  SystemStart startTime <- H.noteShowM $ getStartTime tr
 
   let slotLength = fromNominalDiffTimeMicro sgSlotLength
       -- how many slots can the checked value differ from

@@ -33,7 +33,9 @@ jobs:
           paths: |
             ~/.cabal/packages
             ~/.cabal/store
-            dist-newstyle
+          # we do not want to include dist-newstyle because it leads to failures
+          # when we switch between branches
+
           # do purge caches
           purge: true
           # purge all versions of the cache

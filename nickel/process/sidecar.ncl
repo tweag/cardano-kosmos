@@ -20,7 +20,4 @@ let labels = scenario.topology.node_labels |> std.string.join "," in
     "TESTNET_MAGIC=%{std.string.from_number scenario.topology.magic}",
     "VM_URL=http://%{input.ip}:%{std.string.from_number input.victoria.metrics_port}",
   ] @ input.cardano_binaries_env,
-  depends_on = {
-    cardano-testnet = { condition = 'process_healthy },
-  },
 }

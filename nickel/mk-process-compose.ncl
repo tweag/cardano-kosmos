@@ -1,9 +1,8 @@
+let { Project, .. } = import "./schemas/process-compose.ncl" in
+let { map, sort, .. } = std.array in
 let
-  { Project, .. } = import "./schemas/process-compose.ncl",
-in
-let
-  subprocess_guard = import "./process/subprocess-guard.ncl",
-  mk_cardano_testnet = import "./process/cardano-testnet.ncl",
+  mk_cardano_tracer = import "./process/cardano-tracer.ncl",
+  mk_cardano_node = import "./process/cardano-node.ncl",
   mk_chairman = import "./process/chairman.ncl",
   mk_victoria_logs = import "./process/victoria-logs.ncl",
   mk_vlagent = import "./process/vlagent.ncl",
@@ -15,26 +14,55 @@ let
   oracle_process = import "./process/oracle.ncl",
 in
 let
-  mk_proxy = fun input => match {
+  mk_proxy = fun input depends_on_first_node => match {
     'none => {},
-    'envoy params => { envoy = mk_envoy input.directory input.ip params.port, }
+    'envoy params => { envoy = mk_envoy input.directory input.ip params.port & depends_on_first_node, }
   } input.proxy,
-in fun old_input cardano_bins scenario portsOfNodes =>
+in
+let mk_node_name = fun n => "node%{n.idx}-%{n.node.role}-%{n.node.name}" in
+let
+  mk_cardano_nodes = fun input topology env pools pool_map_path =>
+    topology
+      |> map (fun n => 
+      let
+        node_env = [
+          "NODE_ID=node%{1 + n.idx}",
+          "PERAS_PRIVATE_KEYS_FILE=%{pool_map_path}"
+        ] @ (if n.node.role == "spo" then
+          let pool = std.array.at n.idx pools in
+          [ "PERAS_POOL_ID=%{pool.id}"
+          , "PERAS_PRIVATE_KEY=%{pool.private_key}" ]
+          else [])
+      in
+      {
+        field = mk_node_name n,
+        value = mk_cardano_node input (n.idx + 1) n.port n.node.role (env @ node_env)
+      })
+      |> std.record.from_array,
+in fun old_input cardano_bins scenario topology pools_map pools_map_path =>
 let input = old_input & { cardano_binaries = cardano_bins } in
+let first_node = std.array.at 0 topology in
+let depends_on_first_node = { depends_on = { "%{mk_node_name first_node}" = { condition = 'process_healthy } } } in
+let pools = pools_map
+  |> std.record.to_array
+  |> sort (fun a b => std.number.compare a.value.idx b.value.idx)
+  |> map (fun n => { id = n.field, private_key = n.value.private_key })
+in
 {
   version = "0.5",
   name = "peras-testnet-" ++ scenario.name,
   processes = {
-    subprocess-guard = subprocess_guard,
-    cardano-testnet = mk_cardano_testnet input scenario,
-    chairman = mk_chairman input scenario,
-    victoria-logs = mk_victoria_logs input,
-    vlagent = mk_vlagent input scenario portsOfNodes,
-    oracle = oracle_process,
+    cardano-tracer = mk_cardano_tracer input scenario,
+    chairman = mk_chairman input scenario & depends_on_first_node,
+    victoria-logs = mk_victoria_logs input & depends_on_first_node,
+    vlagent = mk_vlagent input scenario topology,
+    oracle = oracle_process & depends_on_first_node,
   } & (if std.record.has_field "port" input.prometheus then {
-    victoria-metrics = mk_victoria_metrics input scenario portsOfNodes,
+    victoria-metrics = mk_victoria_metrics input scenario topology & depends_on_first_node,
     grafana = mk_grafana input,
-    sidecar = mk_sidecar input scenario,
+    sidecar = mk_sidecar input scenario & depends_on_first_node,
     canary = mk_canary input scenario,
-  } else {}) & ( mk_proxy input ),
+  } else {})
+  & ( mk_proxy input depends_on_first_node )
+  & mk_cardano_nodes input topology scenario.env pools pools_map_path,
 } | Project

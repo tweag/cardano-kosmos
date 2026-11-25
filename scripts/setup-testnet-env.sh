@@ -142,8 +142,13 @@ if [ $start_directly_in_dijkstra ]; then
       .ExperimentalHardForksEnabled = true" $configurationFile | sponge $configurationFile
 fi
 
+dijkstraGenesisHash=$($CARDANO_CLI hash genesis-file --genesis "$DEVENV_PATH/dijkstra-genesis.json")
+shelleyGenesisHash=$($CARDANO_CLI hash genesis-file --genesis "$DEVENV_PATH/shelley-genesis.json")
+
 jq --argjson trace_options "$trace_options" \
   '.TraceOptions = $trace_options |
+  .Configuration.Testing.DijkstraGenesisHash = "'$dijkstraGenesisHash'" |
+  .Configuration.Protocol.ShelleyGenesisHash = "'$shelleyGenesisHash'" |
   .TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)

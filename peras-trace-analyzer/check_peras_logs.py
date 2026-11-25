@@ -187,30 +187,40 @@ def test_vote_diffusion(run, add_report):
 
 # 6. cert generated exactly at quorum
 def test_cert_generated_at_quorum(run, add_report):
-    N = run.nodes
-    thr = run.threshold()
-    if thr is None:
+    test_header = "cert generated when quorum reached"
+    threshold = run.threshold()
+    if threshold is None:
+        add_report(test_header, FAIL, "found no threshold in logs")
         return
-    gen_rounds, anomalies = set(), []
-    for n, nd in N.items():
-        byr = collections.defaultdict(list)
-        for k, v in nd["votes"].items():
-            byr[k[0]].append(v)
-        for r, vs in byr.items():
-            cum = F(0)
-            for _, gen, w in sorted(vs, key=lambda x: x[0]):
-                before, cum = cum, cum + w
-                if gen:
-                    gen_rounds.add(r)
-                if before < thr and thr <= cum and not gen:
-                    # print(before, thr, before < thr, cum, thr <= cum, not gen)
-                    # it may be ok if cert is received from the net already
-                    anomalies.append((n, r, float(before), float(cum), gen))
-    if not gen_rounds:
-        add_report("cert generated when quorum reached", PENDING, "no quorum threshold / cert yet")
+    generation_rounds, anomalies = set(), []
+    for node_id, node_data in run.nodes.items():
+        votes_by_round = collections.defaultdict(list)
+        for (round, _seat), vote in node_data["votes"].items():
+            votes_by_round[round].append(vote)
+        for round, votes in votes_by_round.items():
+            weight_sum = F(0)
+            for vote_recv_time, triggers_cert, weight in sorted(votes, key=lambda vote : vote[0]): # votes are sorted by reception time
+                before, weight_sum = weight_sum, weight_sum + weight
+                if triggers_cert:
+                    generation_rounds.add(round)
+                if before < threshold and threshold <= weight_sum and not triggers_cert:
+                    # Error if we don't generate a cert when the cumulated weight passes the threshold
+                    # This is an error only if we haven't received the certificate from the network already
+                    cert_recv_times_in_round = [
+                        recv_time
+                        for (cert_round, recv_time, _) in node_data["certs"]
+                        if cert_round == round
+                        ]
+                    if not cert_recv_times_in_round or min(cert_recv_times_in_round) > vote_recv_time:
+                        anomalies.append((node_id, round, float(before), float(weight_sum), triggers_cert))
+                if weight_sum < threshold and triggers_cert:
+                    # Error if we generate a cert when not enough weight has been seen
+                    anomalies.append((node_id, round, float(before), float(weight_sum), triggers_cert))
+    if not generation_rounds:
+        add_report(test_header, PENDING, "no quorum threshold / cert yet")
     else:
-        add_report("cert generated when quorum reached", FAIL if anomalies else PASS,
-            f"threshold {float(thr):.3f}; certs generated in rounds {sorted(gen_rounds)}"
+        add_report(test_header, FAIL if anomalies else PASS,
+            f"threshold {float(threshold):.3f}; certs generated in rounds {sorted(generation_rounds)}"
             + (f"; anomalies (node, round, before, after, generated): {anomalies[:3]}" if anomalies else ""))
 
 # 7. no second generation
@@ -411,8 +421,7 @@ def main():
         , test_not_eligible_skip_vote
         , test_non_persistent_voters_change
         , test_vote_diffusion
-        # This test should be more acccurate, it gives false positives if certs are received from the network before generations
-        # , test_cert_generated_at_quorum
+        , test_cert_generated_at_quorum
         , test_no_second_generation
         , test_certs_reach_certdb
         ]

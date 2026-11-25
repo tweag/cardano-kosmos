@@ -273,6 +273,18 @@ def test_cooldown_and_recovery(run, add_report):
         else:
             add_report("cooldown recovery", PASS, ", ".join(f"node{n}: r{a} -> r{b}" for n, a, b in rec))
 
+# 11. check vote/cert rounds consistency
+def test_vote_cert_consistency(run, add_report):
+    test_header = "vote/cert rounds consistency"
+    vote_rounds, cert_rounds = run.rounds_with_votes, run.rounds_with_certs
+    cert_no_vote = cert_rounds - vote_rounds
+    if cert_no_vote:
+        add_report(test_header, FAIL, f"rounds with certificate, but no votes: {sorted(cert_no_vote)}")
+    elif vote_rounds:
+        add_report(test_header, PASS, f"{len(cert_rounds)}/{len(vote_rounds)} rounds with vote also have certificates")
+    else:
+        add_report(test_header, PENDING, "no votes yet")
+
 def checks(run, test_list, here):
     out = []
 
@@ -317,6 +329,23 @@ def checks(run, test_list, here):
         round
         for node_data in nodes.values()
         for (round, _time, _message) in node_data["certs"]
+    )
+
+    all_rounds = run.rounds_with_votes | run.rounds_with_certs
+    for node_data in nodes.values():
+        all_rounds.update(node_data["dec"].keys())
+        all_rounds.update(node_data["dec_t"].keys())
+        all_rounds.update(node_data["forged"].keys())
+        all_rounds.update(
+            round
+            for (round, _seat) in node_data["forged_votes"].keys()
+        )
+    run.max_round = max(all_rounds)
+
+    run.votes = set(
+        vote_id
+        for node_data in nodes.values()
+        for vote_id in node_data["votes"].keys()
     )
 
     for test in test_list:
@@ -397,6 +426,8 @@ def report_stats(run, here):
     print(f"  Total nodes: {len(run.nodes)}")
     print(f"  Rounds with peras votes: {len(run.rounds_with_votes)}")
     print(f"  Rounds with peras certs: {len(run.rounds_with_certs)}")
+    print(f"  Number of rounds: {run.max_round}") # rounds start at 1
+    print(f"  Number of individual votes: {len(run.votes)}")
     print(f"  Nodes:")
     entries = json.load(open(os.path.join(here, "topologies.json")))
     for e in entries:
@@ -426,6 +457,7 @@ def main():
         , test_cert_generated_at_quorum
         , test_no_second_generation
         , test_certs_reach_certdb
+        , test_vote_cert_consistency
         ]
     if not a.no_cooldown:
         check_list.append(test_cooldown_and_recovery)

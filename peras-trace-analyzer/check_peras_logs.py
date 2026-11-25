@@ -103,23 +103,23 @@ class Run:
 # 1. non-stake nodes skip voting
 def test_relays_nodes_skip_voting(run, add_report):
     test_name = "Node without a positive stake skips voting"
-    N = run.nodes
+    nodes = run.nodes
     relays = run.relays
 
     if not relays:
         add_report(test_name, PENDING, "no node without stake found")
     else:
-        bad = [n for n in relays if N[n]["forged"]]
+        bad = [n for n in relays if nodes[n]["forged"]]
         add_report(test_name, FAIL if bad else PASS,
-            ", ".join(f"node{n}: {N[n]['nokey']} no-key lines, 0 votes forged" for n in relays))
+            ", ".join(f"node{n}: {nodes[n]['nokey']} no-key lines, 0 votes forged" for n in relays))
 
 # 2. eligible SPOs vote
 def test_eligible_spos_vote(run, add_report):
-    N = run.nodes
+    nodes = run.nodes
     spos = run.spos
     problems, info = [], []
     for n in spos:
-        nd = N[n]
+        nd = nodes[n]
         vd = sorted(r for r, d in nd["dec"].items() if d == "Vote")
         fg = sorted(nd["forged"])
         persistent = bool(fg) and all(p for _, p in nd["forged"].values()) and not nd["notvoter"]
@@ -128,7 +128,7 @@ def test_eligible_spos_vote(run, add_report):
         if persistent and fg != vd:
             problems.append(f"node{n} (persistent) voted {len(fg)}/{len(vd)} allowed rounds")
         info.append(f"node{n}: voted {len(fg)}/{len(vd)} allowed rounds" + (" (persistent)" if persistent else ""))
-    if not any(nd["forged"] for nd in N.values()):
+    if not any(nd["forged"] for nd in nodes.values()):
         add_report("eligible SPO votes", PENDING, "no vote forged yet")
     else:
         add_report("eligible SPO votes (persistent / non-persistent)", FAIL if problems else PASS,
@@ -136,10 +136,10 @@ def test_eligible_spos_vote(run, add_report):
 
 # 3. not eligible -> no vote
 def test_not_eligible_skip_vote(run, add_report):
-    N = run.nodes
+    nodes = run.nodes
     spos = run.spos
-    nv = {n: N[n]["notvoter"] for n in spos if N[n]["notvoter"]}
-    bad = [n for n in nv if set(nv[n]) & set(N[n]["forged"])]
+    nv = {n: nodes[n]["notvoter"] for n in spos if nodes[n]["notvoter"]}
+    bad = [n for n in nv if set(nv[n]) & set(nodes[n]["forged"])]
     if not nv:
         add_report("spos node skips voting when not eligible", PENDING, "no NotAVoter round seen")
     else:
@@ -148,8 +148,8 @@ def test_not_eligible_skip_vote(run, add_report):
 
 # 4. non-persistent voters change
 def test_non_persistent_voters_change(run, add_report):
-    N = run.nodes
-    npseats = collections.Counter(s for nd in N.values() for (s, p) in nd["forged"].values() if not p)
+    nodes = run.nodes
+    npseats = collections.Counter(s for nd in nodes.values() for (s, p) in nd["forged"].values() if not p)
     if not npseats:
         add_report("non-persistent voters change", PENDING, "no non-persistent vote yet")
     else:
@@ -159,10 +159,10 @@ def test_non_persistent_voters_change(run, add_report):
 
 # 5. vote diffusion
 def test_vote_diffusion(run, add_report):
-    N = run.nodes
+    nodes = run.nodes
     spos = run.spos
-    seat_node = {s: n for n in spos for (s, _) in N[n]["forged"].values()}
-    sets = {n: set(nd["votes"]) for n, nd in N.items()}
+    seat_node = {s: n for n in spos for (s, _) in nodes[n]["forged"].values()}
+    sets = {n: set(nd["votes"]) for n, nd in nodes.items()}
     union = set().union(*sets.values())
     missing = {n: len(union - s) for n, s in sets.items() if union - s}
     if not union:
@@ -171,9 +171,9 @@ def test_vote_diffusion(run, add_report):
         lat = []
         for k in union:
             o = seat_node.get(k[1])
-            if o and k in N[o]["votes"]:
-                t0 = N[o]["votes"][k][0]
-                lat += [(N[n]["votes"][k][0] - t0, n, k) for n in N if n != o and k in N[n]["votes"]]
+            if o and k in nodes[o]["votes"]:
+                t0 = nodes[o]["votes"][k][0]
+                lat += [(nodes[n]["votes"][k][0] - t0, n, k) for n in nodes if n != o and k in nodes[n]["votes"]]
         ls = sorted(x[0] for x in lat)
         slow = [(round(l, 1), n, k) for l, n, k in lat if l > 1]
         d = f"{len(union)} distinct votes"
@@ -225,22 +225,21 @@ def test_cert_generated_at_quorum(run, add_report):
 
 # 7. no second generation
 def test_no_second_generation(run, add_report):
-    N = run.nodes
-    gen_rounds = run.gen_rounds
-    dup = [(n, r, x) for n, nd in N.items()
+    nodes = run.nodes
+    dup = [(n, r, x) for n, nd in nodes.items()
            for r, x in collections.Counter(k[0] for k, v in nd["votes"].items() if v[1]).items() if x > 1]
-    add_report("no second cert generation", FAIL if dup else (PASS if gen_rounds else PENDING),
+    add_report("no second cert generation", FAIL if dup else (PASS if run.rounds_with_certs else PENDING),
         f"duplicates (node, round, count): {dup}" if dup else "exactly one generating vote per round per node")
 
 # 8. certs reach every node's CertDB (diffusion / local add)
 def test_certs_reach_certdb(run, add_report):
-    N = run.nodes
-    gen_rounds = run.gen_rounds
-    absent = {r: [n for n, nd in N.items() if not any(c[0] == r for c in nd["certs"])]
-              for r in sorted(gen_rounds)}
+    nodes = run.nodes
+    cert_rounds = run.rounds_with_certs
+    absent = {r: [n for n, nd in nodes.items() if not any(c[0] == r for c in nd["certs"])]
+              for r in sorted(cert_rounds)}
     absent = {r: m for r, m in absent.items() if m}
-    already = sum(1 for nd in N.values() for c in nd["certs"] if c[2].startswith("PerasCertAlready"))
-    if not gen_rounds:
+    already = sum(1 for nd in nodes.values() for c in nd["certs"] if c[2].startswith("PerasCertAlready"))
+    if not cert_rounds:
         add_report("certs reach every node's CertDB", PENDING, "no cert yet")
     else:
         d = (f"generated by VoteDB but missing from CertDB (round: nodes): {absent}"
@@ -248,13 +247,13 @@ def test_certs_reach_certdb(run, add_report):
         add_report("certs reach every node's CertDB", FAIL if absent else PASS,
             d + f"; {already} PerasCertAlreadyInDB events")
 
+# 9/10. cooldown and recovery
 def test_cooldown_and_recovery(run, add_report):
-    # 9/10. cooldown and recovery
     cd, rec = [], []
-    N = run.nodes
+    nodes = run.nodes
     spos = run.spos
     for n in spos:
-        d = N[n]["dec"]
+        d = nodes[n]["dec"]
         rounds = sorted(d)
         first_no = next((r for r in rounds if d[r] == "NoVote"
                          and any(d[q] == "Vote" for q in rounds if q < r)), None)
@@ -280,8 +279,8 @@ def checks(run, test_list, here):
     def add_report(name, st, detail):
         out.append((name, st, detail))
 
-    N = run.nodes
-    if not N:
+    nodes = run.nodes
+    if not nodes:
         return [("logs found", FAIL, "no nodes under logs/")]
 
     entries = json.load(open(os.path.join(here, "topologies.json")))
@@ -305,40 +304,42 @@ def checks(run, test_list, here):
             relays.append(node)
             relay_ports.append(int(e.get("port")))
 
-    run.spos = [n for n, nd in N.items() if int(nd["port"]) in spo_ports]
-    run.relays = [n for n, nd in N.items() if int(nd["port"]) in relay_ports]
+    run.spos = [n for n, nd in nodes.items() if int(nd["port"]) in spo_ports]
+    run.relays = [n for n, nd in nodes.items() if int(nd["port"]) in relay_ports]
 
-    run.gen_rounds = set()
-    for n, nd in N.items():
-        byr = collections.defaultdict(list)
-        for k, v in nd["votes"].items():
-            byr[k[0]].append(v)
-        for r, vs in byr.items():
-            for _, gen, _ in sorted(vs, key=lambda x: x[0]):
-                if gen:
-                    run.gen_rounds.add(r)
+    run.rounds_with_votes = set(
+        round
+        for node_data in nodes.values()
+        for (round, _) in node_data["votes"].keys()
+    )
+
+    run.rounds_with_certs = set(
+        round
+        for node_data in nodes.values()
+        for (round, _time, _message) in node_data["certs"]
+    )
 
     for test in test_list:
         test(run, add_report)
 
     # informational anomalies
-    inv = {n: nd["invalid_forged"] for n, nd in N.items() if nd["invalid_forged"]}
-    ie = {n: nd["incl_err"] for n, nd in N.items() if nd["incl_err"]}
+    inv = {n: nd["invalid_forged"] for n, nd in nodes.items() if nd["invalid_forged"]}
+    ie = {n: nd["incl_err"] for n, nd in nodes.items() if nd["incl_err"]}
     add_report("locally forged invalid blocks", WARN if inv else PASS, str(inv) if inv else "none")
     add_report("cert inclusion errors", WARN if ie else PASS, str(ie) if ie else "none")
 
     # Late duplicate deliveries (these can make visualisations misleading if the "latest"
     # delivery is picked instead of the first).
     issued = {}
-    for n, nd in N.items():
+    for n, nd in nodes.items():
         for k, t0 in nd.get("forged_votes", {}).items():
             issued.setdefault(k, (n, t0))
     # Fallback: if the forge event isn't traced, approximate the "issue time" as
     # the earliest VoteDB add time observed across nodes.
-    for k in set().union(*(set(nd.get("votes", {})) for nd in N.values())):
+    for k in set().union(*(set(nd.get("votes", {})) for nd in nodes.values())):
         if k not in issued:
             best = None
-            for n, nd in N.items():
+            for n, nd in nodes.items():
                 v = nd.get("votes", {}).get(k)
                 if v is None:
                     continue
@@ -348,7 +349,7 @@ def checks(run, test_list, here):
                 issued[k] = best
 
     late = []
-    for recv_n, nd in N.items():
+    for recv_n, nd in nodes.items():
         for (k, t, gen, w) in nd.get("votes_dups", []):
             issuer = issued.get(k)
             if issuer is None:
@@ -394,7 +395,8 @@ def report(out):
 def report_stats(run, here):
     print ("Run statistics:")
     print(f"  Total nodes: {len(run.nodes)}")
-    print(f"  Rounds with peras votes: {len(run.gen_rounds)}")
+    print(f"  Rounds with peras votes: {len(run.rounds_with_votes)}")
+    print(f"  Rounds with peras certs: {len(run.rounds_with_certs)}")
     print(f"  Nodes:")
     entries = json.load(open(os.path.join(here, "topologies.json")))
     for e in entries:

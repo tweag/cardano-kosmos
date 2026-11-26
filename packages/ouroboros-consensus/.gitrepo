@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = git@github.com:tweag/ouroboros-consensus.git
-	branch = 8cac78c855b972e0774accba8b8416ecf594ae24
-	commit = 8cac78c855b972e0774accba8b8416ecf594ae24
-	parent = 55822f108640c1f3f391535420ca79ba47b776d9
+	branch = peras/kosmos-integration-main
+	commit = 1ba3ec4100ca9b182329c18f13ad7bd7a08a6a9b
+	parent = 657c8fe0c34112fea8bfef96222f7afc2216ff6a
 	method = merge
 	cmdver = 0.4.9

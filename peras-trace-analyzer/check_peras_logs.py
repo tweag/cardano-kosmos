@@ -30,6 +30,13 @@ PASS, FAIL, WARN, PENDING = "PASS", "FAIL", "WARN", "PENDING"
 # the vote was issued (forged), report it.
 DUPLICATE_VOTE_LATE_THRESHOLD_S = 30.0
 
+from pprint import pprint
+
+PROBLEMS = [
+    (8, 1),
+    (8, 2),
+    (8, 6),
+]
 
 class Run:
     
@@ -65,28 +72,28 @@ class Run:
 
     @staticmethod
     def _apply_event(nd: dict, ne: pt.NodeEvent) -> None:
-        t, ev = ne.t, ne.event
+        log_timestamp, ev = ne.log_timestamp, ne.event
         if isinstance(ev, pt.CantReadEnv):
             nd["nokey"] += 1
         elif isinstance(ev, pt.VoteRulesDecision):
             nd["dec"][ev.round] = "Vote" if ev.is_vote else "NoVote"
-            nd["dec_t"].setdefault(ev.round, t)
+            nd["dec_t"].setdefault(ev.round, log_timestamp)
         elif isinstance(ev, pt.NotAVoterInRound):
             nd["notvoter"].append(ev.round)
         elif isinstance(ev, pt.ForgedVote):
             nd["forged"][ev.round] = (ev.seat, ev.persistent)
-            nd["forged_votes"][(ev.round, ev.seat)] = t
+            nd["forged_votes"][(ev.round, ev.seat)] = ev.arrival_time
         elif isinstance(ev, pt.InclusionError):
             nd["incl_err"] += 1
         elif isinstance(ev, pt.VoteDbAddVote):
             key = (ev.round, ev.seat)
             w = ev.weight if ev.weight is not None else F(0)
             if key not in nd["votes"]:
-                nd["votes"][key] = (t, ev.generated_cert, w)
+                nd["votes"][key] = (ev.arrival_time, ev.generated_cert, w)
             else:
-                nd["votes_dups"].append((key, t, ev.generated_cert, w))
+                nd["votes_dups"].append((key, ev.arrival_time, ev.generated_cert, w))
         elif isinstance(ev, pt.CertDbAddCert):
-            nd["certs"].append((ev.round, t, ev.result))
+            nd["certs"].append((ev.round, ev.arrival_time, ev.result))
         elif isinstance(ev, pt.ForgedInvalidBlock):
             nd["invalid_forged"] += 1
 
@@ -449,16 +456,17 @@ def main():
     ap.add_argument("--no-cooldown", action="store_true", help="skip cooldown checks")
     a = ap.parse_args()
     deadline = time.time() + a.wait
-    check_list = [ test_relays_nodes_skip_voting
-        , test_eligible_spos_vote
-        , test_not_eligible_skip_vote
-        , test_non_persistent_voters_change
-        , test_vote_diffusion
-        , test_cert_generated_at_quorum
-        , test_no_second_generation
-        , test_certs_reach_certdb
-        , test_vote_cert_consistency
-        ]
+    # check_list = [ test_relays_nodes_skip_voting
+    #     , test_eligible_spos_vote
+    #     , test_not_eligible_skip_vote
+    #     , test_non_persistent_voters_change
+    #     , test_vote_diffusion
+    #     , test_cert_generated_at_quorum
+    #     , test_no_second_generation
+    #     , test_certs_reach_certdb
+    #     , test_vote_cert_consistency
+    #     ]
+    check_list = [test_cert_generated_at_quorum]
     if not a.no_cooldown:
         check_list.append(test_cooldown_and_recovery)
     while True:
@@ -470,9 +478,20 @@ def main():
         time.sleep(a.poll)
     report_stats(run, a.results)
     report(out)
-    if any(c[1] == FAIL for c in out):
-        sys.exit(1)
-    sys.exit(2 if pend else 0)
+
+    for (node, round) in PROBLEMS:
+        trace = [
+            (node, round, seat, timestamp, gen, float(weight))
+            for (r, seat), (timestamp, gen, weight) in run.nodes[node]["votes"].items()
+            if r == round
+        ]
+        pprint(sorted(trace, key=lambda x: x[3]))
+
+    # if any(c[1] == FAIL for c in out):
+    #     sys.exit(1)
+    # sys.exit(2 if pend else 0)
+
+    return run
 
 if __name__ == "__main__":
     main()

@@ -19,7 +19,7 @@ those tests requires introduction of the failure state.
 
 Exit code: 0 all PASS/WARN, 1 some FAIL, 2 still PENDING at timeout.
 """
-import argparse, collections, json, os, re, sys, time
+import argparse, collections, json, os, sys, time
 from fractions import Fraction as F
 
 import peras_tracer as pt
@@ -57,36 +57,35 @@ class Run:
             "forged": {},       # round -> (seat, persistent)
             "forged_votes": {}, # (round, seat) -> time (vote issued / forged)
             "incl_err": 0,
-            "votes": {},        # (round, seat) -> (time, generated cert, weight)
-            "votes_dups": [],   # [(round, seat), time, generated cert, weight] duplicates (if any)
+            "votes": {},        # (round, seat) -> (vote, cert)
+            "votes_dups": [],   # [(round, seat), (vote, cert)] duplicates (if any)
             "certs": [],        # (round, time, result)
             "invalid_forged": 0,
         }
 
     @staticmethod
     def _apply_event(nd: dict, ne: pt.NodeEvent) -> None:
-        t, ev = ne.t, ne.event
+        log_timestamp, ev = ne.log_timestamp, ne.event
         if isinstance(ev, pt.CantReadEnv):
             nd["nokey"] += 1
         elif isinstance(ev, pt.VoteRulesDecision):
             nd["dec"][ev.round] = "Vote" if ev.is_vote else "NoVote"
-            nd["dec_t"].setdefault(ev.round, t)
+            nd["dec_t"].setdefault(ev.round, log_timestamp)
         elif isinstance(ev, pt.NotAVoterInRound):
             nd["notvoter"].append(ev.round)
         elif isinstance(ev, pt.ForgedVote):
-            nd["forged"][ev.round] = (ev.seat, ev.persistent)
-            nd["forged_votes"][(ev.round, ev.seat)] = t
+            nd["forged"][ev.vote.round] = (ev.vote.seat, ev.vote.persistent)
+            nd["forged_votes"][(ev.vote.round, ev.vote.seat)] = ev.vote.arrival_time
         elif isinstance(ev, pt.InclusionError):
             nd["incl_err"] += 1
         elif isinstance(ev, pt.VoteDbAddVote):
-            key = (ev.round, ev.seat)
-            w = ev.weight if ev.weight is not None else F(0)
+            key = (ev.vote.round, ev.vote.seat)
             if key not in nd["votes"]:
-                nd["votes"][key] = (t, ev.generated_cert, w)
+                nd["votes"][key] = (ev.vote, ev.cert)
             else:
-                nd["votes_dups"].append((key, t, ev.generated_cert, w))
+                nd["votes_dups"].append((key, (ev.vote, ev.cert)))
         elif isinstance(ev, pt.CertDbAddCert):
-            nd["certs"].append((ev.round, t, ev.result))
+            nd["certs"].append((ev.cert.round, ev.cert.arrival_time, ev.result))
         elif isinstance(ev, pt.ForgedInvalidBlock):
             nd["invalid_forged"] += 1
 
@@ -172,8 +171,8 @@ def test_vote_diffusion(run, add_report):
         for k in union:
             o = seat_node.get(k[1])
             if o and k in nodes[o]["votes"]:
-                t0 = nodes[o]["votes"][k][0]
-                lat += [(nodes[n]["votes"][k][0] - t0, n, k) for n in nodes if n != o and k in nodes[n]["votes"]]
+                t0 = nodes[o]["votes"][k][0].arrival_time
+                lat += [(nodes[n]["votes"][k][0].arrival_time - t0, n, k) for n in nodes if n != o and k in nodes[n]["votes"]]
         ls = sorted(x[0] for x in lat)
         slow = [(round(l, 1), n, k) for l, n, k in lat if l > 1]
         d = f"{len(union)} distinct votes"
@@ -192,42 +191,74 @@ def test_cert_generated_at_quorum(run, add_report):
     if threshold is None:
         add_report(test_header, FAIL, "found no threshold in logs")
         return
-    generation_rounds, anomalies = set(), []
+    generation_rounds, positive_anomalies, negative_anomalies = set(), [], []
     for node_id, node_data in run.nodes.items():
-        votes_by_round = collections.defaultdict(list)
-        for (round, _seat), vote in node_data["votes"].items():
-            votes_by_round[round].append(vote)
-        for round, votes in votes_by_round.items():
-            weight_sum = F(0)
-            for vote_recv_time, triggers_cert, weight in sorted(votes, key=lambda vote : vote[0]): # votes are sorted by reception time
-                before, weight_sum = weight_sum, weight_sum + weight
-                if triggers_cert:
-                    generation_rounds.add(round)
-                if before < threshold and threshold <= weight_sum and not triggers_cert:
-                    # Error if we don't generate a cert when the cumulated weight passes the threshold
-                    # This is an error only if we haven't received the certificate from the network already
-                    cert_recv_times_in_round = [
-                        recv_time
-                        for (cert_round, recv_time, _) in node_data["certs"]
-                        if cert_round == round
-                        ]
-                    if not cert_recv_times_in_round or min(cert_recv_times_in_round) > vote_recv_time:
-                        anomalies.append((node_id, round, float(before), float(weight_sum), triggers_cert))
-                if weight_sum < threshold and triggers_cert:
-                    # Error if we generate a cert when not enough weight has been seen
-                    anomalies.append((node_id, round, float(before), float(weight_sum), triggers_cert))
+
+        break_off_by_round = {
+            round: {
+                "votes": {},                # seat -> vote
+                "cert_with_pivot": None,    # (cert, seat) where "seat" issued the vote that created the cert
+            }
+            for round in run.all_rounds
+        }
+        for (round, seat), (vote, cert) in node_data["votes"].items():
+            break_off_by_round[round]["votes"][seat] = vote
+            if cert is not None:
+                break_off_by_round[round]["cert_with_pivot"] = (cert, seat)
+
+        for round, round_data in break_off_by_round.items():
+            # If no certificate has been generated this round: check that either
+            #   - we have received the certificate by the network,
+            #   - or the threshold wasn't reached.
+            if round_data["cert_with_pivot"] is None:
+                if round in run.rounds_with_certs:
+                    continue
+                weight_by_block = {}
+                for vote in round_data["votes"].values():
+                    hash = vote.boosted_block_hash
+                    weight_by_block[hash] = weight_by_block.get(hash, F(0)) + vote.weight
+                for weight_sum in weight_by_block.values():
+                    if weight_sum >= threshold:
+                        negative_anomalies.append((node_id, round, float(weight_sum)))
+            # If there has been a certificate in this round: check that it was generated
+            # by the vote which passed the threshold
+            else:
+                generation_rounds.add(round)
+                cert, pivot = round_data["cert_with_pivot"]
+                votes = round_data["votes"]
+                pivot_weight = votes[pivot].weight
+                cert_weight = F(0)
+                for voter in cert.voters:
+                    vote = votes[voter]
+                    if vote.boosted_block_hash == cert.boosted_block_hash:
+                        cert_weight += vote.weight
+                cert_weight_without_pivot = cert_weight - pivot_weight
+                if cert_weight_without_pivot >= threshold or cert_weight < threshold:
+                    positive_anomalies.append((node_id, round, float(cert_weight_without_pivot), float(cert_weight)))
+
     if not generation_rounds:
         add_report(test_header, PENDING, "no quorum threshold / cert yet")
     else:
-        add_report(test_header, FAIL if anomalies else PASS,
+        add_report(
+            test_header,
+            FAIL if positive_anomalies or negative_anomalies else PASS,
             f"threshold {float(threshold):.3f}; certs generated in rounds {sorted(generation_rounds)}"
-            + (f"; anomalies (node, round, before, after, generated): {anomalies[:3]}" if anomalies else ""))
+            + (f"; positive anomalies (node, round, before, after): {positive_anomalies[:3]}" if positive_anomalies else "")
+            + (f"; negative anomalies (node, round, total_weight): {negative_anomalies[:3]}" if negative_anomalies else "")
+        )
 
 # 7. no second generation
 def test_no_second_generation(run, add_report):
     nodes = run.nodes
-    dup = [(n, r, x) for n, nd in nodes.items()
-           for r, x in collections.Counter(k[0] for k, v in nd["votes"].items() if v[1]).items() if x > 1]
+    dup = [
+        (node_id, round, count) for node_id, node_data in nodes.items()
+        for round, count in collections.Counter(
+            round
+            for (round, _), (_, cert) in node_data["votes"].items()
+            if cert is not None
+        ).items()
+        if count > 1
+    ]
     add_report("no second cert generation", FAIL if dup else (PASS if run.rounds_with_certs else PENDING),
         f"duplicates (node, round, count): {dup}" if dup else "exactly one generating vote per round per node")
 
@@ -302,13 +333,6 @@ def checks(run, test_list, here):
     relay_ports = []
     for e in entries:
         node = e["node"]
-        stake = node.get("stake")
-
-        if stake is None:
-            text_stake = "None"
-        else:
-            text_stake = str(stake)
-
         if node.get("role") == "spo":
             spos.append(node)
             spo_ports.append(int(e.get("port")))
@@ -340,6 +364,7 @@ def checks(run, test_list, here):
             round
             for (round, _seat) in node_data["forged_votes"].keys()
         )
+    run.all_rounds = all_rounds
     run.max_round = max(all_rounds)
 
     run.votes = set(
@@ -379,15 +404,15 @@ def checks(run, test_list, here):
 
     late = []
     for recv_n, nd in nodes.items():
-        for (k, t, gen, w) in nd.get("votes_dups", []):
+        for (k, (vote, _)) in nd.get("votes_dups", []):
             issuer = issued.get(k)
             if issuer is None:
                 continue
             issuer_n, t0 = issuer
-            delay = t - t0
+            delay = vote.arrival_time - t0
             r, _seat = k
             next_round_t = nd.get("dec_t", {}).get(r + 1)
-            received_next_round = (next_round_t is not None and t >= next_round_t + 1)
+            received_next_round = (next_round_t is not None and vote.arrival_time >= next_round_t + 1)
             if received_next_round or delay > DUPLICATE_VOTE_LATE_THRESHOLD_S:
                 late.append((k, issuer_n, recv_n, delay, received_next_round))
 

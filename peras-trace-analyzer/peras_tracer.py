@@ -13,6 +13,7 @@ added as sources without changing downstream consumers.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import datetime
 import glob
@@ -85,11 +86,52 @@ def node_number_from_dir(log_dir: str) -> Optional[int]:
         return None
     return None
 
+@dataclasses.dataclass(frozen=True)
+class Vote:
+    round: int
+    seat: int
+    persistent: bool
+    arrival_time: float
+    weight: F
+    boosted_block_hash: str
+
+def _parse_vote(raw):
+    round = int(re.search(r"pvRoundNo = PerasRoundNo (\d+)", raw)[1])
+    seat = int(re.search(r"unPerasSeatIndex = (\d+)", raw)[1])
+    persistent = "NonPersistentPerasVoteEligibilityProof" not in raw
+    arrival_time = float(re.search(r"getArrivalTime = RelativeTime ([\d\.]+)s", raw)[1])
+    weight_capture = re.search(r"unVoteWeight = (\d+) % (\d+)", raw)
+    weight = F(numerator=int(weight_capture[1]), denominator=int(weight_capture[2]))
+    boosted_block_hash = re.search(r"pbrHash = ([^\}]+)\}", raw)[1]
+    return Vote(round, seat, persistent, arrival_time, weight, boosted_block_hash)
+
+@dataclasses.dataclass(frozen=True)
+class Cert:
+    round: int
+    arrival_time: float
+    boosted_block_hash: str
+    voters: set[int]
+    boost: int
+
+def _parse_cert_with_arrival_time(raw, arrival_time):
+    round = int(re.search(r"pcRoundNo = PerasRoundNo (\d+)", raw)[1])
+    boosted_block_hash = re.search(r"pbrHash = ([^\}]+)\}", raw)[1]
+    boost = int(re.search(r"vpcCertBoost = PerasWeight (\d+)", raw)[1])
+    voters_capture = re.search(r"bitmapBytes = (\[[^\]]*\])", raw)[1]
+    voters_str = ""
+    for octet in ast.literal_eval(voters_capture):
+        voters_str += bin(octet)[2:]
+    voters = set(idx for idx, votes in enumerate(voters_str) if votes == '1')
+    return Cert(round, arrival_time, boosted_block_hash, voters, boost)
+
+def _parse_cert(raw):
+    arrival_time = float(re.search(r"getArrivalTime = RelativeTime ([\d\.]+)s", raw)[1])
+    return _parse_cert_with_arrival_time(raw, arrival_time)
 
 @dataclasses.dataclass(frozen=True)
 class NodeEvent:
     node: int
-    t: float
+    log_timestamp: float
     event: "PerasEvent"
     port: str = "?"
 
@@ -136,27 +178,18 @@ class NotAVoterInRound(PerasEvent):
 
 @dataclasses.dataclass(frozen=True)
 class ForgedVote(PerasEvent):
-    round: int
-    seat: int
-    persistent: bool
-    slot: Optional[int] = None
-    weight: Optional[F] = None
-    boosted_block: Optional[list [str]] = None
+    vote: Vote
 
 
 @dataclasses.dataclass(frozen=True)
 class VoteDbAddVote(PerasEvent):
-    round: int
-    seat: int
-    generated_cert: bool
-    weight: Optional[F] = None
-    cert_round: Optional[int] = None
-    boosted_block: Optional[list [str]] = None
+    vote: Vote
+    cert: Optional[Cert]
 
 
 @dataclasses.dataclass(frozen=True)
 class CertDbAddCert(PerasEvent):
-    round: int
+    cert: Cert
     result: str
 
 
@@ -204,16 +237,16 @@ class FileTracer:
         for line in open(self.path, errors="replace"):
             try:
                 j = json.loads(line)
-                t, ns, data = ts(j["at"]), j["ns"], j.get("data", {}) or {}
+                log_timestamp, ns, data = ts(j["at"]), j["ns"], j.get("data", {}) or {}
             except Exception:
                 continue
             if not emitted_start:
                 emitted_start = True
-                yield NodeEvent(node=self.node, port=self.port, t=t, event=LogStart())
+                yield NodeEvent(node=self.node, port=self.port, log_timestamp=log_timestamp, event=LogStart())
             ev = PerasTracer.parse_event(ns, data)
             if ev is None:
                 continue
-            yield NodeEvent(node=self.node, port=self.port, t=t, event=ev)
+            yield NodeEvent(node=self.node, port=self.port, log_timestamp=log_timestamp, event=ev)
 
 
 class PerasTracer:
@@ -237,7 +270,7 @@ class PerasTracer:
                 ev = next(it)
             except StopIteration:
                 continue
-            heapq.heappush(heap, (ev.t, i, ev))
+            heapq.heappush(heap, (ev.log_timestamp, i, ev))
         while heap:
             _, i, ev = heapq.heappop(heap)
             yield ev
@@ -245,7 +278,7 @@ class PerasTracer:
                 nxt = next(iters[i])
             except StopIteration:
                 continue
-            heapq.heappush(heap, (nxt.t, i, nxt))
+            heapq.heappush(heap, (nxt.log_timestamp, i, nxt))
 
     @staticmethod
     def parse_weight(s: str) -> Optional[F]:
@@ -301,39 +334,21 @@ def _parse_not_a_voter_in_round(x: dict) -> Optional[PerasEvent]:
 
 
 def _parse_forged_vote(x: dict) -> Optional[PerasEvent]:
-    vote = x["vote"]
-    seat = int(re.search(r"unPerasSeatIndex = (\d+)", vote)[1])
-    slot_m = re.search(r"Bytes32RealPoint \(SlotNo (\d+)\)", vote)
-    persistent = "NonPersistentPerasVoteEligibilityProof" not in vote
-    ev_boosted_block = re.search(r"PerasBoostedBlock {unPerasBoostedBlock = At \(Bytes32RealPoint \(SlotNo (\d+)\) \"%s\"\)", x.get("vote", ""))
-    return ForgedVote(
-        round=int(x["round"]),
-        seat=seat,
-        persistent=persistent,
-        slot=int(slot_m[1]) if slot_m else None,
-        weight=PerasTracer.parse_weight(vote),
-        boosted_block=int(ev_boosted_block[1]) if ev_boosted_block else None,
-    )
-
+    return ForgedVote(vote=_parse_vote(x["vote"]))
 
 def _parse_vote_db_add_vote(x: dict) -> Optional[PerasEvent]:
-    m = re.search(r"PerasRoundNo (\d+).*unPerasSeatIndex = (\d+)", x["voteId"])
-    generated = "AndGenerated" in x.get("result", "")
-    result_s = x.get("result", "")
-    cert_m = re.search(r"pcRoundNo = PerasRoundNo (\d+)", result_s) if generated else None
-    ev_boosted_block = re.search(r"PerasBoostedBlock {unPerasBoostedBlock = At \(Bytes32RealPoint \(SlotNo (\d+)\) \"%s\"\)", x.get("vote", ""))
-    return VoteDbAddVote(
-        round=int(m[1]),
-        seat=int(m[2]),
-        generated_cert=generated,
-        boosted_block=int(ev_boosted_block[1]) if ev_boosted_block else None,
-        weight=PerasTracer.parse_weight(x.get("vote", "")),
-        cert_round=(int(cert_m[1]) if cert_m else None),
-    )
+    result = x["result"]
 
+    vote = _parse_vote(x["vote"])
+    cert = _parse_cert_with_arrival_time(result, vote.arrival_time) if "AndGenerated" in result else None
+
+    return VoteDbAddVote(vote=vote, cert=cert)
 
 def _parse_cert_db_add_cert(x: dict) -> Optional[PerasEvent]:
-    return CertDbAddCert(round=int(re.search(r"\d+", x["round"])[0]), result=str(x["result"]))
+    return CertDbAddCert(
+        cert=_parse_cert(x["cert"]),
+        result=x["result"],
+    )
 
 
 def _parse_outbound_reply_objects(x: dict) -> Optional[PerasEvent]:

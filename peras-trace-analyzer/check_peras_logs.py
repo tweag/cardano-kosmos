@@ -397,7 +397,7 @@ def checks(run, test_list, here):
                 v = nd.get("votes", {}).get(k)
                 if v is None:
                     continue
-                t0 = v[0]
+                t0 = v[0].arrival_time
                 best = (n, t0) if best is None or t0 < best[1] else best
             if best is not None:
                 issued[k] = best

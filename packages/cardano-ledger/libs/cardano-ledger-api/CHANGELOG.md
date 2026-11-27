@@ -2,6 +2,100 @@
 
 ## 1.16.0.0
 
+* Re-export `getTxOutsReferenceScripts` from `Cardano.Ledger.Api.Tx.Out`
+* Re-export protocol parameters introduced in Conway and Dijkstra eras from `Cardano.Ledger.Api.PParams`:
+  - `UpgradeConwayPParams`
+  - `PoolVotingThresholds`
+  - `pvtMotionNoConfidenceL`
+  - `pvtCommitteeNormalL`
+  - `pvtCommitteeNoConfidenceL`
+  - `pvtHardForkInitiationL`
+  - `pvtPPSecurityGroupL`
+  - `ppPoolVotingThresholdsL`
+  - `ppuPoolVotingThresholdsL`
+  - `DRepVotingThresholds`
+  - `dvtMotionNoConfidenceL`
+  - `dvtCommitteeNormalL`
+  - `dvtCommitteeNoConfidenceL`
+  - `dvtUpdateToConstitutionL`
+  - `dvtHardForkInitiationL`
+  - `dvtPPNetworkGroupL`
+  - `dvtPPEconomicGroupL`
+  - `dvtPPTechnicalGroupL`
+  - `dvtPPGovGroupL`
+  - `dvtTreasuryWithdrawalL`
+  - `ppDRepVotingThresholdsL`
+  - `ppuDRepVotingThresholdsL`
+  - `ppCommitteeMinSizeL`
+  - `ppuCommitteeMinSizeL`
+  - `ppCommitteeMaxTermLengthL`
+  - `ppuCommitteeMaxTermLengthL`
+  - `ppGovActionLifetimeL`
+  - `ppuGovActionLifetimeL`
+  - `ppGovActionDepositL`
+  - `ppuGovActionDepositL`
+  - `ppDRepDepositL`
+  - `ppuDRepDepositL`
+  - `ppDRepActivityL`
+  - `ppuDRepActivityL`
+  - `ppMinFeeRefScriptCostPerByteL`
+  - `ppuMinFeeRefScriptCostPerByteL`
+  - `UpgradeDijkstraPParams`
+  - `ppMaxRefScriptSizePerBlockL`
+  - `ppuMaxRefScriptSizePerBlockL`
+  - `ppMaxRefScriptSizePerTxL`
+  - `ppuMaxRefScriptSizePerTxL`
+  - `ppRefScriptCostStrideL`
+  - `ppuRefScriptCostStrideL`
+  - `ppRefScriptCostMultiplierL`
+  - `ppuRefScriptCostMultiplierL`
+  - `MaxPledgeLeverage`
+  - `ppMaxPledgeLeverageL`
+  - `ppuMaxPledgeLeverageL`
+  - `ppMinPoolMarginL`
+  - `ppuMinPoolMarginL`
+  - `ppLeiosAnnouncementPeriodLengthL`
+  - `ppuLeiosAnnouncementPeriodLengthL`
+  - `ppLeiosVotePeriodLengthL`
+  - `ppuLeiosVotePeriodLengthL`
+  - `ppLeiosDiffusionPeriodLengthL`
+  - `ppuLeiosDiffusionPeriodLengthL`
+  - `ppLeiosCommitteeSizeL`
+  - `ppuLeiosCommitteeSizeL`
+  - `ppLeiosQuorumStakeThresholdL`
+  - `ppuLeiosQuorumStakeThresholdL`
+  - `ppMaxEndorserBlockReferencesSizeL`
+  - `ppuMaxEndorserBlockReferencesSizeL`
+  - `ppMaxEndorserBlockTxsSizeL`
+  - `ppuMaxEndorserBlockTxsSizeL`
+  - `ppMaxEndorserBlockExUnitsL`
+  - `ppuMaxEndorserBlockExUnitsL`
+  - `ppMaxRefScriptSizePerEndorserBlockL`
+  - `ppuMaxRefScriptSizePerEndorserBlockL`
+  - `ppPerasMinCandidateBlockAgeL`
+  - `ppuPerasMinCandidateBlockAgeL`
+  - `ppPerasHealingFactorL`
+  - `ppuPerasHealingFactorL`
+  - `ppPerasCertBoostL`
+  - `ppuPerasCertBoostL`
+  - `ppPerasTargetCommitteeSizeL`
+  - `ppuPerasTargetCommitteeSizeL`
+  - `ppPerasBootstrapRoundL`
+  - `ppuPerasBootstrapRoundL`
+  - `ppPerasQuorumThresholdSafetyMarginL`
+  - `ppuPerasQuorumThresholdSafetyMarginL`
+  - `ppRefInputsCostPerMultiAssetPolicyL`
+  - `ppuRefInputsCostPerMultiAssetPolicyL`
+  - `ppRefInputsCostPerDatumByteL`
+  - `ppuRefInputsCostPerDatumByteL`
+  - `ConwayEraPParams`
+  - `DijkstraEraPParams`
+* Add a `PState` argument to `calcMinFeeTx`
+* Re-export `MempoolTx` and `unwrapMempoolTx` from `Cardano.Ledger.Api.Tx`
+* Replace `binaryUpgradeTx` with new function `binaryUpgradeMempoolTx`
+* Add `Cardano.Ledger.Api.Leios` for standalone Leios certificate validation:
+  - Add `validateLeiosCert`
+  - Re-export `LeiosCertEnv`, `DijkstraLeiosCertPredFailure` and `LeiosCert`
 * Add `queryStakePoolState` with the `QueryResultStakePoolState` result type
 * Add `queryLeiosCommittee` (`GetLeiosCommittee`) with the `QueryResultLeiosCommittee` result type
 * Add methods to `AnyEraTxBody`:

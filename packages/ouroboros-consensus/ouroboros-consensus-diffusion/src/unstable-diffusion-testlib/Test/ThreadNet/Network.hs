@@ -43,7 +43,6 @@ import Cardano.Network.NodeToNode
   , ExpandedInitiatorContext (..)
   , IsBigLedgerPeer (..)
   , ResponderContext (..)
-  , defaultMiniProtocolParameters
   )
 import Cardano.Network.PeerSelection
   ( PeerTrustable (..)
@@ -67,6 +66,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
+import Data.Maybe.Strict (StrictMaybe (SNothing))
 import Data.Set (Set)
 import qualified Data.Set as Set
 import qualified Data.Typeable as Typeable
@@ -93,10 +93,14 @@ import Ouroboros.Consensus.Mempool
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client as CSClient
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.HistoricityCheck as HistoricityCheck
 import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.InFutureCheck as InFutureCheck
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Client.Announcements.Validation
+  ( defaultLeiosAnnouncementAgeLimits
+  )
 import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Type (LeiosNotify)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasCert (PerasCertDiffusion)
 import Ouroboros.Consensus.MiniProtocol.ObjectDiffusion.PerasVote (PerasVoteDiffusion)
 import qualified Ouroboros.Consensus.Network.NodeToNode as NTN
+import Ouroboros.Consensus.Node (defaultMiniProtocolParameters)
 import Ouroboros.Consensus.Node.ExitPolicy
 import qualified Ouroboros.Consensus.Node.GSM as GSM
 import Ouroboros.Consensus.Node.Genesis
@@ -139,6 +143,7 @@ import Ouroboros.Network.PeerSelection.Governor
   ( makePublicPeerSelectionStateVar
   )
 import Ouroboros.Network.PeerSelection.PeerMetric (nullMetric)
+import Ouroboros.Network.PerasSupport (PerasSupport (PerasUnsupported))
 import Ouroboros.Network.Point (WithOrigin (..))
 import qualified Ouroboros.Network.Protocol.ChainSync.Type as CS
 import Ouroboros.Network.Protocol.KeepAlive.Type
@@ -957,7 +962,15 @@ runThreadNetwork
                 -- ChainDB will reject it as invalid, and
                 -- 'Test.ThreadNet.General.prop_general' will eventually fail
                 -- because of a block rejection.
-                void $ ChainDB.addBlock chainDB InvalidBlockPunishment.noPunishment ebb
+                --
+                -- Only Byron has EBBs, and Byron has no Leios.
+                void $
+                  ChainDB.addBlock
+                    chainDB
+                    InvalidBlockPunishment.noPunishment
+                    (pointSlot p)
+                    SNothing
+                    ebb
                 pure forged
 
       -- This variable holds the number of the earliest slot in which the
@@ -1067,6 +1080,7 @@ runThreadNetwork
               , mempoolTimeoutConfig = Nothing
               , keepAliveRng = kaRng
               , peerSharingRng = psRng
+              , leiosAnnouncementAgeLimits = defaultLeiosAnnouncementAgeLimits
               , miniProtocolParameters = defaultMiniProtocolParameters
               , blockFetchConfiguration =
                   BlockFetchConfiguration
@@ -1445,7 +1459,11 @@ directedEdgeInner
                       "ChainSync"
                       (\_s _ -> RestartChainSyncTerminated)
                       (\_s () -> RestartChainSyncTerminated)
-                      NTN.aChainSyncClient
+                      -- TODO: ThreadNet currently doesn't start up certificate
+                      -- object diffusion, so we pass PerasUnsupported to avoid
+                      -- waiting indefinitely.
+                      -- See https://github.com/tweag/cardano-peras/issues/303.
+                      (\a v e c -> NTN.aChainSyncClient a PerasUnsupported v e c)
                       NTN.aChainSyncServer
                       chainSyncMiddle
                   , miniProtocol
@@ -1631,9 +1649,11 @@ newNodeInfo = do
     (v2, m2) <- mk
     (v3, m3) <- mk
     (v4, m4) <- mk
+    (v5, m5) <- mk
+    (v6, m6) <- mk
     pure
-      ( NodeDBs v1 v2 v3 v4
-      , NodeDBs <$> m1 <*> m2 <*> m3 <*> m4
+      ( NodeDBs v1 v2 v3 v4 v5 v6
+      , NodeDBs <$> m1 <*> m2 <*> m3 <*> m4 <*> m5 <*> m6
       )
 
   pure
@@ -1834,7 +1854,7 @@ type LimitedApp' m addr blk =
     (AnyMessage KeepAlive)
     (AnyMessage (PeerSharing addr))
     (AnyMessage (LeiosNotify LeiosPoint (Header blk) LeiosVote))
-    -- The annotated LeiosFetch codec needs the bytes, too.
+    -- The annotated LeiosFetch codec needs the bytes.
     Lazy.ByteString
     NodeToNodeInitiatorResult
     ()

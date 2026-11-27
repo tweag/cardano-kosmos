@@ -28,7 +28,6 @@ import Cardano.Crypto.DSIGN (
   DSIGNAlgorithm (deriveVerKeyDSIGN, genKeyDSIGNWithContext),
   seedSizeDSIGN,
  )
-import Cardano.Crypto.DSIGN.BLS12381.Internal (minSigPoPDST)
 import Cardano.Crypto.Seed (mkSeedFromBytes)
 import Cardano.Ledger.Address (DirectDeposits (..))
 import Cardano.Ledger.Alonzo.Plutus.Context (EraPlutusTxInfo)
@@ -205,7 +204,7 @@ exampleDijkstraGenesis =
           , udppPerasQuorumThresholdSafetyMargin = 1 %! 20
           , -- No pricing logic uses these yet, they are enabled by a later
             -- intra-era hard fork within the Dijkstra era.
-            udppRefInputsCostPerMultiAssetPolicy = Coin 0
+            udppRefInputsCostPerMultiAssetByte = CoinPerByte (CompactCoin 0)
           , udppRefInputsCostPerDatumByte = CoinPerByte (CompactCoin 0)
           }
     }
@@ -412,7 +411,7 @@ exampleBlsKey :: BlsKey
 exampleBlsKey =
   BlsKey
     { blsPubKey = vk
-    , blsPossessionProof = createPossessionProofDSIGN minSigPoPDST sk
+    , blsPossessionProof = createPossessionProofDSIGN sk
     }
   where
     seed = mkSeedFromBytes $ Strict.replicate (fromIntegral $ seedSizeDSIGN (Proxy @BLS12381MinSigDSIGN)) 42

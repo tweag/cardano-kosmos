@@ -4,6 +4,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
@@ -28,6 +29,7 @@
 -- and __without any warning__ between minor versions of this package.
 module Cardano.Ledger.Shelley.BlockBody.Internal (
   ShelleyBlockBody (ShelleyBlockBody, ..),
+  ShelleyBlockBodyLimits (..),
   mkBasicBlockBodyShelley,
   txSeqBlockBodyShelleyL,
   auxDataSeqDecoder,
@@ -84,6 +86,7 @@ import qualified Data.Sequence as Seq
 import Data.Sequence.Strict (StrictSeq)
 import qualified Data.Sequence.Strict as StrictSeq
 import Data.Typeable
+import Data.Word (Word32)
 import GHC.Generics (Generic)
 import Lens.Micro hiding (ix)
 import NoThunks.Class (AllowThunksIn (..), NoThunks (..))
@@ -104,9 +107,24 @@ data ShelleyBlockBody era = ShelleyBlockBodyInternal
 
 instance NFData (Tx TopTx era) => NFData (ShelleyBlockBody era)
 
+newtype ShelleyBlockBodyLimits era = ShelleyBlockBodyLimits
+  { sbblTxsSize :: Word32
+  }
+  deriving stock (Eq, Show, Generic)
+  deriving newtype (NoThunks, NFData)
+
+instance Semigroup (ShelleyBlockBodyLimits era) where
+  ShelleyBlockBodyLimits s1 <> ShelleyBlockBodyLimits s2 =
+    ShelleyBlockBodyLimits $ s1 + s2
+
+instance Monoid (ShelleyBlockBodyLimits era) where
+  mempty = ShelleyBlockBodyLimits 0
+
 instance EraBlockBody ShelleyEra where
   type BlockBody ShelleyEra = ShelleyBlockBody ShelleyEra
   type ProtocolEraBlockHeader h ShelleyEra = TPraosEraBlockHeader h ShelleyEra
+  type BlockBodyLimits ShelleyEra = ShelleyBlockBodyLimits ShelleyEra
+
   mkBasicBlockBody = mkBasicBlockBodyShelley
   txSeqBlockBodyL = txSeqBlockBodyShelleyL
   hashBlockBody = sbbHash
@@ -209,13 +227,16 @@ instance Era era => EncCBORGroup (ShelleyBlockBody era) where
         bodyBytes <> witsBytes <> metadataBytes
   listLen _ = 3
 
+-- | Compute the Shelley block body hash as a small Merkle tree: the parts of
+-- the encoded block body are hashed individually and those hashes are then
+-- hashed together.
 hashShelleySegWits ::
-  BSL.ByteString ->
   -- | Bytes for transaction bodies
   BSL.ByteString ->
   -- | Bytes for transaction witnesses
   BSL.ByteString ->
   -- | Bytes for transaction auxiliary datas
+  BSL.ByteString ->
   Hash HASH EraIndependentBlockBody
 hashShelleySegWits bodies wits md =
   coerce . hashLazy . toLazyByteString $

@@ -126,12 +126,20 @@ import Ouroboros.Consensus.Util.IndexedMemPack
 import Ouroboros.Consensus.Util.Orphans ()
 import Ouroboros.Network.Block
   ( Serialised
+  , decodePoint
+  , encodePoint
   , unwrapCBORinCBOR
   , wrapCBORinCBOR
   )
 import Ouroboros.Network.Magic
 import Test.Cardano.Slotting.Numeric ()
 import Test.Util.Time (dawnOfTime)
+
+instance FromCBOR (Point BlockA) where
+  fromCBOR = decodePoint decode
+
+instance ToCBOR (Point BlockA) where
+  toCBOR = encodePoint encode
 
 {-------------------------------------------------------------------------------
   BlockA
@@ -344,6 +352,7 @@ instance BlockSupportsProtocol BlockA where
 
 instance LedgerSupportsProtocol BlockA where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
 
 -- NOTE: BlockA is only ever used wrapped in the hard fork combinator (which
@@ -375,7 +384,7 @@ instance BlockSupportsPeras BlockA where
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance HasPartialConsensusConfig ProtocolA
 
@@ -590,6 +599,9 @@ instance NodeInitStorage BlockA where
 instance BlockSupportsMetrics BlockA where
   isSelfIssued = isSelfIssuedConstUnknown
 
+instance BlockSupportsLeios BlockA where
+  blockLeiosCert = defaultBlockLeiosCert
+
 deriving via
   SelectViewDiffusionPipelining BlockA
   instance
@@ -647,7 +659,7 @@ instance SingleEraBlock BlockA where
         (boundEpoch eraStart)
 
 instance HasTxs BlockA where
-  extractTxs = blkA_body
+  extractAsMempoolTxs = blkA_body
 
 {-------------------------------------------------------------------------------
   Condense

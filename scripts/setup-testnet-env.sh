@@ -11,6 +11,11 @@ if command -v buck2 >/dev/null 2>&1; then
   CARDANO_NODE=$(buck2 build root//packages/cardano-node/cardano-node:cardano-node-exe -m static --show-full-simple-output)
   CARDANO_TRACER=$(buck2 build root//packages/cardano-node/cardano-tracer:cardano-tracer-exe -m static --show-full-simple-output)
 else
+  # plutus-core is built in place, since it depends on the vendored
+  # cardano-strict-containers. Several of its components start at once and
+  # cabal unpacks the source once per component without a lock, which can
+  # leave truncated files. Building it with a single job unpacks it only once.
+  cabal build -j1 plutus-core
   cabal build cardano-node-chairman cardano-testnet cardano-cli cardano-node cardano-tracer
 
   CARDANO_CLI=$(cabal list-bin cardano-cli)
@@ -77,6 +82,7 @@ read -r \
   proxy_mode \
   ip \
   node_ports_base \
+  peras_genesis \
   < <(echo $testnet_config | jq -r '[
     .nodes_arg,
     .testnet_magic,
@@ -90,7 +96,8 @@ read -r \
     
     .proxy,
     .ip,
-    .node_ports_base
+    .node_ports_base,
+    (.genesis.peras | tojson)
   ] | @tsv')
 
 echo "Running cardano_testnet create-env"
@@ -118,6 +125,16 @@ jq ".securityParam = $security_param_k |
 
 jq ".protocolConsts.k = $security_param_k" $byronGenesisFile | sponge $byronGenesisFile
 
+# create-testnet-data writes the full PlutusV4 parameter list, but the ledger's
+# Dijkstra genesis decoder only accepts the initial 251 parameters.
+dijkstraGenesisFile="${DEVENV_PATH}/dijkstra-genesis.json"
+jq '.plutusV4CostModel |= .[:251]' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
+jq --argjson peras "$peras_genesis" '. * $peras' $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
+# TODO make a configurable parameter
+jq ".perasBootstrapRound = 1" $dijkstraGenesisFile | sponge $dijkstraGenesisFile
+
 echo "Changing configuration params"
 
 if [ $start_directly_in_dijkstra ]; then
@@ -125,8 +142,13 @@ if [ $start_directly_in_dijkstra ]; then
       .ExperimentalHardForksEnabled = true" $configurationFile | sponge $configurationFile
 fi
 
+dijkstraGenesisHash=$($CARDANO_CLI hash genesis-file --genesis "$DEVENV_PATH/dijkstra-genesis.json")
+shelleyGenesisHash=$($CARDANO_CLI hash genesis-file --genesis "$DEVENV_PATH/shelley-genesis.json")
+
 jq --argjson trace_options "$trace_options" \
   '.TraceOptions = $trace_options |
+  .Configuration.Testing.DijkstraGenesisHash = "'$dijkstraGenesisHash'" |
+  .Configuration.Protocol.ShelleyGenesisHash = "'$shelleyGenesisHash'" |
   .TraceOptionForwarder = { queueSize: 512 }' $configurationFile | sponge $configurationFile
 
 num_of_nodes=$(find "$DEVENV_PATH/node-data/" -mindepth 1 -type d | wc -l)

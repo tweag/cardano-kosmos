@@ -30,17 +30,14 @@ module Cardano.Ledger.Dijkstra.Rules.Ledger (
 import qualified Cardano.Ledger.Allegra.Rules as Allegra
 import Cardano.Ledger.Alonzo (AlonzoScript)
 import qualified Cardano.Ledger.Alonzo.Rules as Alonzo
-import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded)
+import Cardano.Ledger.Alonzo.UTxO (AlonzoScriptsNeeded, exUnitsStAnnTx, refScriptsSizeStAnnTx)
 import Cardano.Ledger.Babbage (BabbageTxOut)
 import qualified Cardano.Ledger.Babbage.Rules as Babbage
-import Cardano.Ledger.BaseTypes (
-  Mismatch (..),
-  Relation (..),
-  ShelleyBase,
- )
+import Cardano.Ledger.BaseTypes
 import Cardano.Ledger.Binary (DecCBOR (..), EncCBOR (..))
 import Cardano.Ledger.Binary.Coders
 import Cardano.Ledger.Coin (Coin)
+import Cardano.Ledger.Conway.BlockBody (ConwayBlockBodyLimits (..))
 import Cardano.Ledger.Conway.Core
 import Cardano.Ledger.Conway.Governance (
   ConwayEraGov (..),
@@ -73,13 +70,15 @@ import Cardano.Ledger.Dijkstra.Rules.Pool (DijkstraPoolPredFailure)
 import Cardano.Ledger.Dijkstra.Rules.SubEntities (SubEntitiesPredFailure)
 import Cardano.Ledger.Dijkstra.Rules.SubLedger
 import Cardano.Ledger.Dijkstra.Rules.SubLedgers
+import Cardano.Ledger.Dijkstra.Rules.SubPool (DijkstraSubPoolPredFailure)
 import Cardano.Ledger.Dijkstra.Rules.Utxo (DijkstraUtxoPredFailure, UtxoEnv (..))
 import Cardano.Ledger.Dijkstra.Rules.Utxow (DijkstraUtxowPredFailure)
 import Cardano.Ledger.Dijkstra.TxBody
-import Cardano.Ledger.Dijkstra.UTxO (DijkstraEraUTxO (..), batchNonDistinctRefScriptsSize)
+import Cardano.Ledger.Dijkstra.UTxO (DijkstraEraUTxO (..))
 import Cardano.Ledger.Rules.ValidationMode (Test, runTest)
 import Cardano.Ledger.Shelley.LedgerState (
   LedgerState (..),
+  LedgerStateWithLimits (..),
   UTxOState (..),
   lsCertState,
   lsUTxOStateL,
@@ -89,6 +88,7 @@ import Cardano.Ledger.Shelley.LedgerState (
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Cardano.Ledger.Slot (epochFromSlot)
 import Control.DeepSeq (NFData)
+import Control.Monad.Trans.Fail.String (errorFail)
 import Control.State.Transition.Extended
 import Data.Word (Word32)
 import GHC.Generics (Generic (..))
@@ -203,6 +203,9 @@ instance InjectRuleFailure "LEDGER" SubEntitiesPredFailure DijkstraEra where
     injectFailure @"LEDGER" @DijkstraSubLedgersPredFailure
       . SubLedgerFailure
       . SubEntitiesFailure
+
+instance InjectRuleFailure "LEDGER" DijkstraSubPoolPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure
 
 deriving instance
   ( Era era
@@ -326,10 +329,12 @@ instance
   , InjectRuleFailure "LEDGER" Conway.ConwayLedgerPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraLedgerPredFailure era
   , EraRule "SUBLEDGERS" era ~ SUBLEDGERS era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (Tx TopTx era)
   ) =>
   STS (LEDGER era)
   where
-  type State (LEDGER era) = LedgerState era
+  type State (LEDGER era) = LedgerStateWithLimits era
   type Signal (LEDGER era) = StAnnTx TopTx era
   type Environment (LEDGER era) = Shelley.LedgerEnv era
   type BaseM (LEDGER era) = ShelleyBase
@@ -344,20 +349,14 @@ instance
   assertions = Shelley.shelleyLedgerAssertions @era @LEDGER
 
 validateAllRefScriptSize ::
-  ( EraTx era
-  , DijkstraEraTxBody era
-  ) =>
-  PParams era ->
-  UTxO era ->
-  Tx TopTx era ->
-  Test (DijkstraLedgerPredFailure era)
-validateAllRefScriptSize pp utxo tx =
-  let totalRefScriptSize = batchNonDistinctRefScriptsSize utxo tx
-      maxRefScriptSizePerTx = fromIntegral @Word32 @Int $ pp ^. ppMaxRefScriptSizePerTxG
-   in failureUnless (totalRefScriptSize <= maxRefScriptSizePerTx) $
+  DijkstraEraTxBody era =>
+  PParams era -> Int -> Test (DijkstraLedgerPredFailure era)
+validateAllRefScriptSize pp totalRefScriptsSize =
+  let maxRefScriptSizePerTx = fromIntegral @Word32 @Int $ pp ^. ppMaxRefScriptSizePerTxG
+   in failureUnless (totalRefScriptsSize <= maxRefScriptSizePerTx) $
         DijkstraTxRefScriptsSizeTooBig
           Mismatch
-            { mismatchSupplied = totalRefScriptSize
+            { mismatchSupplied = totalRefScriptsSize
             , mismatchExpected = maxRefScriptSizePerTx
             }
 
@@ -387,10 +386,16 @@ dijkstraLedgerTransition ::
   , EraRule "SUBLEDGERS" era ~ SUBLEDGERS era
   , InjectRuleFailure "LEDGER" Conway.ConwayLedgerPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraLedgerPredFailure era
+  , BlockBodyLimits era ~ ConwayBlockBodyLimits era
+  , SafeToHash (Tx TopTx era)
   ) =>
   TransitionRule (LEDGER era)
 dijkstraLedgerTransition = do
-  TRC (Shelley.LedgerEnv slot mbCurEpochNo _txIx pp chainAccountState, ledgerState, stAnnTx) <-
+  TRC
+    ( Shelley.LedgerEnv slot mbCurEpochNo _txIx pp chainAccountState
+      , LedgerStateWithLimits ledgerState blockBodyLimits
+      , stAnnTx
+      ) <-
     judgmentContext
   let tx = stAnnTx ^. txStAnnTxG
 
@@ -400,6 +405,8 @@ dijkstraLedgerTransition = do
   let originalUtxo = utxosUtxo (ledgerState ^. lsUTxOStateL)
       subStAnnTxs = subTransactionsStAnnTx stAnnTx
       originalAccounts = lsCertState ledgerState ^. certDStateL . accountsL
+
+  let totalRefScriptsSize = refScriptsSizeStAnnTx stAnnTx
 
   -- Process all subtransactions first
   LedgerState utxoStateAfterSubLedgers certStateAfterSubLedgers lastEbAnnouncement <-
@@ -421,7 +428,7 @@ dijkstraLedgerTransition = do
 
   let txBody = tx ^. bodyTxL
   runTest $ Conway.validateTreasuryValue txBody (chainAccountState ^. casTreasuryL)
-  runTest $ validateAllRefScriptSize pp originalUtxo tx
+  runTest $ validateAllRefScriptSize pp totalRefScriptsSize
 
   (utxoStateBeforeUtxow, certStateFinal) <-
     if tx ^. isPhase2ValidTxL == Phase2Valid
@@ -484,7 +491,16 @@ dijkstraLedgerTransition = do
         , utxoStateBeforeUtxow
         , stAnnTx
         )
-  pure $ LedgerState utxoStateFinal certStateFinal lastEbAnnouncement
+  pure $
+    LedgerStateWithLimits
+      (LedgerState utxoStateFinal certStateFinal lastEbAnnouncement)
+      ( blockBodyLimits
+          <> ConwayBlockBodyLimits
+            { cbblTxsSize = errorFail . integralToBounded @Int @Word32 $ originalBytesSize tx
+            , cbblExUnits = exUnitsStAnnTx stAnnTx
+            , cbblRefScriptsSize = totalRefScriptsSize
+            }
+      )
 
 instance
   ( AlonzoEraTx era

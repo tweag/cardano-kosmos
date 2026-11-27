@@ -127,6 +127,9 @@ tests =
             "Read legacy JSON simple script"
             prop_read_legacy_json_simple_script
         , testProperty
+            "Read legacy JSON simple script with a guard in Dijkstra"
+            prop_read_legacy_json_simple_script_dijkstra_guard
+        , testProperty
             "Roundtrip readFileAnyScript"
             prop_roundtrip_read_file_any_script
         ]
@@ -246,10 +249,11 @@ prop_sub_tx_embedded_in_top_level_body = H.property $ do
   donation <- H.forAll Q.arbitrary
   guards <- H.forAll Q.arbitrary
   sk <- H.forAllWith (const "<ShelleyWitnessSigningKey>") genShelleyWitnessSigningKey
+  txGuards <- H.evalEither $ Exp.mkTxGuards [(credential, Nothing) | credential <- toList guards]
   let content =
         Exp.defaultSubTxBodyContent
           & Exp.setTxTreasuryDonation donation
-          & Exp.setTxGuards guards
+          & Exp.setTxGuards txGuards
   unsigned <- H.evalEither $ Exp.makeUnsignedSubTx content
   let signed@(Exp.SignedSubTx ledgerSubTx) =
         Exp.signSubTx [] [Exp.makeSubTxKeyWitness unsigned sk] unsigned
@@ -307,6 +311,14 @@ prop_read_legacy_json_simple_script = H.property $ do
   oldScript <- H.forAll genSimpleScript
   script <- H.evalEither $ Exp.readAnyScriptBytes Exp.ConwayEra (Api.serialiseToJSON oldScript)
   script H.=== Exp.AnySimpleScript (Exp.SimpleScript (Api.toAllegraTimelock oldScript))
+
+prop_read_legacy_json_simple_script_dijkstra_guard :: Property
+prop_read_legacy_json_simple_script_dijkstra_guard = H.property $ do
+  oldScript <- H.forAll genSimpleScript
+  guardCredential <- H.forAll Q.arbitrary
+  let guarded = Api.RequireAllOf [oldScript, Api.RequireGuard guardCredential]
+  script <- H.evalEither $ Exp.readAnyScriptBytes Exp.DijkstraEra (Api.serialiseToJSON guarded)
+  script H.=== Exp.AnySimpleScript (Exp.SimpleScript (Api.toDijkstraNativeScript guarded))
 
 prop_roundtrip_read_file_any_script :: Property
 prop_roundtrip_read_file_any_script = H.propertyOnce . H.moduleWorkspace "any-script" $ \ws -> do
@@ -444,7 +456,6 @@ prop_balance_transaction_two_ways = H.propertyOnce $ do
         exampleProtocolParams
         mempty
         mempty
-        mempty
         0
   let recFee = recFeeTx ^. (L.bodyTxL . L.feeTxBodyL)
 
@@ -475,7 +486,6 @@ prop_balance_transaction_two_ways = H.propertyOnce $ do
         mempty
         mempty
         mempty
-        mempty
         0
         1
         0
@@ -489,7 +499,6 @@ prop_balance_transaction_two_ways = H.propertyOnce $ do
         era
         newTxBodyContent
         exampleProtocolParams
-        mempty
         mempty
         mempty
         mempty
@@ -536,7 +545,6 @@ prop_balance_transaction_two_ways = H.propertyOnce $ do
         (Api.SystemStart startTime)
         epochInfo
         (Api.LedgerProtocolParameters exampleProtocolParams)
-        mempty
         mempty
         mempty
         utxoToUse
@@ -1092,7 +1100,7 @@ genUnderfundedTx era = do
 prop_calcMinFeeRecursive_well_funded_succeeds :: Property
 prop_calcMinFeeRecursive_well_funded_succeeds = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedSimpleTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left err -> H.annotateShow err >> H.failure
     Right (Exp.UnsignedTx resultLedgerTx) -> do
       let resultFee = resultLedgerTx ^. L.bodyTxL . L.feeTxBodyL
@@ -1113,7 +1121,7 @@ prop_calcMinFeeRecursive_well_funded_succeeds = H.property $ do
 prop_calcMinFeeRecursive_well_funded_multi_asset :: Property
 prop_calcMinFeeRecursive_well_funded_multi_asset = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedMultiAssetTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left err -> H.annotateShow err >> H.failure
     Right (Exp.UnsignedTx resultLedgerTx) -> do
       let resultFee = resultLedgerTx ^. L.bodyTxL . L.feeTxBodyL
@@ -1133,12 +1141,12 @@ prop_calcMinFeeRecursive_well_funded_multi_asset = H.property $ do
 prop_calcMinFeeRecursive_fee_fixpoint :: Property
 prop_calcMinFeeRecursive_fee_fixpoint = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genFundedSimpleTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left err -> H.annotateShow err >> H.failure
     Right resultTx -> do
       secondResult <-
         H.evalEither $
-          Exp.calcMinFeeRecursive changeAddr resultTx utxo exampleProtocolParams mempty mempty mempty 0
+          Exp.calcMinFeeRecursive changeAddr resultTx utxo exampleProtocolParams mempty mempty 0
       resultTx H.=== secondResult
 
 -- | When the outputs exceed the UTxO value the function returns
@@ -1146,7 +1154,7 @@ prop_calcMinFeeRecursive_fee_fixpoint = H.property $ do
 prop_calcMinFeeRecursive_insufficient_funds :: Property
 prop_calcMinFeeRecursive_insufficient_funds = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genUnderfundedTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left (Exp.NotEnoughAdaForNewOutput deficit) -> H.assert $ deficit < L.Coin 0
     Left Exp.NonAdaAssetsUnbalanced{} -> H.annotate "Unexpected NonAdaAssetsUnbalanced error" >> H.failure
     Left Exp.MinUTxONotMet{} -> H.annotate "Unexpected MinUTxONotMet error" >> H.failure
@@ -1277,7 +1285,7 @@ genNoOutputsTx era = do
 prop_calcMinFeeRecursive_non_ada_unbalanced :: Property
 prop_calcMinFeeRecursive_non_ada_unbalanced = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genNonAdaUnbalancedTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left (Exp.NonAdaAssetsUnbalanced _) -> H.success
     Left Exp.NotEnoughAdaForChangeOutput{} -> H.annotate "Unexpected NotEnoughAdaForChangeOutput" >> H.failure
     Left Exp.NotEnoughAdaForNewOutput{} -> H.annotate "Unexpected NotEnoughAdaForNewOutput" >> H.failure
@@ -1291,7 +1299,7 @@ prop_calcMinFeeRecursive_non_ada_unbalanced = H.property $ do
 prop_calcMinFeeRecursive_min_utxo_not_met :: Property
 prop_calcMinFeeRecursive_min_utxo_not_met = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genMinUTxOViolatingTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left (Exp.MinUTxONotMet actual required) -> do
       H.annotate $ "Actual: " <> show actual <> ", Required: " <> show required
       H.assert $ actual < required
@@ -1306,7 +1314,7 @@ prop_calcMinFeeRecursive_min_utxo_not_met = H.property $ do
 prop_calcMinFeeRecursive_no_tx_outs :: Property
 prop_calcMinFeeRecursive_no_tx_outs = H.property $ do
   (unsignedTx, utxo, changeAddr) <- H.forAll $ genNoOutputsTx Exp.ConwayEra
-  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty mempty 0 of
+  case Exp.calcMinFeeRecursive changeAddr unsignedTx utxo exampleProtocolParams mempty mempty 0 of
     Left err -> H.annotateShow err >> H.failure
     Right (Exp.UnsignedTx resultLedgerTx) -> do
       let outs = toList $ resultLedgerTx ^. L.bodyTxL . L.outputsTxBodyL

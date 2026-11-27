@@ -19,7 +19,7 @@ those tests requires introduction of the failure state.
 
 Exit code: 0 all PASS/WARN, 1 some FAIL, 2 still PENDING at timeout.
 """
-import argparse, collections, json, os, re, sys, time
+import argparse, collections, json, os, sys, time
 from fractions import Fraction as F
 
 import peras_tracer as pt
@@ -57,36 +57,35 @@ class Run:
             "forged": {},       # round -> (seat, persistent)
             "forged_votes": {}, # (round, seat) -> time (vote issued / forged)
             "incl_err": 0,
-            "votes": {},        # (round, seat) -> (time, generated cert, weight)
-            "votes_dups": [],   # [(round, seat), time, generated cert, weight] duplicates (if any)
+            "votes": {},        # (round, seat) -> (vote, cert)
+            "votes_dups": [],   # [(round, seat), (vote, cert)] duplicates (if any)
             "certs": [],        # (round, time, result)
             "invalid_forged": 0,
         }
 
     @staticmethod
     def _apply_event(nd: dict, ne: pt.NodeEvent) -> None:
-        t, ev = ne.t, ne.event
+        log_timestamp, ev = ne.log_timestamp, ne.event
         if isinstance(ev, pt.CantReadEnv):
             nd["nokey"] += 1
         elif isinstance(ev, pt.VoteRulesDecision):
             nd["dec"][ev.round] = "Vote" if ev.is_vote else "NoVote"
-            nd["dec_t"].setdefault(ev.round, t)
+            nd["dec_t"].setdefault(ev.round, log_timestamp)
         elif isinstance(ev, pt.NotAVoterInRound):
             nd["notvoter"].append(ev.round)
         elif isinstance(ev, pt.ForgedVote):
-            nd["forged"][ev.round] = (ev.seat, ev.persistent)
-            nd["forged_votes"][(ev.round, ev.seat)] = t
+            nd["forged"][ev.vote.round] = (ev.vote.seat, ev.vote.persistent)
+            nd["forged_votes"][(ev.vote.round, ev.vote.seat)] = ev.vote.arrival_time
         elif isinstance(ev, pt.InclusionError):
             nd["incl_err"] += 1
         elif isinstance(ev, pt.VoteDbAddVote):
-            key = (ev.round, ev.seat)
-            w = ev.weight if ev.weight is not None else F(0)
+            key = (ev.vote.round, ev.vote.seat)
             if key not in nd["votes"]:
-                nd["votes"][key] = (t, ev.generated_cert, w)
+                nd["votes"][key] = (ev.vote, ev.cert)
             else:
-                nd["votes_dups"].append((key, t, ev.generated_cert, w))
+                nd["votes_dups"].append((key, (ev.vote, ev.cert)))
         elif isinstance(ev, pt.CertDbAddCert):
-            nd["certs"].append((ev.round, t, ev.result))
+            nd["certs"].append((ev.cert.round, ev.cert.arrival_time, ev.result))
         elif isinstance(ev, pt.ForgedInvalidBlock):
             nd["invalid_forged"] += 1
 
@@ -100,25 +99,26 @@ class Run:
         return F(3, 4) + margin
 
 
-# 1. keyless nodes skip voting
-def test_keyless_nodes_skip_voting(run, add_report):
+# 1. non-stake nodes skip voting
+def test_relays_nodes_skip_voting(run, add_report):
     test_name = "Node without a positive stake skips voting"
-    N = run.nodes
-    keyless = run.keyless
-    if not keyless:
+    nodes = run.nodes
+    relays = run.relays
+
+    if not relays:
         add_report(test_name, PENDING, "no node without stake found")
     else:
-        bad = [n for n in keyless if N[n]["forged"]]
+        bad = [n for n in relays if nodes[n]["forged"]]
         add_report(test_name, FAIL if bad else PASS,
-            ", ".join(f"node{n}: {N[n]['nokey']} no-key lines, 0 votes forged" for n in keyless))
+            ", ".join(f"node{n}: {nodes[n]['nokey']} no-key lines, 0 votes forged" for n in relays))
 
 # 2. eligible SPOs vote
 def test_eligible_spos_vote(run, add_report):
-    N = run.nodes
-    keyed = run.keyed
+    nodes = run.nodes
+    spos = run.spos
     problems, info = [], []
-    for n in keyed:
-        nd = N[n]
+    for n in spos:
+        nd = nodes[n]
         vd = sorted(r for r, d in nd["dec"].items() if d == "Vote")
         fg = sorted(nd["forged"])
         persistent = bool(fg) and all(p for _, p in nd["forged"].values()) and not nd["notvoter"]
@@ -127,7 +127,7 @@ def test_eligible_spos_vote(run, add_report):
         if persistent and fg != vd:
             problems.append(f"node{n} (persistent) voted {len(fg)}/{len(vd)} allowed rounds")
         info.append(f"node{n}: voted {len(fg)}/{len(vd)} allowed rounds" + (" (persistent)" if persistent else ""))
-    if not any(nd["forged"] for nd in N.values()):
+    if not any(nd["forged"] for nd in nodes.values()):
         add_report("eligible SPO votes", PENDING, "no vote forged yet")
     else:
         add_report("eligible SPO votes (persistent / non-persistent)", FAIL if problems else PASS,
@@ -135,20 +135,20 @@ def test_eligible_spos_vote(run, add_report):
 
 # 3. not eligible -> no vote
 def test_not_eligible_skip_vote(run, add_report):
-    N = run.nodes
-    keyed = run.keyed
-    nv = {n: N[n]["notvoter"] for n in keyed if N[n]["notvoter"]}
-    bad = [n for n in nv if set(nv[n]) & set(N[n]["forged"])]
+    nodes = run.nodes
+    spos = run.spos
+    nv = {n: nodes[n]["notvoter"] for n in spos if nodes[n]["notvoter"]}
+    bad = [n for n in nv if set(nv[n]) & set(nodes[n]["forged"])]
     if not nv:
-        add_report("keyed node skips voting when not eligible", PENDING, "no NotAVoter round seen")
+        add_report("spos node skips voting when not eligible", PENDING, "no NotAVoter round seen")
     else:
-        add_report("keyed node skips voting when not eligible", FAIL if bad else PASS,
+        add_report("spos node skips voting when not eligible", FAIL if bad else PASS,
             ", ".join(f"node{n}: {len(r)} rounds skipped" for n, r in nv.items()))
 
 # 4. non-persistent voters change
 def test_non_persistent_voters_change(run, add_report):
-    N = run.nodes
-    npseats = collections.Counter(s for nd in N.values() for (s, p) in nd["forged"].values() if not p)
+    nodes = run.nodes
+    npseats = collections.Counter(s for nd in nodes.values() for (s, p) in nd["forged"].values() if not p)
     if not npseats:
         add_report("non-persistent voters change", PENDING, "no non-persistent vote yet")
     else:
@@ -158,10 +158,10 @@ def test_non_persistent_voters_change(run, add_report):
 
 # 5. vote diffusion
 def test_vote_diffusion(run, add_report):
-    N = run.nodes
-    keyed = run.keyed
-    seat_node = {s: n for n in keyed for (s, _) in N[n]["forged"].values()}
-    sets = {n: set(nd["votes"]) for n, nd in N.items()}
+    nodes = run.nodes
+    spos = run.spos
+    seat_node = {s: n for n in spos for (s, _) in nodes[n]["forged"].values()}
+    sets = {n: set(nd["votes"]) for n, nd in nodes.items()}
     union = set().union(*sets.values())
     missing = {n: len(union - s) for n, s in sets.items() if union - s}
     if not union:
@@ -170,9 +170,9 @@ def test_vote_diffusion(run, add_report):
         lat = []
         for k in union:
             o = seat_node.get(k[1])
-            if o and k in N[o]["votes"]:
-                t0 = N[o]["votes"][k][0]
-                lat += [(N[n]["votes"][k][0] - t0, n, k) for n in N if n != o and k in N[n]["votes"]]
+            if o and k in nodes[o]["votes"]:
+                t0 = nodes[o]["votes"][k][0].arrival_time
+                lat += [(nodes[n]["votes"][k][0].arrival_time - t0, n, k) for n in nodes if n != o and k in nodes[n]["votes"]]
         ls = sorted(x[0] for x in lat)
         slow = [(round(l, 1), n, k) for l, n, k in lat if l > 1]
         d = f"{len(union)} distinct votes"
@@ -186,50 +186,91 @@ def test_vote_diffusion(run, add_report):
 
 # 6. cert generated exactly at quorum
 def test_cert_generated_at_quorum(run, add_report):
-    N = run.nodes
-    thr = run.threshold()
-    if thr is None:
+    test_header = "cert generated when quorum reached"
+    threshold = run.threshold()
+    if threshold is None:
+        add_report(test_header, FAIL, "found no threshold in logs")
         return
-    gen_rounds, anomalies = set(), []
-    for n, nd in N.items():
-        byr = collections.defaultdict(list)
-        for k, v in nd["votes"].items():
-            byr[k[0]].append(v)
-        for r, vs in byr.items():
-            cum = F(0)
-            for _, gen, w in sorted(vs, key=lambda x: x[0]):
-                before, cum = cum, cum + w
-                if gen:
-                    gen_rounds.add(r)
-                if before < thr and thr <= cum and not gen:
-                    # print(before, thr, before < thr, cum, thr <= cum, not gen)
-                    # it may be ok if cert is received from the net already
-                    anomalies.append((n, r, float(before), float(cum), gen))
-    if not gen_rounds:
-        add_report("cert generated when quorum reached", PENDING, "no quorum threshold / cert yet")
+    generation_rounds, positive_anomalies, negative_anomalies = set(), [], []
+    for node_id, node_data in run.nodes.items():
+
+        break_off_by_round = {
+            round: {
+                "votes": {},                # seat -> vote
+                "cert_with_pivot": None,    # (cert, seat) where "seat" issued the vote that created the cert
+            }
+            for round in run.all_rounds
+        }
+        for (round, seat), (vote, cert) in node_data["votes"].items():
+            break_off_by_round[round]["votes"][seat] = vote
+            if cert is not None:
+                break_off_by_round[round]["cert_with_pivot"] = (cert, seat)
+
+        for round, round_data in break_off_by_round.items():
+            # If no certificate has been generated this round: check that either
+            #   - we have received the certificate by the network,
+            #   - or the threshold wasn't reached.
+            if round_data["cert_with_pivot"] is None:
+                if round in run.rounds_with_certs:
+                    continue
+                weight_by_block = {}
+                for vote in round_data["votes"].values():
+                    hash = vote.boosted_block_hash
+                    weight_by_block[hash] = weight_by_block.get(hash, F(0)) + vote.weight
+                for weight_sum in weight_by_block.values():
+                    if weight_sum >= threshold:
+                        negative_anomalies.append((node_id, round, float(weight_sum)))
+            # If there has been a certificate in this round: check that it was generated
+            # by the vote which passed the threshold
+            else:
+                generation_rounds.add(round)
+                cert, pivot = round_data["cert_with_pivot"]
+                votes = round_data["votes"]
+                pivot_weight = votes[pivot].weight
+                cert_weight = F(0)
+                for voter in cert.voters:
+                    vote = votes[voter]
+                    if vote.boosted_block_hash == cert.boosted_block_hash:
+                        cert_weight += vote.weight
+                cert_weight_without_pivot = cert_weight - pivot_weight
+                if cert_weight_without_pivot >= threshold or cert_weight < threshold:
+                    positive_anomalies.append((node_id, round, float(cert_weight_without_pivot), float(cert_weight)))
+
+    if not generation_rounds:
+        add_report(test_header, PENDING, "no quorum threshold / cert yet")
     else:
-        add_report("cert generated when quorum reached", FAIL if anomalies else PASS,
-            f"threshold {float(thr):.3f}; certs generated in rounds {sorted(gen_rounds)}"
-            + (f"; anomalies (node, round, before, after, generated): {anomalies[:3]}" if anomalies else ""))
+        add_report(
+            test_header,
+            FAIL if positive_anomalies or negative_anomalies else PASS,
+            f"threshold {float(threshold):.3f}; certs generated in rounds {sorted(generation_rounds)}"
+            + (f"; positive anomalies (node, round, before, after): {positive_anomalies[:3]}" if positive_anomalies else "")
+            + (f"; negative anomalies (node, round, total_weight): {negative_anomalies[:3]}" if negative_anomalies else "")
+        )
 
 # 7. no second generation
 def test_no_second_generation(run, add_report):
-    N = run.nodes
-    gen_rounds = run.gen_rounds
-    dup = [(n, r, x) for n, nd in N.items()
-           for r, x in collections.Counter(k[0] for k, v in nd["votes"].items() if v[1]).items() if x > 1]
-    add_report("no second cert generation", FAIL if dup else (PASS if gen_rounds else PENDING),
+    nodes = run.nodes
+    dup = [
+        (node_id, round, count) for node_id, node_data in nodes.items()
+        for round, count in collections.Counter(
+            round
+            for (round, _), (_, cert) in node_data["votes"].items()
+            if cert is not None
+        ).items()
+        if count > 1
+    ]
+    add_report("no second cert generation", FAIL if dup else (PASS if run.rounds_with_certs else PENDING),
         f"duplicates (node, round, count): {dup}" if dup else "exactly one generating vote per round per node")
 
 # 8. certs reach every node's CertDB (diffusion / local add)
 def test_certs_reach_certdb(run, add_report):
-    N = run.nodes
-    gen_rounds = run.gen_rounds
-    absent = {r: [n for n, nd in N.items() if not any(c[0] == r for c in nd["certs"])]
-              for r in sorted(gen_rounds)}
+    nodes = run.nodes
+    cert_rounds = run.rounds_with_certs
+    absent = {r: [n for n, nd in nodes.items() if not any(c[0] == r for c in nd["certs"])]
+              for r in sorted(cert_rounds)}
     absent = {r: m for r, m in absent.items() if m}
-    already = sum(1 for nd in N.values() for c in nd["certs"] if c[2].startswith("PerasCertAlready"))
-    if not gen_rounds:
+    already = sum(1 for nd in nodes.values() for c in nd["certs"] if c[2].startswith("PerasCertAlready"))
+    if not cert_rounds:
         add_report("certs reach every node's CertDB", PENDING, "no cert yet")
     else:
         d = (f"generated by VoteDB but missing from CertDB (round: nodes): {absent}"
@@ -237,13 +278,13 @@ def test_certs_reach_certdb(run, add_report):
         add_report("certs reach every node's CertDB", FAIL if absent else PASS,
             d + f"; {already} PerasCertAlreadyInDB events")
 
+# 9/10. cooldown and recovery
 def test_cooldown_and_recovery(run, add_report):
-    # 9/10. cooldown and recovery
     cd, rec = [], []
-    N = run.nodes
-    keyed = run.keyed
-    for n in keyed:
-        d = N[n]["dec"]
+    nodes = run.nodes
+    spos = run.spos
+    for n in spos:
+        d = nodes[n]["dec"]
         rounds = sorted(d)
         first_no = next((r for r in rounds if d[r] == "NoVote"
                          and any(d[q] == "Vote" for q in rounds if q < r)), None)
@@ -263,68 +304,115 @@ def test_cooldown_and_recovery(run, add_report):
         else:
             add_report("cooldown recovery", PASS, ", ".join(f"node{n}: r{a} -> r{b}" for n, a, b in rec))
 
-def checks(run, test_list):
+# 11. check vote/cert rounds consistency
+def test_vote_cert_consistency(run, add_report):
+    test_header = "vote/cert rounds consistency"
+    vote_rounds, cert_rounds = run.rounds_with_votes, run.rounds_with_certs
+    cert_no_vote = cert_rounds - vote_rounds
+    if cert_no_vote:
+        add_report(test_header, FAIL, f"rounds with certificate, but no votes: {sorted(cert_no_vote)}")
+    elif vote_rounds:
+        add_report(test_header, PASS, f"{len(cert_rounds)}/{len(vote_rounds)} rounds with vote also have certificates")
+    else:
+        add_report(test_header, PENDING, "no votes yet")
+
+def checks(run, test_list, here):
     out = []
 
     def add_report(name, st, detail):
         out.append((name, st, detail))
 
-    N = run.nodes
-    if not N:
+    nodes = run.nodes
+    if not nodes:
         return [("logs found", FAIL, "no nodes under logs/")]
 
-    run.keyless = [n for n, nd in N.items() if nd["nokey"] and not nd["dec"]]
-    run.keyed = [n for n in N if n not in run.keyless]
-    run.gen_rounds = set()
-    for n, nd in N.items():
-        byr = collections.defaultdict(list)
-        for k, v in nd["votes"].items():
-            byr[k[0]].append(v)
-        for r, vs in byr.items():
-            for _, gen, _ in sorted(vs, key=lambda x: x[0]):
-                if gen:
-                    run.gen_rounds.add(r)
+    entries = json.load(open(os.path.join(here, "topologies.json")))
+    spos = []
+    spo_ports = []
+    relays = []
+    relay_ports = []
+    for e in entries:
+        node = e["node"]
+        if node.get("role") == "spo":
+            spos.append(node)
+            spo_ports.append(int(e.get("port")))
+        elif node.get("role") == "relay":
+            relays.append(node)
+            relay_ports.append(int(e.get("port")))
+
+    run.spos = [n for n, nd in nodes.items() if int(nd["port"]) in spo_ports]
+    run.relays = [n for n, nd in nodes.items() if int(nd["port"]) in relay_ports]
+
+    run.rounds_with_votes = set(
+        round
+        for node_data in nodes.values()
+        for (round, _) in node_data["votes"].keys()
+    )
+
+    run.rounds_with_certs = set(
+        round
+        for node_data in nodes.values()
+        for (round, _time, _message) in node_data["certs"]
+    )
+
+    all_rounds = run.rounds_with_votes | run.rounds_with_certs
+    for node_data in nodes.values():
+        all_rounds.update(node_data["dec"].keys())
+        all_rounds.update(node_data["dec_t"].keys())
+        all_rounds.update(node_data["forged"].keys())
+        all_rounds.update(
+            round
+            for (round, _seat) in node_data["forged_votes"].keys()
+        )
+    run.all_rounds = all_rounds
+    run.max_round = max(all_rounds)
+
+    run.votes = set(
+        vote_id
+        for node_data in nodes.values()
+        for vote_id in node_data["votes"].keys()
+    )
 
     for test in test_list:
         test(run, add_report)
 
     # informational anomalies
-    inv = {n: nd["invalid_forged"] for n, nd in N.items() if nd["invalid_forged"]}
-    ie = {n: nd["incl_err"] for n, nd in N.items() if nd["incl_err"]}
+    inv = {n: nd["invalid_forged"] for n, nd in nodes.items() if nd["invalid_forged"]}
+    ie = {n: nd["incl_err"] for n, nd in nodes.items() if nd["incl_err"]}
     add_report("locally forged invalid blocks", WARN if inv else PASS, str(inv) if inv else "none")
     add_report("cert inclusion errors", WARN if ie else PASS, str(ie) if ie else "none")
 
     # Late duplicate deliveries (these can make visualisations misleading if the "latest"
     # delivery is picked instead of the first).
     issued = {}
-    for n, nd in N.items():
+    for n, nd in nodes.items():
         for k, t0 in nd.get("forged_votes", {}).items():
             issued.setdefault(k, (n, t0))
     # Fallback: if the forge event isn't traced, approximate the "issue time" as
     # the earliest VoteDB add time observed across nodes.
-    for k in set().union(*(set(nd.get("votes", {})) for nd in N.values())):
+    for k in set().union(*(set(nd.get("votes", {})) for nd in nodes.values())):
         if k not in issued:
             best = None
-            for n, nd in N.items():
+            for n, nd in nodes.items():
                 v = nd.get("votes", {}).get(k)
                 if v is None:
                     continue
-                t0 = v[0]
+                t0 = v[0].arrival_time
                 best = (n, t0) if best is None or t0 < best[1] else best
             if best is not None:
                 issued[k] = best
 
     late = []
-    for recv_n, nd in N.items():
-        for (k, t, gen, w) in nd.get("votes_dups", []):
+    for recv_n, nd in nodes.items():
+        for (k, (vote, _)) in nd.get("votes_dups", []):
             issuer = issued.get(k)
             if issuer is None:
                 continue
             issuer_n, t0 = issuer
-            delay = t - t0
+            delay = vote.arrival_time - t0
             r, _seat = k
             next_round_t = nd.get("dec_t", {}).get(r + 1)
-            received_next_round = (next_round_t is not None and t >= next_round_t + 1)
+            received_next_round = (next_round_t is not None and vote.arrival_time >= next_round_t + 1)
             if received_next_round or delay > DUPLICATE_VOTE_LATE_THRESHOLD_S:
                 late.append((k, issuer_n, recv_n, delay, received_next_round))
 
@@ -360,10 +448,13 @@ def report(out):
 
 def report_stats(run, here):
     print ("Run statistics:")
-    entries = json.load(open(os.path.join(here, "topologies.json")))
     print(f"  Total nodes: {len(run.nodes)}")
-    print(f"  Rounds with peras votes: {len(run.gen_rounds)}")
+    print(f"  Rounds with peras votes: {len(run.rounds_with_votes)}")
+    print(f"  Rounds with peras certs: {len(run.rounds_with_certs)}")
+    print(f"  Number of rounds: {run.max_round}") # rounds start at 1
+    print(f"  Number of individual votes: {len(run.votes)}")
     print(f"  Nodes:")
+    entries = json.load(open(os.path.join(here, "topologies.json")))
     for e in entries:
         node = e["node"]
         stake = node.get("stake")
@@ -372,7 +463,6 @@ def report_stats(run, here):
             text_stake = "None"
         else:
             text_stake = str(stake)
-
         print(f"    {e.get("label")}: {node.get("role")} {text_stake}")
 
 def main():
@@ -384,20 +474,20 @@ def main():
     ap.add_argument("--no-cooldown", action="store_true", help="skip cooldown checks")
     a = ap.parse_args()
     deadline = time.time() + a.wait
-    check_list = [ test_keyless_nodes_skip_voting
+    check_list = [ test_relays_nodes_skip_voting
         , test_eligible_spos_vote
         , test_not_eligible_skip_vote
         , test_non_persistent_voters_change
         , test_vote_diffusion
-        # This test should be more acccurate, it gives false positives if certs are received from the network before generations
-        # , test_cert_generated_at_quorum
+        , test_cert_generated_at_quorum
         , test_no_second_generation
         , test_certs_reach_certdb
+        , test_vote_cert_consistency
         ]
     if not a.no_cooldown:
         check_list.append(test_cooldown_and_recovery)
     while True:
-        (out, run) = checks(Run(a.results), check_list)
+        (out, run) = checks(Run(a.results), check_list, a.results)
         pend = [c for c in out if c[1] == PENDING]
         if not pend or time.time() >= deadline:
             break

@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -15,6 +14,7 @@ module Ouroboros.Consensus.Tracing.ChainDB
   , fragmentChainDensity
   ) where
 
+import qualified Cardano.Crypto.Hash.Class as Crypto
 import Cardano.Ledger.BaseTypes (unNonZero)
 import Cardano.Logging
 import Cardano.Slotting.Time (getSlotLength)
@@ -22,7 +22,6 @@ import Data.Aeson (Object, ToJSON, Value (Object, String), object, toJSON, (.=))
 import qualified Data.ByteString.Base16 as B16
 import Data.Int (Int64)
 import qualified Data.List.NonEmpty as NonEmpty
-import Data.Functor ((<&>))
 import Data.SOP (All, K (..), hcmap, hcollapse)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -70,6 +69,7 @@ import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.Backend as V2
 import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.InMemory as InMemory
 import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.LSM as LSM
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB as PerasImmutableCertDB
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolDB
 import Ouroboros.Consensus.Tracing.Formatting ()
@@ -140,6 +140,7 @@ instance
       "Chain Selection was unstarved by " <> renderRealPoint pt
   forHuman (ChainDB.TracePerasCertDbEvent ev) = forHuman ev
   forHuman (ChainDB.TraceAddPerasCertEvent ev) = forHuman ev
+  forHuman (ChainDB.TracePerasImmutableCertDbEvent ev) = forHuman ev
 
   forMachine _ ChainDB.TraceLastShutdownUnclean =
     mconcat ["kind" .= String "LastShutdownUnclean"]
@@ -176,6 +177,8 @@ instance
     forMachine details v
   forMachine details (ChainDB.TraceAddPerasCertEvent v) =
     forMachine details v
+  forMachine details (ChainDB.TracePerasImmutableCertDbEvent v) =
+    forMachine details v
 
   asMetrics ChainDB.TraceLastShutdownUnclean = []
   asMetrics (ChainDB.TraceChainSelStarvationEvent _) = []
@@ -192,6 +195,7 @@ instance
   asMetrics (ChainDB.TraceVolatileDBEvent v) = asMetrics v
   asMetrics (ChainDB.TracePerasCertDbEvent v) = asMetrics v
   asMetrics (ChainDB.TraceAddPerasCertEvent v) = asMetrics v
+  asMetrics (ChainDB.TracePerasImmutableCertDbEvent v) = asMetrics v
 
 instance MetaTrace (ChainDB.TraceEvent blk) where
   namespaceFor ChainDB.TraceLastShutdownUnclean =
@@ -224,6 +228,8 @@ instance MetaTrace (ChainDB.TraceEvent blk) where
     nsPrependInner "PerasCertDbEvent" (namespaceFor ev)
   namespaceFor (ChainDB.TraceAddPerasCertEvent ev) =
     nsPrependInner "AddPerasCertEvent" (namespaceFor ev)
+  namespaceFor (ChainDB.TracePerasImmutableCertDbEvent ev) =
+    nsPrependInner "PerasImmCertDbEvent" (namespaceFor ev)
 
   severityFor (Namespace _ ["LastShutdownUnclean"]) _ = Just Info
   severityFor (Namespace _ ["ChainSelStarvationEvent"]) _ = Just Debug
@@ -647,6 +653,12 @@ instance
         "Added request to queue to reprocess blocks postponed by LoE" <> ", queue size " <> condenseT sz
   forHuman ChainDB.PoppedReprocessLoEBlocksFromQueue =
     "Poppped request from queue to reprocess blocks postponed by LoE."
+  forHuman (ChainDB.ReconsideredParkedBlocks ebHash n) =
+    "Reconsidering "
+      <> condenseT n
+      <> " blocks parked on endorser block "
+      <> Crypto.hashToTextAsHex ebHash
+      <> ", whose closure is now acquired."
   forHuman ChainDB.ChainSelectionLoEDebug{} =
     "ChainDB LoE debug event"
   forMachine dtal (ChainDB.IgnoreBlockOlderThanImmTip pt) =
@@ -798,6 +810,12 @@ instance
       ]
   forMachine _dtal ChainDB.PoppedReprocessLoEBlocksFromQueue =
     mconcat ["kind" .= String "PoppedReprocessLoEBlocksFromQueue"]
+  forMachine _dtal (ChainDB.ReconsideredParkedBlocks ebHash n) =
+    mconcat
+      [ "kind" .= String "ReconsideredParkedBlocks"
+      , "ebHash" .= String (Crypto.hashToTextAsHex ebHash)
+      , "blocks" .= n
+      ]
   forMachine dtal (ChainDB.ChainSelectionLoEDebug curChain loeFrag) =
     case loeFrag of
       ChainDB.LoEEnabled loeF ->
@@ -901,6 +919,8 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     Namespace [] ["AddedReprocessLoEBlocksToQueue"]
   namespaceFor ChainDB.PoppedReprocessLoEBlocksFromQueue =
     Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+  namespaceFor ChainDB.ReconsideredParkedBlocks{} =
+    Namespace [] ["ReconsideredParkedBlocks"]
   namespaceFor ChainDB.ChainSelectionLoEDebug{} =
     Namespace [] ["ChainSelectionLoEDebug"]
 
@@ -937,6 +957,7 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     severityFor (Namespace out tl :: Namespace (ChainDB.TracePipeliningEvent blk)) Nothing
   severityFor (Namespace _ ["AddedReprocessLoEBlocksToQueue"]) _ = Just Debug
   severityFor (Namespace _ ["PoppedReprocessLoEBlocksFromQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["ReconsideredParkedBlocks"]) _ = Just Debug
   severityFor (Namespace _ ["ChainSelectionLoEDebug"]) _ = Just Debug
   severityFor _ _ = Nothing
 
@@ -1050,6 +1071,10 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
       "A block was added to the Volatile DB"
   documentFor (Namespace _ ["PoppingFromQueue"]) = Just ""
   documentFor (Namespace _ ["PoppedBlockFromQueue"]) = Just ""
+  documentFor (Namespace _ ["ReconsideredParkedBlocks"]) =
+    Just
+      "ChainSel reconsidered the blocks containing a certificate of an endorser block,\
+      \ which it parked until the closure of that endorser block arrived."
   documentFor (Namespace _ ["TryAddToCurrentChain"]) =
     Just $
       mconcat
@@ -1111,6 +1136,7 @@ instance MetaTrace (ChainDB.TraceAddBlockEvent blk) where
     , Namespace [] ["SwitchedToAFork"]
     , Namespace [] ["AddedReprocessLoEBlocksToQueue"]
     , Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+    , Namespace [] ["ReconsideredParkedBlocks"]
     , Namespace [] ["ChainSelectionLoEDebug"]
     ]
       ++ map
@@ -3140,6 +3166,12 @@ instance ConvertRawHash blk => LogFormatting (ImmDB.TraceChunkValidation blk Imm
       , "chunkNo" .= String (renderChunkNo chunkNo)
       , "block" .= String (renderPointForDetails dtal pt)
       ]
+  forMachine dtal (ImmDB.InvalidChunkFile chunkNo (ImmDB.ChunkErrIncomplete pt)) =
+    mconcat
+      [ "kind" .= String "TraceImmutableDBEvent.InvalidChunkFile.ChunkErrIncomplete"
+      , "chunkNo" .= String (renderChunkNo chunkNo)
+      , "block" .= String (renderPointForDetails dtal pt)
+      ]
   forMachine _dtal (ImmDB.ValidatedChunk chunkNo _) =
     mconcat
       [ "kind" .= String "TraceImmutableDBEvent.ValidatedChunk"
@@ -3336,6 +3368,16 @@ instance StandardHash blk => LogFormatting (VolDB.TraceEvent blk) where
       ]
   forMachine _dtal VolDB.DBClosed =
     mconcat ["kind" .= String "DBClosed"]
+  forMachine _dtal (VolDB.ForgotLeiosCertBlocks n) =
+    mconcat
+      [ "kind" .= String "ForgotLeiosCertBlocks"
+      , "count" .= n
+      ]
+  forMachine _dtal (VolDB.ReadmittedForgottenBlock blockId) =
+    mconcat
+      [ "kind" .= String "ReadmittedForgottenBlock"
+      , "blockId" .= String (showT blockId)
+      ]
 
 instance MetaTrace (VolDB.TraceEvent blk) where
   namespaceFor VolDB.DBAlreadyClosed{} = Namespace [] ["DBAlreadyClosed"]
@@ -3343,12 +3385,16 @@ instance MetaTrace (VolDB.TraceEvent blk) where
   namespaceFor VolDB.Truncate{} = Namespace [] ["Truncate"]
   namespaceFor VolDB.InvalidFileNames{} = Namespace [] ["InvalidFileNames"]
   namespaceFor VolDB.DBClosed{} = Namespace [] ["DBClosed"]
+  namespaceFor VolDB.ForgotLeiosCertBlocks{} = Namespace [] ["ForgotLeiosCertBlocks"]
+  namespaceFor VolDB.ReadmittedForgottenBlock{} = Namespace [] ["ReadmittedForgottenBlock"]
 
   severityFor (Namespace _ ["DBAlreadyClosed"]) _ = Just Debug
   severityFor (Namespace _ ["BlockAlreadyHere"]) _ = Just Debug
   severityFor (Namespace _ ["Truncate"]) _ = Just Debug
   severityFor (Namespace _ ["InvalidFileNames"]) _ = Just Debug
   severityFor (Namespace _ ["DBClosed"]) _ = Just Debug
+  severityFor (Namespace _ ["ForgotLeiosCertBlocks"]) _ = Just Info
+  severityFor (Namespace _ ["ReadmittedForgottenBlock"]) _ = Just Debug
   severityFor _ _ = Nothing
 
   documentFor (Namespace _ ["DBAlreadyClosed"]) =
@@ -3366,6 +3412,12 @@ instance MetaTrace (VolDB.TraceEvent blk) where
   documentFor (Namespace _ ["DBClosed"]) =
     Just
       "Closing the volatile DB"
+  documentFor (Namespace _ ["ForgotLeiosCertBlocks"]) =
+    Just
+      "How many blocks containing a Leios certificate, not on the initial selection, the DB forgot at start-up."
+  documentFor (Namespace _ ["ReadmittedForgottenBlock"]) =
+    Just
+      "A forgotten block was added again, so the DB knows it once more."
   documentFor _ = Nothing
 
   allNamespaces =
@@ -3374,6 +3426,8 @@ instance MetaTrace (VolDB.TraceEvent blk) where
     , Namespace [] ["Truncate"]
     , Namespace [] ["InvalidFileNames"]
     , Namespace [] ["DBClosed"]
+    , Namespace [] ["ForgotLeiosCertBlocks"]
+    , Namespace [] ["ReadmittedForgottenBlock"]
     ]
 
 --------------------------------------------------------------------------------
@@ -3552,6 +3606,11 @@ instance
       [ "kind" .= String "ExtValidationErrorPerasCertInBlock"
       , "error" .= String (showT err)
       ]
+  forMachine _dtal (ExtValidationErrorLeiosCert err) =
+    mconcat
+      [ "kind" .= String "ExtValidationErrorLeiosCert"
+      , "error" .= String (showT err)
+      ]
 
   forHuman (ExtValidationErrorLedger err) = forHuman err
   forHuman (ExtValidationErrorHeader err) = forHuman err
@@ -3559,11 +3618,14 @@ instance
     "Could not resolve the Peras epoch context: " <> showT err
   forHuman (ExtValidationErrorPerasCertInBlock err) =
     "Invalid Peras certificate in block: " <> showT err
+  forHuman (ExtValidationErrorLeiosCert err) =
+    "Invalid Leios certificate in block: " <> showT err
 
   asMetrics (ExtValidationErrorLedger err) = asMetrics err
   asMetrics (ExtValidationErrorHeader err) = asMetrics err
   asMetrics ExtValidationErrorPerasEpochContextResolver{} = []
   asMetrics ExtValidationErrorPerasCertInBlock{} = []
+  asMetrics ExtValidationErrorLeiosCert{} = []
 
 instance
   Show (PBFT.PBftVerKeyHash c) =>
@@ -3702,7 +3764,7 @@ instance MetaTrace (ChainDB.TraceAddPerasCertEvent blk) where
   namespaceFor (ChainDB.PerasCertBoostsBlockNotYetReceived _ _) = Namespace [] ["PerasCertBoostsBlockNotYetReceived"]
   namespaceFor (ChainDB.ChainSelectionForBoostedBlock _ _) = Namespace [] ["ChainSelectionForBoostedBlock"]
 
-  severityFor _ msg = msg <&> \case
+  severityFor _ (Just msg) = Just $ case msg of
     ChainDB.AddedPerasCertToQueue{} -> Debug
     ChainDB.PoppedPerasCertFromQueue{} -> Debug
     ChainDB.IgnorePerasCertTooOld{} -> Info
@@ -3710,6 +3772,14 @@ instance MetaTrace (ChainDB.TraceAddPerasCertEvent blk) where
     ChainDB.PerasCertBoostsBlockNotYetReceived{} -> Info
     ChainDB.ChainSelectionForBoostedBlock{} -> Info
     ChainDB.PerasCertBoostsGenesis{} -> Info
+  severityFor (Namespace _ ["AddedPerasCertToQueue"]) Nothing = Just Debug
+  severityFor (Namespace _ ["PoppedPerasCertFromQueue"]) Nothing = Just Debug
+  severityFor (Namespace _ ["IgnorePerasCertTooOld"]) Nothing = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsCurrentChain"]) Nothing = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsGenesis"]) Nothing = Just Info
+  severityFor (Namespace _ ["PerasCertBoostsBlockNotYetReceived"]) Nothing = Just Info
+  severityFor (Namespace _ ["ChainSelectionForBoostedBlock"]) Nothing = Just Info
+  severityFor _ Nothing = Nothing
 
   privacyFor (Namespace _ ["AddedPerasCertToQueue"]) _ = Just Public
   privacyFor (Namespace _ ["PoppedPerasCertFromQueue"]) _ = Just Public
@@ -3747,3 +3817,109 @@ instance MetaTrace (ChainDB.TraceAddPerasCertEvent blk) where
     , Namespace [] ["PerasCertBoostsBlockNotYetReceived"]
     , Namespace [] ["ChainSelectionForBoostedBlock"]
     ]
+
+instance MetaTrace (PerasImmutableCertDB.TraceEvent blk) where
+  namespaceFor msg = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Namespace [] ["OpenedDB"]
+    PerasImmutableCertDB.AddedCert{} -> Namespace [] ["AddedCert"]
+    PerasImmutableCertDB.QuarantinedCert{} -> Namespace [] ["QuarantinedCert"]
+    PerasImmutableCertDB.ClosedDB{} -> Namespace [] ["ClosedDB"]
+  severityFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just Debug
+    PerasImmutableCertDB.AddedCert{} -> Just Info
+    PerasImmutableCertDB.QuarantinedCert{} -> Just Debug
+    PerasImmutableCertDB.ClosedDB{} -> Just Debug
+  severityFor _ Nothing = Nothing
+  privacyFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just Public
+    PerasImmutableCertDB.AddedCert{} -> Just Public
+    PerasImmutableCertDB.QuarantinedCert{} -> Just Public
+    PerasImmutableCertDB.ClosedDB{} -> Just Public 
+  privacyFor _ _ = Nothing
+  detailsFor _ (Just msg) = case msg of
+    PerasImmutableCertDB.OpenedDB{} -> Just DNormal
+    PerasImmutableCertDB.AddedCert{} -> Just DNormal
+    PerasImmutableCertDB.QuarantinedCert{} -> Just DNormal
+    PerasImmutableCertDB.ClosedDB{} -> Just DNormal
+  detailsFor _ _ = Nothing
+
+  documentFor (Namespace _ ["OpenedDB"]) = Just "Database opened"
+  documentFor (Namespace _ ["AddedCert"]) = Just "Certificate added"
+  documentFor (Namespace _ ["QuarantinedCert"]) = Just "Certificate quarantined"
+  documentFor (Namespace _ ["ClosedDB"]) = Just "Database closed"
+  documentFor _ = Nothing
+  allNamespaces =
+    [ Namespace [] ["OpenedDB"]
+    , Namespace [] ["AddedCert"]
+    , Namespace [] ["QuarantinedCert"]
+    , Namespace [] ["ClosedDB"]
+    ]
+
+instance LogFormatting (PerasImmutableCertDB.TraceEvent blk) where
+  forHuman (PerasImmutableCertDB.OpenedDB known missing) =
+    "Opened immutable cert database, known certificates: "
+      <> Text.pack (show known)
+      <> " , missing certificates: "
+      <> Text.pack (show missing)
+  forHuman (PerasImmutableCertDB.AddedCert roundNo result) =
+    "Added certificate to immutable DB "
+      <> Text.pack (show roundNo)
+      <> " with "
+      <> Text.pack (show result)
+  forHuman (PerasImmutableCertDB.QuarantinedCert roundNo reason) =
+    "Quaranteed failed certificate for round "
+      <> Text.pack (show roundNo)
+      <> " reason: "
+      <> Text.pack reason
+  forHuman (PerasImmutableCertDB.ClosedDB) =
+    "Closed immutable cert database"
+
+  forMachine _dtal (PerasImmutableCertDB.OpenedDB known missing) =
+    mconcat
+      [ "kind" .= String "OpenedDB"
+      , "knownCertCount" .= String (Text.pack $ show known)
+      , "missingCertCount" .= String (Text.pack $ show missing)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.AddedCert roundNo result) =
+    mconcat
+      [ "kind" .= String "AddedCert"
+      , "round" .= String (Text.pack $ show roundNo)
+      , "result" .= String (Text.pack $ show result)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.QuarantinedCert roundNo reason) =
+    mconcat
+      [ "kind" .= String "QuarantinedCert"
+      , "round" .= String (Text.pack $ show roundNo)
+      , "reason" .= String (Text.pack reason)
+      ]
+  forMachine _dtal (PerasImmutableCertDB.ClosedDB) =
+    mconcat
+      [ "kind" .= String "ClosedDB"
+      ]
+  asMetrics (PerasImmutableCertDB.OpenedDB known missing) =
+    [ IntM ("perasImmutableCertDbCertsKnown") (fromIntegral known)
+    , IntM ("perasImmutableCertDbCertsMissing") (fromIntegral missing)
+    ]
+  asMetrics (PerasImmutableCertDB.AddedCert _ _) =
+    [ CounterM ("perasImmutableCertDbAddedCert") (Just 1)
+    ]
+  asMetrics (PerasImmutableCertDB.QuarantinedCert _ _) =
+    [ CounterM ("perasImmutableCertDbAddedQuarantinedCert") (Just 1)
+    ]
+  asMetrics _ = []
+
+{-
+ OpenedDB
+      -- | Number of known certificates
+      Int
+      -- | Number of missing certificates
+      Int
+  | -- | The result of attempting to add a certificate for the given round.
+    AddedCert PerasRoundNo AddPerasImmutableCertResult
+  | -- | A certificate file was found to be unreadable or corrupt and was moved
+    -- to quarantine. The 'String' describes the reason (see
+    -- 'displayCertFileError').
+    QuarantinedCert PerasRoundNo String
+  | -- | The database was closed.
+    ClosedDB
+-}

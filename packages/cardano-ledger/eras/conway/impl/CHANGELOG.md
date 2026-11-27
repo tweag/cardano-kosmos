@@ -2,6 +2,14 @@
 
 ## 1.25.0.0
 
+* Add `ExUnits` argument to `getConwayMinFeeTx`
+* Add `getConwayWitsVKeyNeededWith`
+* Replace `TranslateEra ConwayEra (Tx TopTx)` with `TranslateEra ConwayEra MempoolTx`
+* Move `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances from `Tx l ConwayEra` to `MempoolTx ConwayEra`
+* Generalize the `wireSizeTxF` re-export and remove the `binaryUpgradeTx` re-export from `Cardano.Ledger.Conway.Core`
+* Change `validateRefScriptSize` to take an `Int` parameter instead of `UTxO` and `Tx`
+* Change the `STS` state of `LEDGER` and `MEMPOOL` rules to `LedgerStateWithLimits`
+* Add `ConwayBlockBodyLimits`, `cbblTxsSize`, `cbblExUnits`, `cbblRefScriptsSize`
 * Add `psStakePoolDistrG`
 * Change `TICKF` to run the `SNAP` rule at the epoch boundary:
   - Add `SNAP` related constraints to the `STS` instance of `TICKF`
@@ -11,6 +19,10 @@
 
 ### `testlib`
 
+* Add `Arbitrary` instance for `MempoolTx ConwayEra`
+* Replace the `DecCBOR` instance for `Tx TopTx ConwayEra` with one for `MempoolTx ConwayEra`
+* Add `lookupDRepState`, `expectDRepRegistered`, `expectDelegatedVote`, `expectNotDelegatedVote` and `expectReverseDRepDelegation`
+* Add `goldenMapRedeemers` to test redeemer map decoding across protocol versions
 * Add `ToExpr` instance for `ConwayTickfEvent`
 
 ## 1.24.0.0

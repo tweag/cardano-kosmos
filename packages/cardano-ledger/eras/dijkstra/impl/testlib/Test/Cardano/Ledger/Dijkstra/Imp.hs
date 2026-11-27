@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
@@ -15,13 +16,18 @@ import Test.Cardano.Ledger.Common
 import qualified Test.Cardano.Ledger.Conway.Imp as ConwayImp
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.BbodySpec as BBODY
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.CertSpec as CERT
+import qualified Test.Cardano.Ledger.Dijkstra.Imp.EbSpec as EB
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.EntitiesSpec as ENTITIES
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.LedgerSpec as LEDGER
+import qualified Test.Cardano.Ledger.Dijkstra.Imp.LeiosCertSpec as LEIOSCERT
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.MempoolSpec as MEMPOOL
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.PoolSpec as POOL
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.SnapSpec as SNAP
+import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubDelegSpec as SUBDELEG
+import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubGovCertSpec as SUBGOVCERT
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubGovSpec as SUBGOV
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubLedgerSpec as SUBLEDGER
+import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubPoolSpec as SUBPOOL
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubUtxoSpec as SUBUTXO
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.SubUtxowSpec as SUBUTXOW
 import qualified Test.Cardano.Ledger.Dijkstra.Imp.UtxoSpec as UTXO
@@ -35,6 +41,7 @@ spec ::
   , Event (EraRule "NEWEPOCH" era) ~ Conway.ConwayNewEpochEvent era
   , Event (EraRule "HARDFORK" era) ~ Conway.ConwayHardForkEvent era
   , Event (EraRule "RUPD" era) ~ Shelley.RupdEvent
+  , HashAnnotated (Tx TopTx era) EraIndependentTx
   ) =>
   proxy era ->
   Spec
@@ -42,6 +49,7 @@ spec era = do
   ConwayImp.spec era
   describe "DijkstraEra Onwards" $ withImpInitEachEraVersion era $ do
     BBODY.spec
+    LEIOSCERT.spec
     LEDGER.spec
     MEMPOOL.spec
     SUBLEDGER.spec
@@ -55,6 +63,10 @@ spec era = do
     UTXO.spec
     SUBUTXO.spec
     SUBUTXOW.spec
+    SUBDELEG.spec
+    SUBPOOL.spec
+    SUBGOVCERT.spec
+    EB.spec
 
 dijkstraOnlySpec :: Spec
 dijkstraOnlySpec =

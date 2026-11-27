@@ -1,0 +1,64 @@
+# Changelog for `cardano-base`
+
+## 0.1.7.1
+
+### `testlib`
+
+* Fix `testLawsGroup` failing to compile with `QuickCheck < 2.18`
+
+## 0.1.7.0
+
+*
+
+### `testlib`
+
+* Add `testLawsGroup` QuickCheck utility function
+
+## 0.1.6.0
+
+* Re-export `byteArrayFromShortByteString`, `byteArrayToShortByteString`.
+* Deprecate `byteStringToByteArray` in favor of newly added `byteArrayFromByteString`
+
+## 0.1.5.0
+
+* Generalize type signature for `withNumTests` by making it polymorphic.
+
+## 0.1.4.0
+
+* Add `Cardano.Base.Typeable` module with type `TypeName a` and its `IsString` and `Show` instances.
+* Add a workaround for QuickCheck >= 2.18 replacing `withMaxSuccess`
+  with `withNumTests` and deprecating the former.
+
+## 0.1.3.0
+
+* Add `Cardano.Base.Aeson` module, containing a `fromJSONKeyText` utility
+
+### `testlib`
+
+* Add `Test.Cardano.Base.Properties` module with `expectStorable`
+
+## 0.1.2.0
+
+* Add `Cardano.Base.Bytes` containing:
+  - `byteArrayToByteString`
+  - `byteStringToByteArray`
+  - `slice`
+  - `splitsAt`
+* Add `Cardano.Base.IP` module with `IPv4` and `IPv6` newtype wrappers to avoid orphan instances and laziness
+
+### `testlib`
+
+* Add `Test.Cardano.Base.Bytes` containing:
+  - `genByteArray`
+  - `genByteString`
+  - `genLazyByteString`
+  - `genShortByteString`
+* Add `testlib` for `Arbitrary` and `ToExpr` instances
+
+## 0.1.1.0
+
+* Added `Cardano.Base.Proxy`
+
+## 0.1.0.0
+
+* Added `Cardano.Base.FeatureFlag`.

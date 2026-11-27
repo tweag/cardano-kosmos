@@ -10,7 +10,7 @@ import Data.Aeson (Value (..), (.=))
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Void (absurd)
 import Ouroboros.Consensus.Block.SupportsPeras (PerasVotingCommitteeError)
-import Ouroboros.Consensus.Committee.WFA (SeatIndex (..))
+import Cardano.Crypto.Peras.Committee.WFA (SeatIndex (..))
 import qualified Ouroboros.Consensus.Peras.Error.V1 as V1
 import Ouroboros.Consensus.Peras.Types (PerasCertSize (..), VoteWeight (..))
 import Ouroboros.Consensus.Peras.Void (VoidPerasError (..))
@@ -53,16 +53,6 @@ instance
       [ "kind" .= String "PerasCertTooLargeError"
       , "limit" .= unPerasCertSize limit
       , "actual" .= unPerasCertSize actual
-      ]
-  forMachine _dtal (V1.PerasTemporaryPublicKeyHackError e) =
-    mconcat
-      [ "kind" .= String "PerasTemporaryPublicKeyHackError"
-      , "message" .= e
-      ]
-  forMachine _dtal (V1.PerasTemporaryCertInBlockError e) =
-    mconcat
-      [ "kind" .= String "PerasTemporaryCertInBlockError"
-      , "message" .= e
       ]
 
 instance LogFormatting PerasConversionError where

@@ -111,6 +111,7 @@ cardanoConfigToPartialNodeConfiguration cfg =
       , pncStartAsNonProducingNode = Last (Just (runIdentity (Cfg.startAsNonProducingNode protoCfg)))
       , pncProtocolConfig = Last (Just (nodeProtocolConfigurationFromCardanoConfig cfg))
       , pncProtocolFiles = Last (Just (credentialsToProtocolFilepaths (Cfg.credentials cfg)))
+      , pncShelleyBLSKeyFile = Last (Just Nothing)
       , pncExperimentalProtocolsEnabled = Last (Just (runIdentity (Cfg.experimentalProtocolsEnabled netCfg)))
       , pncMempoolTimeoutSoft = Last (Just (runIdentity (Cfg.mempoolTimeoutSoft mempCfg)))
       , pncMempoolTimeoutHard = Last (Just (runIdentity (Cfg.mempoolTimeoutHard mempCfg)))
@@ -217,6 +218,7 @@ cardanoConfigToPartialNodeConfiguration cfg =
                         (maybe V2InMemory fromCfgBackend
                                (strictMaybeToMaybe (Cfg.backendSelector ledgerDbCfg)))
                         noDeprecatedOptions))
+      , pncPerasEnabled = Last (Just (runIdentity (Cfg.perasEnabled perasCfg)))
       }
   where
     protoCfg = Cfg.protocolConfiguration cfg
@@ -224,6 +226,7 @@ cardanoConfigToPartialNodeConfiguration cfg =
     mempCfg = Cfg.mempoolConfiguration cfg
     storeCfg = Cfg.storageConfiguration cfg
     lcc = Cfg.localConnectionsConfig cfg
+    perasCfg = Cfg.perasConfiguration cfg
     ledgerDbCfg = runIdentity (Cfg.ledgerDbConfiguration storeCfg)
     consensusModeVal = runIdentity (Cfg.getConsensusConfiguration (Cfg.consensusConfiguration cfg))
 
@@ -348,6 +351,7 @@ credentialsToProtocolFilepaths c =
     , shelleyVRFFile = strictMaybeToMaybe (Cfg.shelleyVRFKey c)
     , shelleyCertFile = strictMaybeToMaybe (Cfg.shelleyOperationalCertificate c)
     , shelleyBulkCredsFile = strictMaybeToMaybe (Cfg.bulkCredentialsFile c)
+    , shelleyBLSKeyFile = strictMaybeToMaybe (Cfg.shelleyBLSKey c)
     }
  where
   fromCfgKES (Cfg.KESKeyFilePath fp) = KESKeyFilePath fp

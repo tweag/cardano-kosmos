@@ -96,7 +96,7 @@ import GHC.Stack (HasCallStack)
 import NoThunks.Class (NoThunks)
 import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.BlockchainTime
-import Ouroboros.Consensus.Committee.Class (CryptoSupportsVotingCommittee (..))
+import Cardano.Crypto.Peras.Committee.Class (CryptoSupportsVotingCommittee (..))
 import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.Forecast
 import Ouroboros.Consensus.HardFork.Abstract
@@ -664,7 +664,7 @@ instance ApplyBlock LedgerState TestBlock where
    where
     -- The round number of the Peras certificate stored in this block, if any
     perasCertRoundInBlock =
-      either (const Nothing) (fmap getPerasCertRound) (getPerasCertInBlock tb)
+      getPerasCertRound <$> getPerasCertInBlock tb
     -- The highest Peras certificate round number we've seen so far
     latestPerasCertRound' =
       case (perasCertRoundInBlock, latestPerasCertRound) of
@@ -754,6 +754,7 @@ instance ValidateEnvelope TestBlock where
 
 instance LedgerSupportsProtocol TestBlock where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
 
 instance HasHardForkHistory TestBlock where
@@ -787,7 +788,7 @@ instance BlockSupportsPeras TestBlock where
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock = Right . tbPerasCert . testBody
+  getPerasCertInBlock = tbPerasCert . testBody
 
 instance InspectLedger TestBlock
 
@@ -929,6 +930,9 @@ deriving via
   SelectViewDiffusionPipelining TestBlock
   instance
     BlockSupportsDiffusionPipelining TestBlock
+
+instance BlockSupportsLeios TestBlock where
+  blockLeiosCert = defaultBlockLeiosCert
 
 {-------------------------------------------------------------------------------
   Corruption

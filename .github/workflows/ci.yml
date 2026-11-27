@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
 
 concurrency:
@@ -27,13 +28,15 @@ jobs:
         uses: nix-community/cache-nix-action@v7
         with:
           # restore and save a cache using this key
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', '**/*.cabal', '**/cabal.project') }}
+          primary-key: integration-nix-${{ runner.os }}-${{ hashFiles('**/*.nix', '**/flake.lock', '**/*.cabal', '**/cabal.project') }}
           # if there's no cache hit, restore a cache by this prefix
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          restore-prefixes-first-match: integration-nix-${{ runner.os }}-
           paths: |
             ~/.cabal/packages
             ~/.cabal/store
-            dist-newstyle
+          # we do not want to include dist-newstyle because it leads to failures
+          # when we switch between branches
+
           # do purge caches
           purge: true
           # purge all versions of the cache
@@ -53,16 +56,20 @@ jobs:
             ~/.cabal/packages
             ~/.cabal/store
             dist-newstyle
-          key: ${{ runner.os }}-cabal-${{ hashFiles('**/*.cabal', '**/cabal.project', '**/cabal.project.freeze') }}
+          key: integration-${{ runner.os }}-cabal-${{ hashFiles('**/*.cabal', '**/cabal.project', '**/cabal.project.freeze') }}
           restore-keys: |
-            ${{ runner.os }}-cabal-
+            integration-${{ runner.os }}-cabal-
 
-      - name: Run testnet until Peras
-        env:
-          PC_LOG_LEVEL: info 
+      - name: Setup testnet
         shell: 'nix develop -c bash -e {0}'
         run: |
           cabal update
           ./scripts/setup-testnet-env.sh devnet-env
-          ./scripts/wait-until-peras.sh
+
+      - name: Run testnet
+        env:
+          PC_LOG_LEVEL: info 
+        shell: 'nix develop -c bash -e {0}'
+        run: |
+          ./scripts/wait-until-peras.sh 300 # non-persistent voter rotation takes some time...
           ./peras-trace-analyzer/check_peras_logs.py --no-cooldown --wait 60 --poll 10

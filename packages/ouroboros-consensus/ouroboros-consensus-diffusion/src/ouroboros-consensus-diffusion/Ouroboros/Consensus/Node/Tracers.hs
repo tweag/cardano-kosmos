@@ -17,14 +17,12 @@ module Ouroboros.Consensus.Node.Tracers
   , TraceLabelCreds (..)
   , TracePerasCertInclusionEvent (..)
   , TracePerasVoteForgingEvent (..)
-  , TestnetTrace (..)
   ) where
 
 import Control.Exception (SomeException)
 import Control.Tracer (Tracer, nullTracer, (>$<))
 import Data.Text (Text)
 import Data.Time (UTCTime)
-import Data.Word (Word64)
 import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.BlockchainTime
 import Ouroboros.Consensus.Forecast (OutsideForecastRange)
@@ -33,6 +31,7 @@ import Ouroboros.Consensus.Ledger.Extended (ExtValidationError)
 import Ouroboros.Consensus.Ledger.SupportsMempool
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Leios.Types (EndorserBlock)
+import Ouroboros.Consensus.Leios.VoteState (TraceLeiosVoteState)
 import Ouroboros.Consensus.Mempool (MempoolSize, TraceEventMempool)
 import Ouroboros.Consensus.Mempool.API (MempoolMeasure (..))
 import Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
@@ -46,6 +45,7 @@ import Ouroboros.Consensus.MiniProtocol.ChainSync.Server
   ( TraceChainSyncServerEvent
   )
 import Ouroboros.Consensus.MiniProtocol.LeiosFetch.Trace (TraceLeiosFetchServerEvent)
+import Ouroboros.Consensus.MiniProtocol.LeiosNotify.Trace (TraceLeiosNotifyClientEvent)
 import Ouroboros.Consensus.MiniProtocol.LocalTxSubmission.Server
   ( TraceLocalTxSubmissionServerEvent (..)
   )
@@ -85,7 +85,9 @@ data Tracers' remotePeer localPeer blk f = Tracers
   , blockFetchClientTracer :: f (TraceLabelPeer remotePeer (TraceFetchClientState (Header blk)))
   , blockFetchServerTracer :: f (TraceLabelPeer remotePeer (TraceBlockFetchServerEvent blk))
   , leiosFetchServerTracer :: f (TraceLabelPeer remotePeer TraceLeiosFetchServerEvent)
+  , leiosNotifyClientTracer :: f (TraceLabelPeer remotePeer TraceLeiosNotifyClientEvent)
   , leiosDbTracer :: f TraceLeiosDb
+  , leiosVoteStateTracer :: f TraceLeiosVoteState
   , txInboundTracer ::
       f (TraceLabelPeer remotePeer (TraceTxSubmissionInbound (GenTxId blk) (GenTx blk)))
   , txOutboundTracer ::
@@ -117,26 +119,7 @@ data Tracers' remotePeer localPeer blk f = Tracers
       f (TraceLabelPeer remotePeer (CSJumping.TraceEventCsj remotePeer blk))
   , dbfTracer :: f (CSJumping.TraceEventDbf remotePeer)
   , kesAgentTracer :: f KESAgentClientTrace
-  , testnetTracer :: f TestnetTrace
   }
-
-data TestnetTrace
-  = AdvertLog
-      -- | number of certs
-      Int
-      -- | number of votes
-      Int
-      -- | chain length
-      Int
-      -- | boost
-      Word64
-      -- | slot no
-      Word64
-      -- | block hash
-      String
-      -- | block no
-      Word64
-  deriving (Eq, Ord, Show)
 
 instance
   (forall a. Semigroup (f a)) =>
@@ -151,7 +134,9 @@ instance
       , blockFetchClientTracer = f blockFetchClientTracer
       , blockFetchServerTracer = f blockFetchServerTracer
       , leiosFetchServerTracer = f leiosFetchServerTracer
+      , leiosNotifyClientTracer = f leiosNotifyClientTracer
       , leiosDbTracer = f leiosDbTracer
+      , leiosVoteStateTracer = f leiosVoteStateTracer
       , txInboundTracer = f txInboundTracer
       , txOutboundTracer = f txOutboundTracer
       , localTxSubmissionServerTracer = f localTxSubmissionServerTracer
@@ -175,7 +160,6 @@ instance
       , csjTracer = f csjTracer
       , dbfTracer = f dbfTracer
       , kesAgentTracer = f kesAgentTracer
-      , testnetTracer = f testnetTracer
       }
    where
     f ::
@@ -199,7 +183,9 @@ nullTracers =
     , blockFetchClientTracer = nullTracer
     , blockFetchServerTracer = nullTracer
     , leiosFetchServerTracer = nullTracer
+    , leiosNotifyClientTracer = nullTracer
     , leiosDbTracer = nullTracer
+    , leiosVoteStateTracer = nullTracer
     , txInboundTracer = nullTracer
     , txOutboundTracer = nullTracer
     , localTxSubmissionServerTracer = nullTracer
@@ -223,7 +209,6 @@ nullTracers =
     , kesAgentTracer = nullTracer
     , txLogicTracer = nullTracer
     , txCountersTracer = nullTracer
-    , testnetTracer = nullTracer
     }
 
 showTracers ::
@@ -257,7 +242,9 @@ showTracers tr =
     , blockFetchClientTracer = show >$< tr
     , blockFetchServerTracer = show >$< tr
     , leiosFetchServerTracer = show >$< tr
+    , leiosNotifyClientTracer = show >$< tr
     , leiosDbTracer = show >$< tr
+    , leiosVoteStateTracer = show >$< tr
     , txInboundTracer = show >$< tr
     , txOutboundTracer = show >$< tr
     , localTxSubmissionServerTracer = show >$< tr
@@ -281,7 +268,6 @@ showTracers tr =
     , csjTracer = show >$< tr
     , dbfTracer = show >$< tr
     , kesAgentTracer = show >$< tr
-    , testnetTracer = show >$< tr
     }
 
 {-------------------------------------------------------------------------------

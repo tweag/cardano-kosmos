@@ -4,6 +4,7 @@
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE StandaloneKindSignatures #-}
@@ -19,14 +20,26 @@ module Ouroboros.Consensus.Storage.PerasCertDB.Impl
   , TraceEvent (..)
   ) where
 
-import Control.Monad (when)
-import Control.Monad.Except (throwError)
+import Cardano.Binary
+  ( Decoder
+  , DecoderError
+  , Encoding
+  , FromCBOR (..)
+  , ToCBOR (..)
+  , decodeFullDecoder
+  , decodeListLenOf
+  , encodeListLen
+  , serialize
+  )
+import Control.Monad (guard, void, when)
 import Control.Tracer (Tracer, nullTracer, traceWith)
-import Data.Foldable (for_)
+import Data.Char (isDigit)
+import Data.Either (rights)
 import Data.Kind (Type)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe.Strict (StrictMaybe (..), strictMaybeToMaybe)
+import Data.Maybe (mapMaybe)
+import Data.Maybe.Strict (StrictMaybe (..), maybeToStrictMaybe, strictMaybeToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import GHC.Generics (Generic)
@@ -35,9 +48,12 @@ import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.BlockchainTime (WithArrivalTime (..))
 import Ouroboros.Consensus.Peras.Weight (PerasWeightSnapshot, mkPerasWeightSnapshot)
 import Ouroboros.Consensus.Storage.PerasCertDB.API
+import Ouroboros.Consensus.Storage.Serialisation (DecodeDisk (..), EncodeDisk (..))
 import Ouroboros.Consensus.Util.Args
 import Ouroboros.Consensus.Util.IOLike
 import Ouroboros.Consensus.Util.STM
+import System.FS.API.Lazy
+import Text.Read (readMaybe)
 
 {-------------------------------------------------------------------------------
   Database state
@@ -47,24 +63,19 @@ data PerasCertDbEnv m blk = PerasCertDbEnv
   { pcdbTracer :: !(Tracer m (TraceEvent blk))
   , pcdbState :: !(StrictTVar m (WithFingerprint (PerasCertDbState blk)))
   -- ^ The volatile state of the certificate database.
+  , pcdbHasFS :: !(SomeHasFS m)
+  , pcdbCodecConfig :: !(CodecConfig blk)
   }
   deriving NoThunks via OnlyCheckWhnfNamed "PerasCertDbEnv" (PerasCertDbEnv m blk)
 
 -- | INVARIANT: See 'invariantForPerasCertDbState'.
 data PerasCertDbState blk = PerasCertDbState
-  { pcdsCertIds :: !(Set PerasRoundNo)
-  -- ^ The round numbers of all certificates currently in the db.
-  , pcdsCertsByTicket :: !(Map PerasCertTicketNo (WithArrivalTime (ValidatedPerasCert blk)))
-  -- ^ The certificates by 'PerasCertTicketNo'.
-  --
-  -- INVARIANT: In sync with 'pcdsCertIds'.
-  , pcdsLastTicketNo :: !PerasCertTicketNo
-  -- ^ The most recent 'PerasCertTicketNo' (or 'zeroPerasCertTicketNo'
-  -- otherwise).
+  { pcdsCerts :: !(Map PerasRoundNo (WithArrivalTime (ValidatedPerasCert blk)))
+  -- ^ The certificates by 'PerasRoundNo'.
   , pcdsLatestCertSeen ::
-      !(StrictMaybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+      !(StrictMaybe (WithArrivalTime (ValidatedPerasCert blk)))
   -- ^ The certificate with the highest round number that has been added to the
-  -- db since it has been opened.
+  -- db since it has been opened, or restored from disk when opening it.
   }
 
 deriving instance
@@ -75,45 +86,6 @@ deriving instance
   NoThunks (PerasCertDbState blk)
 deriving instance
   Generic (PerasCertDbState blk)
-
-initialPerasCertDbState :: WithFingerprint (PerasCertDbState blk)
-initialPerasCertDbState =
-  WithFingerprint
-    PerasCertDbState
-      { pcdsCertIds = Set.empty
-      , pcdsCertsByTicket = Map.empty
-      , pcdsLastTicketNo = zeroPerasCertTicketNo
-      , pcdsLatestCertSeen = SNothing
-      }
-    (Fingerprint 0)
-
--- | Check that the fields of 'PerasCertDbState' are in sync.
-invariantForPerasCertDbState ::
-  IsPerasCert (PerasCert blk) blk =>
-  WithFingerprint (PerasCertDbState blk) ->
-  Either String ()
-invariantForPerasCertDbState pcds = do
-  checkEqual
-    "pcdsCertsByTicket"
-    (Set.fromList (getPerasCertRound <$> Map.elems pcdsCertsByTicket))
-    pcdsCertIds
-  for_ (Map.keys pcdsCertsByTicket) $ \ticketNo ->
-    when (ticketNo > pcdsLastTicketNo) $
-      throwError $
-        "Ticket number monotonicity violation: "
-          <> show ticketNo
-          <> " > "
-          <> show pcdsLastTicketNo
- where
-  PerasCertDbState
-    { pcdsCertIds
-    , pcdsCertsByTicket
-    , pcdsLastTicketNo
-    } = forgetFingerprint pcds
-
-  checkEqual :: (Eq a, Show a) => String -> a -> a -> Either String ()
-  checkEqual msg a b =
-    when (a /= b) $ throwError $ msg <> ": Not equal: " <> show a <> ", " <> show b
 
 {-------------------------------------------------------------------------------
   Trace types
@@ -143,35 +115,43 @@ deriving instance
 type PerasCertDbArgs :: (Type -> Type) -> (Type -> Type) -> Type -> Type
 data PerasCertDbArgs f m blk = PerasCertDbArgs
   { pcdbaTracer :: Tracer m (TraceEvent blk)
+  , pcdbaCodecConfig :: HKD f (CodecConfig blk)
+  , pcdbaHasFS :: HKD f (SomeHasFS m)
+  -- ^ Where certificates are persisted, so that they survive restarts.
   }
 
 defaultArgs :: Monad m => Incomplete PerasCertDbArgs m blk
 defaultArgs =
   PerasCertDbArgs
     { pcdbaTracer = nullTracer
+    , pcdbaCodecConfig = noDefault
+    , pcdbaHasFS = noDefault
     }
 
 createDB ::
   forall m blk.
   ( IOLike m
   , BlockSupportsPeras blk
+  , EncodeDisk blk (PerasCert blk)
+  , DecodeDisk blk (PerasCert blk)
   ) =>
   Complete PerasCertDbArgs m blk ->
   m (PerasCertDB m blk)
 createDB args = do
-  pcdbState <-
-    newTVarWithInvariantIO
-      (either Just (const Nothing) . invariantForPerasCertDbState)
-      initialPerasCertDbState
+  pcds <- loadPerasCertDbState pcdbCodecConfig pcdbHasFS
+  pcdbState <- newTVarIO (WithFingerprint pcds (Fingerprint 0))
   let env =
         PerasCertDbEnv
           { pcdbTracer
           , pcdbState
+          , pcdbHasFS
+          , pcdbCodecConfig
           }
   pure
     PerasCertDB
       { addCert = implAddCert env
       , getCertIds = implGetCertIds env
+      , getCertsBoosting = implGetCertsBoosting env
       , getCertsAfter = implGetCertsAfter env
       , getWeightSnapshot = implGetWeightSnapshot env
       , getLatestCertSeen = implGetLatestCertSeen env
@@ -180,6 +160,8 @@ createDB args = do
  where
   PerasCertDbArgs
     { pcdbaTracer = pcdbTracer
+    , pcdbaCodecConfig = pcdbCodecConfig
+    , pcdbaHasFS = pcdbHasFS
     } = args
 
 {-------------------------------------------------------------------------------
@@ -191,43 +173,59 @@ createDB args = do
 implAddCert ::
   ( IOLike m
   , IsPerasCert (PerasCert blk) blk
+  , EncodeDisk blk (PerasCert blk)
   ) =>
   PerasCertDbEnv m blk ->
   WithArrivalTime (ValidatedPerasCert blk) ->
   STM m (m AddPerasCertResult)
-implAddCert PerasCertDbEnv{pcdbTracer, pcdbState} cert = do
+implAddCert env@PerasCertDbEnv{pcdbTracer, pcdbState} cert = do
   let roundNo = getPerasCertRound cert
   addPerasCertRes <- do
     WithFingerprint pcds fp <- readTVar pcdbState
-    if Set.member roundNo (pcdsCertIds pcds)
+    if Map.member roundNo (pcdsCerts pcds)
       then pure PerasCertAlreadyInDB
       else do
-        let pcdsLastTicketNo' = succ (pcdsLastTicketNo pcds)
-            pcdsCertIds' = Set.insert roundNo (pcdsCertIds pcds)
-            pcdsCertsByTicket' = Map.insert pcdsLastTicketNo' cert (pcdsCertsByTicket pcds)
+        let pcdsCerts' = Map.insert roundNo cert (pcdsCerts pcds)
             pcdsLatestCertSeen' =
               case pcdsLatestCertSeen pcds of
                 SNothing ->
-                  SJust (CertBoostingBlockInVolatileDB cert)
+                  SJust cert
                 SJust prev
                   | getPerasCertRound cert
-                      > getPerasCertRound (forgetBoostedBlockStatus prev) ->
-                      SJust (CertBoostingBlockInVolatileDB cert)
+                      > getPerasCertRound prev ->
+                      SJust cert
                   | otherwise ->
                       SJust prev
         writeTVar pcdbState $
           WithFingerprint
             PerasCertDbState
-              { pcdsCertIds = pcdsCertIds'
-              , pcdsCertsByTicket = pcdsCertsByTicket'
-              , pcdsLastTicketNo = pcdsLastTicketNo'
+              { pcdsCerts = pcdsCerts'
               , pcdsLatestCertSeen = pcdsLatestCertSeen'
               }
             (succ fp)
         pure AddedPerasCertToDB
   pure $ do
     traceWith pcdbTracer (AddCert roundNo cert addPerasCertRes)
+    when (addPerasCertRes == AddedPerasCertToDB) $
+      writeCertFile env roundNo cert
     pure addPerasCertRes
+
+implGetCertsBoosting ::
+  ( IOLike m
+  , StandardHash blk
+  , IsPerasCert (PerasCert blk) blk
+  ) =>
+  PerasCertDbEnv m blk ->
+  Point blk ->
+  STM m [WithArrivalTime (ValidatedPerasCert blk)]
+implGetCertsBoosting PerasCertDbEnv{pcdbState} pt = do
+  PerasCertDbState{pcdsCerts} <-
+    forgetFingerprint <$> readTVar pcdbState
+  pure
+    [ cert
+    | cert <- Map.elems pcdsCerts
+    , getPerasCertPoint cert == pt
+    ]
 
 implGetWeightSnapshot ::
   ( IOLike m
@@ -241,7 +239,7 @@ implGetWeightSnapshot PerasCertDbEnv{pcdbState} = do
   let weights =
         mkPerasWeightSnapshot
           [ (getPerasCertPoint cert, vpcCertBoost (forgetArrivalTime cert))
-          | cert <- Map.elems (pcdsCertsByTicket pcds)
+          | cert <- Map.elems (pcdsCerts pcds)
           ]
   pure (WithFingerprint weights fp)
 
@@ -250,25 +248,25 @@ implGetCertIds ::
   PerasCertDbEnv m blk ->
   STM m (Set PerasRoundNo)
 implGetCertIds PerasCertDbEnv{pcdbState} = do
-  PerasCertDbState{pcdsCertIds} <-
+  PerasCertDbState{pcdsCerts} <-
     forgetFingerprint <$> readTVar pcdbState
-  pure pcdsCertIds
+  pure $ Map.keysSet pcdsCerts
 
 implGetCertsAfter ::
   IOLike m =>
   PerasCertDbEnv m blk ->
-  PerasCertTicketNo ->
-  STM m (Map PerasCertTicketNo (m (WithArrivalTime (ValidatedPerasCert blk))))
-implGetCertsAfter PerasCertDbEnv{pcdbState} ticketNo = do
-  PerasCertDbState{pcdsCertsByTicket} <-
+  PerasRoundNo ->
+  STM m (Map PerasRoundNo (m (WithArrivalTime (ValidatedPerasCert blk))))
+implGetCertsAfter PerasCertDbEnv{pcdbState} roundNo = do
+  PerasCertDbState{pcdsCerts} <-
     forgetFingerprint <$> readTVar pcdbState
-  let strictlyGreater = snd $ Map.split ticketNo pcdsCertsByTicket
+  let strictlyGreater = snd $ Map.split roundNo pcdsCerts
   pure $ pure <$> strictlyGreater
 
 implGetLatestCertSeen ::
   IOLike m =>
   PerasCertDbEnv m blk ->
-  STM m (Maybe (WithBoostedBlockStatus (WithArrivalTime (ValidatedPerasCert blk))))
+  STM m (Maybe (WithArrivalTime (ValidatedPerasCert blk)))
 implGetLatestCertSeen PerasCertDbEnv{pcdbState} = do
   PerasCertDbState{pcdsLatestCertSeen} <-
     forgetFingerprint <$> readTVar pcdbState
@@ -281,40 +279,129 @@ implGarbageCollect ::
   ) =>
   PerasCertDbEnv m blk ->
   SlotNo ->
-  STM m (m ())
+  STM m (m [WithArrivalTime (ValidatedPerasCert blk)])
 implGarbageCollect PerasCertDbEnv{pcdbTracer, pcdbState} slotNo = do
+  WithFingerprint (pcdbState', removedCerts) fp <- fmap gc <$> readTVar pcdbState
   -- No need to update the 'Fingerprint' as we only remove certificates that do
   -- not matter for comparing interesting chains.
-  modifyTVar pcdbState (fmap gc)
-  pure $ traceWith pcdbTracer (GarbageCollected slotNo)
+  writeTVar pcdbState (WithFingerprint pcdbState' fp)
+  pure $ do
+    traceWith pcdbTracer (GarbageCollected slotNo)
+    pure (Map.elems removedCerts)
  where
-  gc :: PerasCertDbState blk -> PerasCertDbState blk
+  gc ::
+    PerasCertDbState blk ->
+    (PerasCertDbState blk, Map PerasRoundNo (WithArrivalTime (ValidatedPerasCert blk)))
   gc
     PerasCertDbState
-      { pcdsCertsByTicket
-      , pcdsLastTicketNo
+      { pcdsCerts
       , pcdsLatestCertSeen
       } =
-      let pcdsCertsByTicket' =
-            Map.filter
+      let (pcdsCerts', gcCerts) =
+            Map.partition
               (\cert -> pointSlot (getPerasCertPoint cert) >= NotOrigin slotNo)
-              pcdsCertsByTicket
-          pcdsCertIds' =
-            Set.fromList (getPerasCertRound <$> Map.elems pcdsCertsByTicket')
-          pcdsLatestCertSeen' =
-            updateIfBoostingGarbageCollectedBlock <$> pcdsLatestCertSeen
+              pcdsCerts
+       in ( PerasCertDbState
+              { pcdsCerts = pcdsCerts'
+              , pcdsLatestCertSeen = pcdsLatestCertSeen
+              }
+          , gcCerts
+          )
 
-          -- Update the latest certificate seen status when its corresponding
-          -- boosted block gets garbage collected.
-          updateIfBoostingGarbageCollectedBlock cert
-            | pointSlot (getPerasCertPoint (forgetBoostedBlockStatus cert))
-                < NotOrigin slotNo =
-                CertBoostingBlockNoLongerInVolatileDB (forgetBoostedBlockStatus cert)
-            | otherwise =
-                cert
-       in PerasCertDbState
-            { pcdsCertIds = pcdsCertIds'
-            , pcdsCertsByTicket = pcdsCertsByTicket'
-            , pcdsLastTicketNo = pcdsLastTicketNo
-            , pcdsLatestCertSeen = pcdsLatestCertSeen'
-            }
+{-------------------------------------------------------------------------------
+  On-disk storage
+-------------------------------------------------------------------------------}
+
+-- | Initialize the `PerasCertDbState` with the most recent `maxVolatileCertCount`
+-- certificates stored on disk.
+-- Certificate files that cannot be decoded (e.g. because a write was interrupted)
+-- are skipped.
+loadPerasCertDbState ::
+  ( IOLike m
+  , IsPerasCert (PerasCert blk) blk
+  , DecodeDisk blk (PerasCert blk)
+  ) =>
+  CodecConfig blk ->
+  SomeHasFS m ->
+  m (PerasCertDbState blk)
+loadPerasCertDbState ccfg (SomeHasFS hasFS) = do
+  createDirectoryIfMissing hasFS True rootDir
+  roundNos <-
+    Set.fromList . mapMaybe certRoundFromFileName . Set.toList <$> listDirectory hasFS rootDir
+  certs <-
+    rights
+      <$> traverse
+        (readCertFile ccfg hasFS)
+        (take maxVolatileCertCount (Set.toDescList roundNos))
+  let pcdsCerts = Map.fromList [(getPerasCertRound cert, cert) | cert <- certs]
+  pure
+    PerasCertDbState
+      { pcdsCerts
+      , pcdsLatestCertSeen = maybeToStrictMaybe (snd <$> Map.lookupMax pcdsCerts)
+      }
+
+-- | The maximum number of certificates (one per round) within a common prefix
+-- window of @3k/f@ slots, i.e. 1440 rounds of 90 slots for @k = 2160@ and @f = 1/20@.
+-- Used as a bound on the certificates loaded in memory when opening.
+maxVolatileCertCount :: Int
+maxVolatileCertCount = 1440
+
+-- | Write a certificate with its arrival time to an independent file on disk.
+-- The file is ovewritten if it already exists.
+writeCertFile ::
+  (IOLike m, EncodeDisk blk (PerasCert blk)) =>
+  PerasCertDbEnv m blk ->
+  PerasRoundNo ->
+  WithArrivalTime (ValidatedPerasCert blk) ->
+  m ()
+writeCertFile PerasCertDbEnv{pcdbHasFS = SomeHasFS hasFS, pcdbCodecConfig} roundNo cert =
+  withFile hasFS (certFilePath roundNo) (AppendMode AllowExisting) $ \h -> do
+    hTruncate hasFS h 0
+    void $ hPutAll hasFS h $ serialize $ encodeCertFile pcdbCodecConfig cert
+
+readCertFile ::
+  (IOLike m, DecodeDisk blk (PerasCert blk)) =>
+  CodecConfig blk ->
+  HasFS m h ->
+  PerasRoundNo ->
+  m (Either DecoderError (WithArrivalTime (ValidatedPerasCert blk)))
+readCertFile ccfg hasFS roundNo =
+  decodeFullDecoder "PerasCertDB certificate file" (decodeCertFile ccfg)
+    <$> withFile hasFS (certFilePath roundNo) ReadMode (hGetAll hasFS)
+
+encodeCertFile ::
+  EncodeDisk blk (PerasCert blk) =>
+  CodecConfig blk ->
+  WithArrivalTime (ValidatedPerasCert blk) ->
+  Encoding
+encodeCertFile ccfg (WithArrivalTime arrivalTime cert) =
+  encodeListLen 2
+    <> toCBOR arrivalTime
+    <> encodeDisk ccfg cert
+
+decodeCertFile ::
+  DecodeDisk blk (PerasCert blk) =>
+  CodecConfig blk ->
+  Decoder s (WithArrivalTime (ValidatedPerasCert blk))
+decodeCertFile ccfg = do
+  decodeListLenOf 2
+  WithArrivalTime <$> fromCBOR <*> decodeDisk ccfg
+
+rootDir :: FsPath
+rootDir = mkFsPath []
+
+-- | Named after the round, so that the latest certificates can be selected
+-- without decoding every file.
+certFileName :: PerasRoundNo -> String
+certFileName roundNo = show (unPerasRoundNo roundNo) <> ".cert"
+
+certFilePath :: PerasRoundNo -> FsPath
+certFilePath roundNo = mkFsPath [certFileName roundNo]
+
+-- | Inverse of 'certFileName'. Non-canonical names (e.g. @042.cert@) are
+-- rejected, as 'certFilePath' would not point to them.
+certRoundFromFileName :: String -> Maybe PerasRoundNo
+certRoundFromFileName name = do
+  roundNo <- PerasRoundNo <$> readMaybe (takeWhile isDigit name)
+  guard (certFileName roundNo == name)
+  pure roundNo

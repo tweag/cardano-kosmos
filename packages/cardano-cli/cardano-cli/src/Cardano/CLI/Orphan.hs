@@ -31,12 +31,15 @@ instance Error [Bech32DecodeError] where
 instance Error [RawBytesHexError] where
   prettyError errs = vsep $ map prettyError errs
 
+instance Error [FileError TextEnvelopeError] where
+  prettyError errs = vsep $ map prettyError errs
+
 -- TODO upstream this orphaned instance to the ledger
 instance
   (L.EraTxOut ledgerera, L.EraGov ledgerera, L.EraCertState ledgerera, L.EraStake ledgerera)
   => ToJSON (L.NewEpochState ledgerera)
   where
-  toJSON nes@(L.NewEpochState nesLastTickSlotNo nesEL nesBprev nesBCur nesEs nesRu _stashedAvvm) =
+  toJSON nes@(L.NewEpochState _lastTickSlotNo nesEL nesBprev nesBCur nesEs nesRu _stashedAvvm) =
     object
       [ "currentEpoch" .= nesEL
       , "priorBlocks" .= nesBprev

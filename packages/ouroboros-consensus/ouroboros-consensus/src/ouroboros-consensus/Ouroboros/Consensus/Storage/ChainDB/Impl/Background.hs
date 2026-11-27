@@ -13,6 +13,10 @@
 --
 -- * Copying blocks from the VolatileDB to the ImmutableDB
 -- * Performing and scheduling garbage collections on the VolatileDB
+-- * Performing and scheduling garbage collections on the PerasCertDB
+--   and the PerasVoteDB
+-- * Storing garbage-collected Peras certificates boosting immutable blocks
+--   in the PerasImmutableCertDB
 -- * Writing snapshots of the LedgerDB to disk and deleting old ones
 -- * Executing scheduled chain selections
 module Ouroboros.Consensus.Storage.ChainDB.Impl.Background
@@ -29,6 +33,13 @@ module Ouroboros.Consensus.Storage.ChainDB.Impl.Background
     -- * Executing garbage collection
   , garbageCollectBlocks
   , garbageCollectPeras
+
+    -- * Storing certificates in the PerasImmutableCertDB
+  , CertStoringQueue
+  , certStoringRunner
+  , enqueueCertsToStore
+  , newCertStoringQueue
+  , storeImmutableCerts
 
     -- * Scheduling garbage collections
   , GcParams (..)
@@ -47,7 +58,7 @@ module Ouroboros.Consensus.Storage.ChainDB.Impl.Background
   ) where
 
 import Control.Exception (assert)
-import Control.Monad (forM_, forever, join, void)
+import Control.Monad (forM_, forever, join, void, when)
 import Control.Monad.Trans.Class (lift)
 import Control.RAWLock
 import Control.ResourceRegistry
@@ -63,6 +74,7 @@ import Data.Void (Void)
 import GHC.Generics (Generic)
 import GHC.Stack (HasCallStack)
 import Ouroboros.Consensus.Block
+import Ouroboros.Consensus.BlockchainTime (WithArrivalTime)
 import Ouroboros.Consensus.Config (configBlock)
 import Ouroboros.Consensus.HardFork.Abstract
 import Ouroboros.Consensus.Ledger.Inspect
@@ -77,13 +89,21 @@ import Ouroboros.Consensus.Storage.ChainDB.API
 import Ouroboros.Consensus.Storage.ChainDB.Impl.ChainSel
   ( chainSelSync
   )
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Leios
+  ( insertAcquiredEb
+  , isAcquiredEb
+  , pruneAcquiredEbs
+  , pruneLeiosValidClaims
+  )
 import qualified Ouroboros.Consensus.Storage.ChainDB.Impl.Query as Query
 import Ouroboros.Consensus.Storage.ChainDB.Impl.Types
 import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmutableDB
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import qualified Ouroboros.Consensus.Storage.LedgerDB.Snapshots as LedgerDB
 import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle (..))
+import qualified Ouroboros.Consensus.Storage.LeiosDB.API as LeiosDB
 import qualified Ouroboros.Consensus.Storage.PerasCertDB.API as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB.API as PerasImmutableCertDB
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB.API as PerasVoteDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
 import Ouroboros.Consensus.Util
@@ -103,14 +123,18 @@ launchBgTasks ::
   ( IOLike m
   , IsPerasCert (PerasCert blk) blk
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
+  , ConvertRawHash blk
   , InspectLedger blk
   , HasHardForkHistory blk
   ) =>
   ChainDbEnv m blk ->
+  -- | The point of the next closure the node acquires, subscribed to before
+  -- seeding 'cdbAcquiredEbs', so that none is missed in between.
+  STM m LeiosPoint ->
   m ()
-launchBgTasks cdb@CDB{..} = do
+launchBgTasks cdb@CDB{..} nextAcquiredEbClosure = do
   !addBlockThread <-
     launch "ChainDB.addBlockRunner" $
       addBlockRunner cdbChainSelFuse cdb
@@ -120,12 +144,18 @@ launchBgTasks cdb@CDB{..} = do
     forkLinkedWatcher cdbRegistry "ChainDB.ledgerDbTaskWatcher" $
       ledgerDbTaskWatcher cdb ledgerDbTasksTrigger
 
+  certStoringQueue <- newCertStoringQueue
+  !certStoringThread <-
+    launch "ChainDB.certStoringRunner" $
+      certStoringRunner cdb certStoringQueue
+
   gcSchedule <- newGcSchedule
   !gcThread <-
     launch "ChainDB.gcBlocksAndPerasScheduleRunner" $
       gcScheduleRunner gcSchedule $ \slot -> do
         garbageCollectBlocks cdb slot
-        garbageCollectPeras cdb slot
+        removedCerts <- garbageCollectPeras cdb slot
+        enqueueCertsToStore certStoringQueue removedCerts
 
   !copyToImmutableDBThread <-
     launch "ChainDB.copyToImmutableDBRunner" $
@@ -135,18 +165,44 @@ launchBgTasks cdb@CDB{..} = do
     launch "ChainDB.snapshotRunner" $
       snapshotRunner cdb
 
+  !acquiredEbsThread <-
+    launch "ChainDB.acquiredEbsRunner" $
+      acquiredEbsRunner cdb nextAcquiredEbClosure
+
   atomically $
     writeTVar cdbKillBgThreads $
       sequence_
         [ addBlockThread
         , cancelThread ledgerDbMaintenanceThread
         , gcThread
+        , certStoringThread
         , copyToImmutableDBThread
         , snapshotThread
+        , acquiredEbsThread
         ]
  where
   launch :: String -> m Void -> m (m ())
   launch = fmap cancelThread .: forkLinkedThread cdbRegistry
+
+-- | Grow 'cdbAcquiredEbs' from the points of the acquired closures, and
+-- enqueue a reprocess of the blocks parked on each endorser block the first
+-- time its closure is acquired.
+--
+-- REVIEW: Would the fetch logic rather keep a fingerprinted set of the points
+-- it acquired closures at? ChainSel could read that set directly, and this
+-- runner would only reprocess what is new since the last fingerprint.
+acquiredEbsRunner ::
+  IOLike m => ChainDbEnv m blk -> STM m LeiosPoint -> m Void
+acquiredEbsRunner CDB{..} nextAcquiredClosure =
+  forever $ do
+    point <- atomically nextAcquiredClosure
+    novel <- atomically $ do
+      acquired <- readTVar cdbAcquiredEbs
+      writeTVar cdbAcquiredEbs (insertAcquiredEb point acquired)
+      pure $ not (isAcquiredEb (pointEbHash point) acquired)
+    -- The set has already grown, so ChainSel sees the closure even while
+    -- this enqueue blocks on a full queue.
+    when novel $ addReprocessLeiosEb cdbChainSelQueue (pointEbHash point)
 
 {-------------------------------------------------------------------------------
   Copying blocks from the VolatileDB to the ImmutableDB
@@ -154,6 +210,10 @@ launchBgTasks cdb@CDB{..} = do
 
 -- | Copy the blocks older than the immutable tip from the VolatileDB to the
 -- ImmutableDB.
+--
+-- Peras certificates boosting these blocks are /not/ copied here: they are
+-- stored in the 'PerasImmutableCertDB' once they are garbage-collected from
+-- the volatile 'PerasCertDB' (see 'certStoringRunner').
 --
 -- The headers of these blocks can be retrieved by considering headers in
 -- 'cdbChain' that are not also in 'getCurrentChain' (a suffix of 'cdbChain').
@@ -165,15 +225,16 @@ launchBgTasks cdb@CDB{..} = do
 -- The 'SlotNo' of the tip of the ImmutableDB after copying the blocks is
 -- returned. This can be used for a garbage collection on the VolatileDB.
 --
--- Before copying any of the blocks, this pins in the LeiosDB the endorser
--- blocks they certify, so that the LeiosDB's garbage collection never evicts
--- them. A crash in between leaves only the pins, and copying the same blocks
--- again after the restart pins the same endorser blocks.
+-- Before copying any of the blocks, this copies the endorser blocks they
+-- certify into the LeiosDB's immutable partition, so every block in the
+-- ImmutableDB has its certified endorser block there, and advances the
+-- LeiosDB's promoted slot to the slot of the newest block. A crash in between
+-- leaves only the endorser blocks, and copying the same blocks again after the
+-- restart copies the same endorser blocks.
 copyToImmutableDB ::
   forall m blk.
   ( IOLike m
   , BlockSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , HasCallStack
   ) =>
   ChainDbEnv m blk ->
@@ -194,7 +255,8 @@ copyToImmutableDB cdb@CDB{..} = withWriteAccess cdbImmutableDBLock $ \() -> do
     -- copy.
     then trace NoBlocksToCopyToImmutableDB
     else do
-      leiosDbPromoteToImmutable cdbLeiosDb =<< certifiedEbs toCopy
+      leiosDbPromoteToImmutable cdbLeiosDb (realPointSlot (headerRealPoint (last toCopy)))
+        =<< certifiedEbs toCopy
       forM_ (map headerPoint toCopy) $ \pt -> do
         let hash = case pointHash pt of
               BlockHash h -> h
@@ -302,7 +364,6 @@ copyToImmutableDBRunner ::
   forall m blk.
   ( IOLike m
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   ) =>
   ChainDbEnv m blk ->
   LedgerDbTasksTrigger m ->
@@ -330,7 +391,10 @@ copyToImmutableDBRunner cdb@CDB{..} ledgerDbTasksTrigger gcSchedule = do
 
   scheduleGC' :: WithOrigin SlotNo -> m ()
   scheduleGC' Origin = return ()
-  scheduleGC' (NotOrigin slotNo) =
+  scheduleGC' (NotOrigin slotNo) = do
+    atomically $ do
+      modifyTVar cdbAcquiredEbs (pruneAcquiredEbs slotNo)
+      modifyTVar cdbLeiosValidClaims (pruneLeiosValidClaims slotNo)
     scheduleGC
       (contramap TraceGCEvent cdbTracer)
       slotNo
@@ -405,7 +469,6 @@ snapshotRunner ::
   forall m blk.
   ( IOLike m
   , BlockSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , HasCallStack
   ) =>
   ChainDbEnv m blk ->
@@ -474,8 +537,8 @@ mkRandomSnapshotDelay CDB{cdbSnapshotDelayRNG} sdr =
 
 -- | Trigger a garbage collection for blocks older than the given 'SlotNo' on
 -- the VolatileDB, and for the endorser blocks in the LeiosDB all of whose
--- announcements are older than it. 'copyToImmutableDB' has already pinned the
--- certified ones, which the LeiosDB keeps.
+-- announcements are older than it. 'copyToImmutableDB' has already copied the
+-- certified ones into the LeiosDB's immutable partition.
 --
 -- This is thread-safe as the VolatileDB locks itself while performing a GC.
 --
@@ -489,22 +552,92 @@ mkRandomSnapshotDelay CDB{cdbSnapshotDelayRNG} sdr =
 garbageCollectBlocks :: forall m blk. IOLike m => ChainDbEnv m blk -> SlotNo -> m ()
 garbageCollectBlocks CDB{..} slotNo = do
   VolatileDB.garbageCollect cdbVolatileDB slotNo
-  leiosDbGarbageCollect cdbLeiosDb slotNo
+  LeiosDB.garbageCollect cdbLeiosDb
   atomically $ do
     modifyTVar cdbInvalid $ fmap $ Map.filter ((>= slotNo) . invalidBlockSlotNo)
   traceWith cdbTracer $ TraceGCEvent $ PerformedGC slotNo
 
 -- | Garbage-collect Peras state (certificates and votes) whose target slot is
 -- strictly smaller than the given 'SlotNo'.
+--
+-- Returns the certificates that were garbage-collected from the
+-- 'PerasCertDB', so that the ones boosting immutable blocks can be stored in
+-- the 'PerasImmutableCertDB' (see 'storeImmutableCerts').
 garbageCollectPeras ::
   forall m blk.
   IOLike m =>
   ChainDbEnv m blk ->
   SlotNo ->
-  m ()
+  m [WithArrivalTime (ValidatedPerasCert blk)]
 garbageCollectPeras CDB{..} slotNo = do
-  join . atomically $ PerasCertDB.garbageCollect cdbPerasCertDB slotNo
+  removedCerts <- join . atomically $ PerasCertDB.garbageCollect cdbPerasCertDB slotNo
   join . atomically $ PerasVoteDB.garbageCollect cdbPerasVoteDB slotNo
+  pure removedCerts
+
+{-------------------------------------------------------------------------------
+  Storing certificates in the PerasImmutableCertDB
+-------------------------------------------------------------------------------}
+
+-- | Queue of certificates garbage-collected from the volatile 'PerasCertDB'
+-- that are pending to be stored in the 'PerasImmutableCertDB'.
+--
+-- It is written to by the 'gcScheduleRunner' and read from by the
+-- 'certStoringRunner'. It is unbounded so that garbage collection never
+-- blocks on (slower, on-disk) certificate storage. Its size is nonetheless
+-- bounded in practice by the number of certificates collected per GC.
+newtype CertStoringQueue m blk
+  = CertStoringQueue (TQueue m [WithArrivalTime (ValidatedPerasCert blk)])
+
+newCertStoringQueue :: IOLike m => m (CertStoringQueue m blk)
+newCertStoringQueue = CertStoringQueue <$> newTQueueIO
+
+-- | Enqueue a batch of garbage-collected certificates to be stored. Empty
+-- batches are ignored.
+enqueueCertsToStore ::
+  IOLike m =>
+  CertStoringQueue m blk ->
+  [WithArrivalTime (ValidatedPerasCert blk)] ->
+  m ()
+enqueueCertsToStore _ [] = pure ()
+enqueueCertsToStore (CertStoringQueue queue) certs =
+  atomically $ writeTQueue queue certs
+
+-- | Read batches of garbage-collected certificates from the
+-- 'CertStoringQueue' and store them in the 'PerasImmutableCertDB' using
+-- 'storeImmutableCerts'.
+certStoringRunner ::
+  forall m blk.
+  (IOLike m, IsPerasCert (PerasCert blk) blk, HasCallStack) =>
+  ChainDbEnv m blk ->
+  CertStoringQueue m blk ->
+  m Void
+certStoringRunner cdb (CertStoringQueue queue) = forever $ do
+  certs <- atomically $ readTQueue queue
+  storeImmutableCerts cdb certs
+
+-- | Store the given certificates in the 'PerasImmutableCertDB', filtering out
+-- those boosting blocks that are not in the ImmutableDB (e.g. blocks on forks
+-- that were never selected).
+--
+-- The certificates are expected to have been garbage-collected from the
+-- volatile 'PerasCertDB', i.e., they boost blocks that are older than the
+-- ImmutableDB tip, so the ImmutableDB already contains every boosted block
+-- that is (and will ever be) immutable.
+storeImmutableCerts ::
+  forall m blk.
+  (IOLike m, IsPerasCert (PerasCert blk) blk, HasCallStack) =>
+  ChainDbEnv m blk ->
+  [WithArrivalTime (ValidatedPerasCert blk)] ->
+  m ()
+storeImmutableCerts CDB{cdbImmutableDB, cdbPerasImmutableCertDB} certs =
+  forM_ certs $ \cert ->
+    case pointToWithOriginRealPoint (getPerasCertPoint cert) of
+      Origin -> pure ()
+      NotOrigin pt -> do
+        isImmutable <- ImmutableDB.hasBlock cdbImmutableDB pt
+        when isImmutable $
+          void $
+            PerasImmutableCertDB.addCert cdbPerasImmutableCertDB cert
 
 {-------------------------------------------------------------------------------
   Scheduling garbage collections
@@ -709,6 +842,8 @@ addBlockRunner ::
   , IsPerasCert (PerasCert blk) blk
   , LedgerSupportsProtocol blk
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
+  , ConvertRawHash blk
   , InspectLedger blk
   , HasHardForkHistory blk
   , HasCallStack
@@ -728,6 +863,11 @@ addBlockRunner fuse cdb@CDB{..} = forever $ do
           case message of
             ChainSelReprocessLoEBlocks varProcessed ->
               void $ tryPutTMVar varProcessed ()
+            -- No promise to fulfil. The parked blocks are not lost: the ChainDB
+            -- is closing, and initial chain selection reconsiders them when it
+            -- reopens.
+            ChainSelReprocessLeiosEb{} ->
+              pure ()
             ChainSelAddBlock BlockToAdd{varBlockWrittenToDisk, varBlockProcessed} -> do
               _ <-
                 tryPutTMVar
@@ -746,6 +886,8 @@ addBlockRunner fuse cdb@CDB{..} = forever $ do
           lift $ case message of
             ChainSelReprocessLoEBlocks _ ->
               trace PoppedReprocessLoEBlocksFromQueue
+            ChainSelReprocessLeiosEb{} ->
+              pure ()
             ChainSelAddBlock BlockToAdd{blockToAdd} ->
               trace $ PoppedBlockFromQueue $ blockRealPoint blockToAdd
             ChainSelAddPerasCert cert _varProcessed ->

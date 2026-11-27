@@ -1,10 +1,56 @@
 # Revision history for `cardano-ledger-dijkstra`
 
-## 0.5.0.0
+## 0.6.0.0
 
+* Validate the references of an `EndorserBlock` in the `EB` rule and in `applyEndorserBlockNoValidation`:
+  - Add `EbWasNotAnnounced`, `EbReferencesSizeTooBig`, `EbAnnouncementSlotMismatch`, `EbAnnouncementHashMismatch`, `EbAnnouncementSizeMismatch` and `EbAlreadyApplied` to `Cardano.Ledger.Dijkstra.Rules.Eb`, and `InjectRuleFailure "EB"` instances for them
+  - Add `validateEbReferences` and `validateEbAnnouncementSlot` to `Cardano.Ledger.Dijkstra.Rules.Eb`
+  - Add `EbWasNotAnnouncedInEB`, `EbReferencesSizeTooBigInEB`, `EbAnnouncementSlotMismatchInEB`, `EbAnnouncementHashMismatchInEB`, `EbAnnouncementSizeMismatchInEB` and `EbAlreadyAppliedInEB` constructors to `EbPredFailure`
+  - Add `InvalidEndorserBlockReferences`, thrown by `applyEndorserBlockNoValidation`
+  - Add `LeiosCertEbNotApplied` constructor to `DijkstraBbodyPredFailure`, so `BBODY` rejects a certificate for an `EndorserBlock` that was not applied
+* Add `getRefScriptsFromCreatedTxOuts`
+* Change the `Tx l era` argument of `getDijkstraScriptsProvided` to `Tx TopTx era`
+* Add `dsattUTxO` to `DijkstraStAnnTopTx`
+* Add `exUnitsDijkstraStAnnTx`
+* Add `dsattExUnits` to `DijkstraStAnnTopTx`
+* Add `refScriptsSizeDijkstraStAnnTx`
+* Add `dsattRefScriptsSize` to `DijkstraStAnnTopTx`
+* Change `Environment` of `BBODY` rule from `Shelley.BbodyEnv` to the Dijkstra-specific `BbodyEnv`
+* Add `BbodyEnv`
+* Add `mkDijkstraBlockEnv`
+* Add `DijkstraApplyBlock` type class, an extension of `ApplyBlock` that applies an `EndorserBlock` with the `EB` rule:
+  - Add `applyEndorserBlock` method
+  - Add `DijkstraApplyBlock h DijkstraEra` instance
+  - Add `applyEndorserBlockEither`, `applyEndorserBlockNoValidation` and `EndorserBlockTransitionError`
+* Do not require the witnesses of the owners for a stake pool re-registration that changes nothing but the BLS key:
+  - Add `validateDijkstraNeededWitnesses`
+  - Add `poolOwnersWitnessRequired`
+  - Add the `EraCertState` constraint to the `STS` instance of `SUBUTXOW`
+* Generalize the `wireSizeTxF` re-export and remove the `binaryUpgradeTx` re-export from `Cardano.Ledger.Dijkstra.Core`
+* Replace `TranslateEra DijkstraEra (Tx TopTx)` with `TranslateEra DijkstraEra MempoolTx`
+* Add `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances for `MempoolTx DijkstraEra` using the mempool transaction format
+* Change the `EncCBOR`, `ToCBOR` and annotator `DecCBOR` instances for `Tx TopTx DijkstraEra` and `DijkstraTx TopTx era` to use the block transaction format
+* Remove `certsTx` from `SubCertsEnv`
+* Change the `STS` state of `LEDGER` and `MEMPOOL` rules to `LedgerStateWithLimits`
+* Add `LEIOSCERT` rule, `LeiosCertEnv` and `DijkstraLeiosCertPredFailure`
+* Add `LeiosCertFailure` and `LeiosCertWithoutEbAnnouncement` constructors to `DijkstraBbodyPredFailure`
+* Add `PredicateFailure (EraRule "LEIOSCERT" era)` constraints to the `Eq`, `Ord`, `Show`, `NFData`, `EncCBOR` and `DecCBOR` instances for `DijkstraBbodyPredFailure`
+* Replace the `ConwayEraPParams era` constraint on the `STS (BBODY era)` instance with `DijkstraEraPParams era`, and add `Embed (EraRule "LEIOSCERT" era) (EraRule "BBODY" era)` and the `Environment`, `State` and `Signal` equalities for `EraRule "LEIOSCERT" era` to it
+* Replace the generic `Embed ledgers (BBODY era)` instance with `Embed (Babbage.LEDGERS era) (BBODY era)`, and add `Embed (LEIOSCERT era) (BBODY era)`
+* Add `InjectRuleFailure` instances that inject `DijkstraSubPoolPredFailure` into the `SUBCERTS`, `SUBENTITIES`, `SUBLEDGER`, `SUBLEDGERS` and `LEDGER` rules
+* Add `SafeToHash` instance for `DijkstraBlockBody`
+* Add the `EB` and `EBLEDGERS` rules
+* Add `mkBasicEndorserBlock` to `EraEndorserBlock`
+* Validate the Peras certificate of a block body with `cardano-crypto-peras`, against the voting committee of the epoch of its round (the epoch of the block or the one before it), built from the stake distribution and protocol parameters of that epoch and the nonce supplied in the `PerasBlockContext`:
+  - add `bbePeras` to `BbodyEnv`, and `PerasBbodyEnv`
+  - add `mkDijkstraBlockEnvWithPerasContext`, and `mkBlockEnvWithPerasContext` to the `ApplyBlock h DijkstraEra` instance
+  - add `validatePerasCertInBlock` and `perasStakeDistrFromPoolDistr`
+  - add a `Text` field with the `cardano-crypto-peras` error to `PerasCertValidationFailed`
+  - add the `PerasCertBlockContextMissing` and `PerasCertRoundOutsideEpochs` constructors to `DijkstraBbodyPredFailure`
+  - remove `PerasKey` and `validatePerasCert`
 * Remove the `StakePoolCostTooLowPOOL` predicate failure
 * Add `getDijkstraMinFeeTxUtxo` and use it in `getMinFeeTxUtxo`
-* Add `DecCBOR (Annotator EbReferences)` and `ToCBOR EbReferences`, so that `EbReferences` can be decoded without the full input at hand, eg from the network
+* Add `DecCBOR (Annotator (DijkstraEbReferences era))` and `ToCBOR (DijkstraEbReferences era)`, so that `DijkstraEbReferences` can be decoded without the full input at hand, eg from the network
 * Add `LeiosCertMissing` and `LeiosCertBlockBodyHasTxs` constructors to `DijkstraBbodyPredFailure`
 * Rename `decodeDijkstraTopTx` to `decodeDijkstraTopTxInMempool`
 * Remove the `DijkstraEraTx` type class and its `hashTx` method in favour of `HashAnnotated (Tx TopTx DijkstraEra) EraIndependentTx`
@@ -14,7 +60,7 @@
 * Replace the `AlonzoEraTx era` constraint with `SafeToHash (Tx TopTx era)` on `toCBORForBlockInclusion`, on the `DijkstraBlockBody` pattern and on `EncCBOR (DijkstraBlockBodyRaw era)`, and with `Era era` and `SafeToHash (Tx TopTx era)` on `mkBasicBlockBodyDijkstra`
 * Add `BlsKeyAlreadyRegistered` constructor to `DijkstraPoolPredFailure`
 * Change the field type of `RequiredTopLevelGuardsNotSupported` to `NonEmptySet (Credential Guard)`
-* Add `Cardano.Ledger.Dijkstra.Block.Endorser`, with `DijkstraEndorserBlock` and related types, and the `EraEndorserBlock` class
+* Add `Cardano.Ledger.Dijkstra.Block.Endorser`, with `DijkstraEndorserBlock`, `DijkstraEbReferences` and related types, the `EraEndorserBlock` class with the `EbReferences` and `EndorserBlock` type families, and the `EbReferences` pattern synonym
 * Extend `DijkstraEraForecast` with Peras protocol parameters
 * Validate the treasury value and the reference scripts size in `LEDGER`, and the treasury value in `SUBLEDGER`, regardless of phase-2 validity
 * Add `POOLREAP` rule for Dijkstra:
@@ -31,19 +77,50 @@
 * Add `Embed (SNAP era) (TICKF era)` instance, so that `TICKF` runs the Dijkstra `SNAP` rule
 * Change `eraMaxLanguage` to `PlutusV4`
 * Rename `requiredTopLevelGuardsL` to `requiredTopLevelGuardsTxBodyL`
+* Export `transGuardingTopTxInfo`, `transProposal`, `transVotingProcedures`, `transTxInInfoV4`, `transTxOutV4`, `transWithdrawals` and `transDirectDeposits` from `Cardano.Ledger.Dijkstra.TxInfo`
+* Replace the placeholder `PerasCert` in `DijkstraBlockBody` with `PerasCert` from `cardano-crypto-peras`; `PerasCertValidationFailed` now carries that type
 
 ### `cddl`
 
 * Add the `nonempty_omap` generic rule, with `nonemptyOMap` and a `HuddleRule2 "nonempty_omap"` instance
 * Add the `eb_references` rule, a `nonempty_omap` from transaction hash to transaction size
+* Change `peras_certificate` from `bytes` to its structural definition and add the `peras_boosted_block`, `peras_voters`, `peras_signature` and `peras_vrf_output` rules
 
 ### `testlib`
 
+* Add `announceEndorserBlock`
+* Add `InjectRuleFailure "EB"` superclasses for `EbWasNotAnnounced`, `EbReferencesSizeTooBig`, `EbAnnouncementSlotMismatch`, `EbAnnouncementHashMismatch`, `EbAnnouncementSizeMismatch` and `EbAlreadyApplied`, and the `Show (PredicateFailure (EraRule "EBLEDGERS" era))` superclass, to `DijkstraEraImp`
+* Add `Arbitrary` and `ToExpr` instances for `EbWasNotAnnounced`, `EbReferencesSizeTooBig`, `EbAnnouncementSlotMismatch`, `EbAnnouncementHashMismatch`, `EbAnnouncementSizeMismatch` and `EbAlreadyApplied`
+* Add `roundTripDijkstraCommonSpec` and `roundTripDijkstraEraTypesSpec`
+* Add `EraEndorserBlock`, `Arbitrary (EbReferences era)` and `DecCBOR (EbReferences era)` as superclasses of `DijkstraEraTest`
+* Add `DijkstraApplyBlock TestBlockHeader era`, `EncCBOR (PredicateFailure (EraRule "EB" era))` and `DecCBOR (PredicateFailure (EraRule "EB" era))` superclasses to `DijkstraEraImp`
+* Add `Arbitrary` and `DecCBOR` instances for `MempoolTx DijkstraEra`
+* Change the `DecCBOR` instances for `Tx TopTx DijkstraEra` and `DijkstraTx TopTx DijkstraEra` to use the block transaction format
+* Add `setupLeiosCommittee` and `mkLeiosCert`
+* Add `InjectRuleFailure "BBODY" DijkstraLeiosCertPredFailure era` superclass to `DijkstraEraImp`
+* Add `Arbitrary` and `ToExpr` instances for `DijkstraLeiosCertPredFailure`
+* Add `Arbitrary (PredicateFailure (EraRule "LEIOSCERT" era))` and `ToExpr (PredicateFailure (EraRule "LEIOSCERT" era))` constraints to the respective instances for `DijkstraBbodyPredFailure`
+* Add `Test.Cardano.Ledger.Dijkstra.Imp.LeiosCertSpec`
+* Add `InjectRuleFailure "LEDGER" DijkstraSubPoolPredFailure era` and
+  `InjectRuleFailure "LEDGER" DijkstraSubGovCertPredFailure era` as superclasses of `DijkstraEraImp`
+* Add `InjectRuleFailure` instances that inject `DijkstraSubGovCertPredFailure` into the `SUBCERTS`, `SUBENTITIES`, `SUBLEDGER`, `SUBLEDGERS` and `LEDGER` rules
+* Add `registerDRepSubTx`
+* Re-export `goldenMapRedeemers` from `Test.Cardano.Ledger.Conway.Binary.Golden`
+* Add `submitEndorserBlock`, `submitFailingEndorserBlock`, `makeEndorserBlock` and `mkEbReferencesAnnouncement`
+* Add missing superclasses to `DijkstraEraImp`
+* Add `Arbitrary` and `ToExpr` instances for `EbPredFailure` and `EbLedgersPredFailure`
+* Add `Test.Cardano.Ledger.Dijkstra.Imp.EbSpec`
 * Add `ToExpr` instances for `DijkstraTopTx DijkstraEra` and `DijkstraTopTxRaw DijkstraEra`
 * Add the `SafeToHash (Tx TopTx era)` constraint to `genSmallDijkstraTxsBlockBody`, and replace the `AlonzoEraTx era` constraint with it on `genSmallDijkstraCertBlockBody`
 * Replace the `EraBlockBody era`, `AlonzoEraTx era` and `SafeToHash (TxWits era)` constraints on `Arbitrary (DijkstraBlockBody era)` with `SafeToHash (Tx TopTx era)`
-* Add `Arbitrary` instance for `EbReferences`
+* Add `Arbitrary` instance for `DijkstraEbReferences DijkstraEra`
 * Add `DijkstraEraForecast` superclass to `DijkstraEraImp`
+* Add `Test.Cardano.Ledger.Dijkstra.Translation.TranslatableGen` module with `genTranslatableTxWithNestedTxs`
+* Remove `Arbitrary PerasCert`, now provided by `cardano-ledger-binary:testlib`
+
+## 0.5.0.0
+
+* Require `Inject (AlonzoContextError era) (ContextError era)` constraint on `mkDijkstraStAnnTopTx`
 
 ## 0.4.0.0
 

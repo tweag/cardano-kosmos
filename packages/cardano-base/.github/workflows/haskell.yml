@@ -1,0 +1,210 @@
+name: Haskell CI
+# If it's a scheduled (for us: nightly) build, set the name of this run to a static value, so we can identify it easier.
+# Otherwise, replicate the default run name: either the PR title if it exists, or the commit message otherwise.
+run-name: |
+       ${{github.event_name == 'schedule' && 'Haskell CI - NIGHTLY'
+         || github.event.pull_request.title == '' && github.event.head_commit.message
+         || github.event.pull_request.title}}
+
+on:
+  push:
+    branches: [ "master", "release/**" ]
+  pull_request:
+    branches: [ "**" ]
+  schedule:
+    # "Nightly" builds: Every day at 06:00 UTC
+    - cron: '0 6 * * *'
+  # for running the workflow manually - useful for branches without PRs, for which jobs don't get ran automatically
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: Run with the same settings as a nightly build
+        type: boolean
+        default: false
+
+# Cancel running workflows when a new workflow on the same PR or branch is started,
+# but put scheduled workflows into their own group
+concurrency:
+  group: ${{
+    format('{0}-{1}{2}',
+      github.workflow,
+      github.event.pull_request.number || github.ref,
+      github.event_name == 'schedule' && '-scheduled' || '')}}
+  cancel-in-progress: true
+
+jobs:
+  whitespace:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Trailing whitespace check
+      if: matrix.os != 'windows-latest'
+      run: |
+        offenders="$(git grep "\s$" -- *.hs *.c *.h *.nix *.yml *.md || true)";
+        if [ -n "${offenders}" ]; then
+          echo -e "Fix trailing whitespace in:\n"
+          echo -n "${offenders}"
+          exit 1
+        fi
+
+  build:
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ["9.6.7", "9.8.4", "9.10.2", "9.12.2", "9.14.1"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    env:
+      # Modify this value to "invalidate" the cabal cache.
+      CABAL_CACHE_VERSION: "2023-04-27"
+
+    steps:
+    # The macos-26-arm64 image 20261013 ships Command Line Tools 27 (SDK 27.0)
+    # next to Xcode 26.6, whose ld cannot read the SDK 27 .tbd stubs
+    # ("tapi error: malformed file ... unknown architecture arm64e.x1").
+    # Use the Command Line Tools toolchain so ld and SDK match.
+    # Remove once https://github.com/actions/runner-images/issues/14940 is fixed
+    # in the image (its README lists Command Line Tools 26.x again).
+    - name: Use Command Line Tools toolchain on macOS
+      if: runner.os == 'macOS'
+      run: sudo xcode-select -s /Library/Developer/CommandLineTools
+
+    - name: Install Haskell
+      uses: input-output-hk/actions/haskell@latest
+      id: setup-haskell
+      with:
+        ghc-version: ${{ matrix.ghc }}
+        cabal-version: 3.16.1.0
+
+    - name: Install system dependencies
+      uses: input-output-hk/actions/base@latest
+      with:
+        use-sodium-vrf: false # default is true
+
+    - uses: actions/checkout@v7
+
+    - name: Cabal update
+      run: cabal update
+
+    - name: Configure build
+      run: |
+        cp ".github/workflows/cabal.project.local.ci.$(uname -s)" cabal.project.local
+        echo "# cabal.project.local"
+        cat cabal.project.local
+
+    # A dry run `build all` operation does *NOT* downlaod anything, it just looks at the package
+    # indices to generate an install plan.
+    - name: Build dry run
+      run: cabal build all --dry-run --minimize-conflict-set
+
+    # From the install plan we generate a dependency list.
+    - name: Record dependencies
+      id: record-deps
+      run: |
+        cat dist-newstyle/cache/plan.json | jq -r '."install-plan"[].id' | sort | uniq > dependencies.txt
+
+    # From the dependency list we restore the cached dependencies.
+    # We use the hash of `dependencies.txt` as part of the cache key because that will be stable
+    # until the `index-state` values in the `cabal.project` file changes.
+    - name: Restore cached dependencies
+      uses: actions/cache/restore@v6
+      id: cache
+      with:
+        path: |
+          ${{ steps.setup-haskell.outputs.cabal-store }}
+          dist-newstyle
+        key: cache-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('dependencies.txt') }}
+
+    # Now we install the dependencies. If the cache was found and restored in the previous step,
+    # this should be a no-op, but if the cache key was not found we need to build stuff so we can
+    # cache it for the next step.
+    - name: Install dependencies
+      run: cabal build all --only-dependencies
+
+    # Always store the cabal cache.
+    # This may fail (benign failure) if the cache key is already populated.
+    - name: Cache Cabal store
+      uses: actions/cache/save@v6
+      with:
+        path: |
+          ${{ steps.setup-haskell.outputs.cabal-store }}
+          dist-newstyle
+        key: cache-${{ env.CABAL_CACHE_VERSION }}-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('dependencies.txt') }}
+
+    # `doctest` needs to be present before building, to avoid `cabal repl` seeing a configuration
+    # change when `scripts/doctest.sh` runs it
+    - name: Install doctest
+      run: |
+        if [[ -z "$(type -t doctest)" ]]
+        then
+          cabal install doctest --ignore-project --overwrite-policy=always
+          cabal path --installdir >> $GITHUB_PATH
+        fi
+
+    # Now we build.
+    - name: Build [testing]
+      run: cabal build all
+
+    - name: Run tests
+      run: cabal test all --test-show-details=direct -j1
+
+    - name: Run doctests
+      if: runner.os == 'Linux'
+      run: scripts/doctest.sh
+
+  fourmolu:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install fourmolu
+      run: |
+        FOURMOLU_VERSION="0.17.0.0"
+        mkdir -p "$HOME/.local/bin"
+        curl -sL "https://github.com/fourmolu/fourmolu/releases/download/v${FOURMOLU_VERSION}/fourmolu-${FOURMOLU_VERSION}-linux-x86_64" -o "$HOME/.local/bin/fourmolu"
+        chmod a+x "$HOME/.local/bin/fourmolu"
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Run fourmolu
+      run: ./scripts/fourmolize.sh
+
+  cabal-format:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: tfausak/cabal-gild-setup-action@v2
+        with:
+          version: 1.5.0.1
+      - name: Format all cabal files
+        run: ./scripts/cabal-format.sh check

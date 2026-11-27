@@ -105,12 +105,20 @@ import Ouroboros.Consensus.Util.IndexedMemPack
 import Ouroboros.Consensus.Util.Orphans ()
 import Ouroboros.Network.Block
   ( Serialised
+  , decodePoint
+  , encodePoint
   , unwrapCBORinCBOR
   , wrapCBORinCBOR
   )
 import Ouroboros.Network.Magic
 import Test.Cardano.Slotting.Numeric ()
 import Test.Util.Time (dawnOfTime)
+
+instance FromCBOR (Point BlockB) where
+  fromCBOR = decodePoint decode
+
+instance ToCBOR (Point BlockB) where
+  toCBOR = encodePoint encode
 
 {-------------------------------------------------------------------------------
   BlockB
@@ -296,6 +304,7 @@ instance BlockSupportsProtocol BlockB where
 
 instance LedgerSupportsProtocol BlockB where
   protocolLedgerView _ _ = ()
+  ledgerViewAtTip _ _ = ()
   ledgerViewForecastAt _ = trivialForecast
 
 -- NOTE: BlockB is only ever used wrapped in the hard fork combinator (which
@@ -327,7 +336,7 @@ instance BlockSupportsPeras BlockB where
   verifyPerasVote = defaultVerifyPerasVote
   forgePerasCert = defaultForgePerasCert
   verifyPerasCert = defaultVerifyPerasCert
-  getPerasCertInBlock _ = Right Nothing
+  getPerasCertInBlock _ = Nothing
 
 instance HasPartialConsensusConfig ProtocolB
 
@@ -487,6 +496,9 @@ instance NodeInitStorage BlockB where
 instance BlockSupportsMetrics BlockB where
   isSelfIssued = isSelfIssuedConstUnknown
 
+instance BlockSupportsLeios BlockB where
+  blockLeiosCert = defaultBlockLeiosCert
+
 deriving via
   SelectViewDiffusionPipelining BlockB
   instance
@@ -497,7 +509,7 @@ instance SingleEraBlock BlockB where
   singleEraTransition = \_ _ _ _ -> Nothing
 
 instance HasTxs BlockB where
-  extractTxs = const []
+  extractAsMempoolTxs = const []
 
 {-------------------------------------------------------------------------------
   Condense

@@ -70,6 +70,7 @@ nodeRunParser = do
   nodeConfigFp <- lastOption Cfg.parseConfigFile
 
   -- Protocol files
+  -- Includes --shelley-bls-key, which reaches the node through the protocol files.
   credentials <- Cfg.parseCredentials
   deprecatedByronCertFile <- optional parseByronDelegationCertDeprecated
   deprecatedByronKeyFile <- optional parseByronSigningKeyDeprecated
@@ -103,8 +104,10 @@ nodeRunParser = do
            , pncConfigFile   = ConfigYamlFilePath <$> nodeConfigFp
            , pncTopologyFile = TopologyFile <$> topFp
            , pncDatabaseFile = dbFp
+           , pncShelleyBLSKeyFile = mempty
            , pncDiffusionMode = mempty
            , pncExperimentalProtocolsEnabled = mempty
+           , pncPerasEnabled = mempty
            , pncProtocolFiles =
                Last . Just $
                  withDeprecatedByronCredentials

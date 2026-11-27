@@ -15,16 +15,17 @@ import Cardano.Ledger.Dijkstra
 import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.PParams (ppMaxPledgeLeverageL, ppMinPoolMarginL)
 import Cardano.Ledger.Dijkstra.Rules
-import Cardano.Ledger.Keys (coerceKeyRole)
+import Cardano.Ledger.Keys (asWitness, coerceKeyRole, witVKeyHash)
 import Cardano.Ledger.Plutus.CostModels (emptyCostModels)
 import Cardano.Ledger.Shelley.LedgerState
 import qualified Cardano.Ledger.Shelley.Rules as Shelley
 import Cardano.Ledger.State
 import Data.Coerce (coerce)
-import Data.Foldable (fold, for_)
+import Data.Foldable (fold, for_, toList)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence.Strict as SSeq
 import qualified Data.Set as Set
+import qualified Data.Set.NonEmpty as NES
 import Data.Word
 import Lens.Micro ((%~), (&), (.~), (^.))
 import Test.Cardano.Ledger.Core.Rational ((%!))
@@ -364,12 +365,12 @@ spec = describe "POOL" $ do
       pps <- registerPoolWithBlsKey (SJust blsKey)
       registeredIn <- getsNES nesELL
       passEpoch
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps
       passEpoch
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
       newBlsKey <- freshBlsKey
       renewalSubmittedIn <- getsNES nesELL
-      submitTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
+      submitAnyTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
       passEpoch
       -- dated one epoch after the re-registration was submitted,
@@ -379,7 +380,7 @@ spec = describe "POOL" $ do
     it "re-registering with the same BLS key within the same epoch" $ do
       blsKey <- freshBlsKey
       pps <- registerPoolWithBlsKey (SJust blsKey)
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps
       registeredIn <- getsNES nesELL
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
       passEpoch
@@ -389,7 +390,7 @@ spec = describe "POOL" $ do
       blsKey <- freshBlsKey
       pps <- registerPoolWithBlsKey (SJust blsKey)
       newBlsKey <- freshBlsKey
-      submitTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
+      submitAnyTx_ $ registerPoolTx pps {sppBlsKey = SJust newBlsKey}
       registeredIn <- getsNES nesELL
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
       passEpoch
@@ -401,14 +402,14 @@ spec = describe "POOL" $ do
       registeredIn <- getsNES nesELL
       passEpoch
       minPoolCost <- getsPParams ppMinPoolCostL
-      submitTx_ $ registerPoolTx pps {sppCost = minPoolCost <> Coin 1}
+      submitAnyTx_ $ registerPoolTx pps {sppCost = minPoolCost <> Coin 1}
       passEpoch
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
 
     it "dropping the BLS key clears it" $ do
       pps <- registerPoolWithBlsKey . SJust =<< freshBlsKey
       passEpoch
-      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      submitAnyTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
       passEpoch
       expectBlsKeyState (sppId pps) SNothing
 
@@ -417,8 +418,8 @@ spec = describe "POOL" $ do
       pps <- registerPoolWithBlsKey (SJust blsKey)
       registeredIn <- getsNES nesELL
       passEpoch
-      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      submitAnyTx_ $ registerPoolTx pps
       passEpoch
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
 
@@ -426,11 +427,11 @@ spec = describe "POOL" $ do
       blsKey <- freshBlsKey
       pps <- registerPoolWithBlsKey (SJust blsKey)
       passEpoch
-      submitTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
+      submitAnyTx_ $ registerPoolTx pps {sppBlsKey = SNothing}
       passEpoch
       expectBlsKeyState (sppId pps) SNothing
       reRegisteredIn <- getsNES nesELL
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps
       expectBlsKeyState (sppId pps) SNothing
       passEpoch
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey (succ reRegisteredIn)))
@@ -441,7 +442,7 @@ spec = describe "POOL" $ do
       registeredIn <- getsNES nesELL
       AnyLevelTx tx <- retirePoolTx (sppId pps) (EpochInterval 2)
       submitAnyTx_ tx
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps
       passNEpochs 3
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredIn))
 
@@ -453,7 +454,7 @@ spec = describe "POOL" $ do
       passNEpochs 2
       expectPool (sppId pps) Nothing
       registeredAgainIn <- getsNES nesELL
-      submitTx_ $ registerPoolTx pps
+      submitAnyTx_ $ registerPoolTx pps
       expectBlsKeyState (sppId pps) (SJust (BlsKeyState blsKey registeredAgainIn))
 
   describe "BLS key uniqueness" $ do
@@ -664,6 +665,225 @@ spec = describe "POOL" $ do
         if margin /= maxBound
           then delegatorBalance `shouldNotBe` Coin 0
           else delegatorBalance `shouldBe` Coin 0
+
+  describe "Re-registrations that only change the BLS key" $ do
+    describe "Owner witnesses are not needed" $ do
+      let blsKeyChanges ::
+            [(String, ImpTestM era (StrictMaybe BlsKey), ImpTestM era (StrictMaybe BlsKey))]
+          blsKeyChanges =
+            [ ("to rotate the BLS key", SJust <$> freshBlsKey, SJust <$> freshBlsKey)
+            , ("to add a BLS key", pure SNothing, SJust <$> freshBlsKey)
+            , ("to drop the BLS key", SJust <$> freshBlsKey, pure SNothing)
+            ]
+      forM_ blsKeyChanges $ \(title, mkOldBlsKey, mkNewBlsKey) ->
+        it title $ do
+          pps <- registerPoolWithOwners =<< mkOldBlsKey
+          newBlsKey <- mkNewBlsKey
+          let rotated = pps {sppBlsKey = newBlsKey}
+          expectNotAllOwnerWits pps =<< submitAnyTx (registerPoolTx rotated)
+          expectFutureParams rotated
+          passEpoch
+          expectActiveBlsKey (sppId pps) newBlsKey
+
+      it
+        "to cancel a retirement by re-registering with the same parameters"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          AnyLevelTx tx <- retirePoolTx (sppId pps) (EpochInterval 2)
+          submitAnyTx_ tx
+          expectRetiring (sppId pps) True
+          expectNotAllOwnerWits pps =<< submitAnyTx (registerPoolTx pps)
+          -- re-registration cancels the retirement with the cold key alone
+          expectRetiring (sppId pps) False
+          expectFutureParams pps
+
+      it "to rotate the BLS key on top of a pending update" $ do
+        pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+        let updated = pps {sppCost = sppCost pps <> Coin 1}
+        submitTx_ $ registerPoolTx updated
+        newBlsKey <- freshBlsKey
+        -- note: the bls key is updated on top of the pending update, and only
+        -- the cold key is needed
+        let rotated = updated {sppBlsKey = SJust newBlsKey}
+        expectNotAllOwnerWits pps =<< submitAnyTx (registerPoolTx rotated)
+        expectFutureParams rotated
+
+      it
+        "to rotate the BLS key on top of an update made by a sub-transaction"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let updated = pps {sppCost = sppCost pps <> Coin 1}
+              rotated = updated {sppBlsKey = SJust newBlsKey}
+          -- the sub-transaction needs owners, but the top one doesn't
+          tx <-
+            submitTx $
+              mkTopTxWithSubTxs [registerPoolTx updated]
+                & bodyTxL . certsTxBodyL .~ [RegPoolTxCert rotated]
+          ownerWitsByLevel pps tx `shouldBe` (False, [True])
+          expectFutureParams rotated
+
+      it
+        "to rotate the BLS key on top of an update made by a preceding sub-transaction"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let updated = pps {sppCost = sppCost pps <> Coin 1}
+              rotated = updated {sppBlsKey = SJust newBlsKey}
+          tx <- submitTx $ mkTopTxWithSubTxs [registerPoolTx updated, registerPoolTx rotated]
+          ownerWitsByLevel pps tx `shouldBe` (False, [True, False])
+          expectFutureParams rotated
+
+      it "to rotate the BLS key to discard an update made before in the same transaction" $
+        do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          owners <- Set.fromList <$> replicateM 2 freshKeyHash
+          -- use a different set of owners so signatures don't overlap
+          let updated = pps {sppCost = sppCost pps <> Coin 1, sppOwners = owners}
+              rotated = pps {sppBlsKey = SJust newBlsKey}
+              tx =
+                mkBasicTx mkBasicTxBody
+                  & bodyTxL . certsTxBodyL
+                    .~ [RegPoolTxCert updated, RegPoolTxCert rotated]
+          withPostFixup (dropOwnerWits rotated) $ submitTx_ tx
+          expectFutureParams rotated
+
+      -- None of the certificates are applied in a phase-2 invalid transaction,
+      -- so the owners don't need to witness it, whatever it changes
+      it
+        "to rotate the BLS key on top of an update made by a sub-transaction, in a phase-2 invalid transaction"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let updated = pps {sppCost = sppCost pps <> Coin 1}
+              rotated = updated {sppBlsKey = SJust newBlsKey}
+          tx <-
+            submitPhase2Invalid
+              =<< switchTxToPhase2InvalidLegacyMode
+                ( mkTopTxWithSubTxs [registerPoolTx updated]
+                    & bodyTxL . certsTxBodyL .~ [RegPoolTxCert rotated]
+                )
+          ownerWitsByLevel pps tx `shouldBe` (False, [True, False])
+          expectFuturePool (sppId pps) Nothing
+
+      it
+        "to rotate the BLS key on top of an update made by a preceding sub-transaction, in a phase-2 invalid transaction"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let updated = pps {sppCost = sppCost pps <> Coin 1}
+              rotated = updated {sppBlsKey = SJust newBlsKey}
+          tx <-
+            submitPhase2Invalid
+              =<< switchTxToPhase2InvalidLegacyMode
+                (mkTopTxWithSubTxs [registerPoolTx updated, registerPoolTx rotated])
+          ownerWitsByLevel pps tx `shouldBe` (False, [True, False, False])
+          expectFuturePool (sppId pps) Nothing
+
+    describe "Owner witnesses are needed" $ do
+      describe "to rotate the BLS key and change" $ do
+        -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/1293
+        -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/1259
+        -- TODO: Re-enable after issue is resolved, by removing this override
+        forM_ sppChanges $ \(field, change, supportedInConformance) -> do
+          let it' =
+                if supportedInConformance
+                  then it
+                  else disableInConformanceIt
+          it' field $ do
+            pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+            newBlsKey <- freshBlsKey
+            changed <- change pps
+            expectOwnerWitsNeeded changed $ registerPoolTx changed {sppBlsKey = SJust newBlsKey}
+
+      it
+        "to rotate the BLS key in one certificate and change the cost in another"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let newKeyPps = pps {sppBlsKey = SJust newBlsKey}
+              newCostPps = pps {sppCost = sppCost pps <> Coin 1}
+              txWithNewKey =
+                mkBasicTx mkBasicTxBody
+                  & bodyTxL . certsTxBodyL
+                    .~ [RegPoolTxCert newCostPps, RegPoolTxCert newKeyPps]
+          expectOwnerWitsNeeded pps txWithNewKey
+          tx <- submitTx txWithNewKey
+          ownerWitsByLevel pps tx `shouldBe` (True, [])
+          expectFutureParams newKeyPps
+
+      it
+        "to re-register with the active parameters while an update is pending"
+        $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          -- the owners sign an update of the cost, which becomes pending
+          submitTx_ $ registerPoolTx pps {sppCost = sppCost pps <> Coin 1}
+          newBlsKey <- freshBlsKey
+          let rotated = pps {sppBlsKey = SJust newBlsKey}
+          -- going back to the active parameters throws that update away, so the cold key
+          -- alone can't do it (with or without a new BLS key)
+          expectOwnerWitsNeeded pps $ registerPoolTx pps
+          expectOwnerWitsNeeded pps $ registerPoolTx rotated
+          tx <- submitTx $ registerPoolTx rotated
+          ownerWitsByLevel pps tx `shouldBe` (True, [])
+          expectFutureParams rotated
+
+      describe "to rotate the BLS key of the active parameters" $ do
+        it "after an update made by a sub-transaction" $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          -- it is possible to overwrite a cost update with a BLS key rotation if
+          -- the owners agree to it
+          let rotated = pps {sppBlsKey = SJust newBlsKey}
+              txWithRotation =
+                mkTopTxWithSubTxs [registerPoolTx pps {sppCost = sppCost pps <> Coin 1}]
+                  & bodyTxL . certsTxBodyL .~ [RegPoolTxCert rotated]
+          expectOwnerWitsNeeded pps txWithRotation
+          tx <- submitTx txWithRotation
+          ownerWitsByLevel pps tx `shouldBe` (True, [True])
+          expectFutureParams rotated
+
+        it "after an update made by a preceding sub-transaction" $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          newBlsKey <- freshBlsKey
+          let rotated = pps {sppBlsKey = SJust newBlsKey}
+              txWithRotation =
+                mkTopTxWithSubTxs
+                  [registerPoolTx pps {sppCost = sppCost pps <> Coin 1}, registerPoolTx rotated]
+          expectSubTxOwnerWitsNeeded pps (RegPoolTxCert rotated) txWithRotation
+          tx <- submitTx txWithRotation
+          ownerWitsByLevel pps tx `shouldBe` (False, [True, True])
+          expectFutureParams rotated
+
+  describe "Owner witnesses are not needed to change" $ do
+    -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/1293
+    -- https://github.com/IntersectMBO/formal-ledger-specifications/issues/1259
+    -- TODO: Re-enable after issue is resolved, by removing this override
+    forM_ sppChanges $ \(field, change, supportedInConformance) -> do
+      let it' =
+            if supportedInConformance
+              then it
+              else disableInConformanceIt
+      describe field $ do
+        it' "in a phase-2 invalid transaction" $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          updated <- change pps
+          tx <- switchTxToPhase2InvalidLegacyMode (registerPoolTx updated)
+          expectOwnerWitsNeeded updated tx
+          withPostFixup (dropOwnerWits updated) $
+            submitTx_ (tx & isPhase2ValidTxL .~ Phase2Invalid)
+          expectFuturePool (sppId updated) Nothing
+
+        it' "in a sub-transaction of a phase-2 invalid transaction" $ do
+          pps <- registerPoolWithOwners . SJust =<< freshBlsKey
+          updated <- change pps
+          tx <- switchTxToPhase2InvalidLegacyMode $ mkTopTxWithSubTxs [registerPoolTx updated]
+          expectSubTxOwnerWitsNeeded updated (RegPoolTxCert updated) tx
+          withPostFixupSubTxs (dropOwnerWits updated) $
+            submitTx_
+              (tx & isPhase2ValidTxL .~ Phase2Invalid)
+          expectFuturePool (sppId updated) Nothing
   where
     registerNewPool = do
       (kh, vrf) <- (,) <$> freshKeyHash <*> freshKeyHashVRF
@@ -689,8 +909,9 @@ spec = describe "POOL" $ do
     registerPoolWithBlsKey mbBlsKey = do
       pps <- freshStakePool
       let ppsWithBlsKey = pps {sppBlsKey = mbBlsKey}
-      submitTxAnn_ "Registering a new stake pool" $
-        registerPoolTx ppsWithBlsKey
+      impAnn "Registering a new stake pool" $
+        submitAnyTx_ $
+          registerPoolTx ppsWithBlsKey
       pure ppsWithBlsKey
     retirePoolTx kh retirementInterval = do
       curEpochNo <- getsNES nesELL
@@ -727,7 +948,8 @@ spec = describe "POOL" $ do
       pure kh
     -- Registers the pool, or re-registers it if it already is one
     reregisterBlsPool :: KeyHash StakePool -> StrictMaybe BlsKey -> ImpTestM era ()
-    reregisterBlsPool kh mbBlsKey = blsPoolParams kh mbBlsKey >>= submitTx_ . registerPoolTx
+    reregisterBlsPool kh mbBlsKey =
+      blsPoolParams kh mbBlsKey >>= \pps -> submitAnyTx_ $ registerPoolTx pps
     expectActiveBlsKey :: KeyHash StakePool -> StrictMaybe BlsKey -> ImpTestM era ()
     expectActiveBlsKey kh mbBlsKey = do
       pools <- psStakePools <$> getPState
@@ -756,6 +978,96 @@ spec = describe "POOL" $ do
     poolParams kh vrf = do
       pps <- registerAccountAddress >>= freshPoolParams kh
       pure $ pps & sppVrfL .~ vrf
+    -- Parameters of a new pool that has owners
+    poolParamsWithOwners :: StrictMaybe BlsKey -> ImpTestM era (StakePoolParams era)
+    poolParamsWithOwners mbBlsKey = do
+      kh <- freshKeyHash
+      owners <- Set.fromList <$> replicateM 2 freshKeyHash
+      (\pps -> pps {sppOwners = owners}) <$> blsPoolParams kh mbBlsKey
+    -- Registers a new pool that has owners
+    registerPoolWithOwners :: StrictMaybe BlsKey -> ImpTestM era (StakePoolParams era)
+    registerPoolWithOwners mbBlsKey = do
+      pps <- poolParamsWithOwners mbBlsKey
+      submitTx_ $ registerPoolTx pps
+      pure pps
+    -- Removes the witnesses of the owners of the pool from a transaction
+    dropOwnerWits :: StakePoolParams era -> Tx l era -> ImpTestM era (Tx l era)
+    dropOwnerWits pps tx = pure $ tx & witsTxL . addrTxWitsL .~ nonOwnerKeyWits
+      where
+        keyWits = tx ^. witsTxL . addrTxWitsL
+        nonOwnerKeyWits = Set.filter ((`Set.notMember` ownerWits) . witVKeyHash) keyWits
+        ownerWits = Set.map asWitness (sppOwners pps)
+    -- Expects this transaction to fail for missing the owners of the pool
+    expectOwnerWitsNeeded :: StakePoolParams era -> Tx TopTx era -> ImpTestM era ()
+    expectOwnerWitsNeeded pps tx = do
+      ownerWits <- expectJust $ NES.fromSet (Set.map asWitness (sppOwners pps))
+      pStateBefore <- getPState
+      withPostFixup (dropOwnerWits pps) $
+        submitFailingTx tx [injectFailure $ MissingVKeyWitnessesUTXOW @era ownerWits]
+      getPState `shouldReturn` pStateBefore
+    -- Expects this transaction to fail for missing the owners of the pool in the
+    -- sub-transactions that have the given certificate
+    expectSubTxOwnerWitsNeeded ::
+      StakePoolParams era -> TxCert era -> Tx TopTx era -> ImpTestM era ()
+    expectSubTxOwnerWitsNeeded pps cert tx = do
+      ownerWits <- expectJust $ NES.fromSet (Set.map asWitness (sppOwners pps))
+      pStateBefore <- getPState
+      let dropOwnerWitsWithCert subTx
+            | cert `elem` (subTx ^. bodyTxL . certsTxBodyL) = dropOwnerWits pps subTx
+            | otherwise = pure subTx
+      withPostFixupSubTxs dropOwnerWitsWithCert $
+        submitFailingTx tx [injectFailure $ SubMissingVKeyWitnessesUTXOW @era ownerWits]
+      getPState `shouldReturn` pStateBefore
+    -- True if the top-level transaction and each of its sub-transactions (in order) have the
+    -- witnesses of all the owners of the pool
+    ownerWitsByLevel :: StakePoolParams era -> Tx TopTx era -> (Bool, [Bool])
+    ownerWitsByLevel pps tx =
+      (hasOwnerWits tx, hasOwnerWits <$> toList (tx ^. bodyTxL . subTransactionsTxBodyL))
+      where
+        ownerWits = Set.map asWitness (sppOwners pps)
+        hasOwnerWits :: Tx l era -> Bool
+        hasOwnerWits =
+          (ownerWits `Set.isSubsetOf`) . Set.map witVKeyHash . (^. witsTxL . addrTxWitsL)
+    -- Expects neither the transaction nor its sub-transactions to have the witnesses of all
+    -- the owners of the pool
+    expectNotAllOwnerWits :: StakePoolParams era -> Tx TopTx era -> ImpTestM era ()
+    expectNotAllOwnerWits pps tx =
+      ownerWitsByLevel pps tx `shouldSatisfy` \(topTx, subTxs) -> not (or (topTx : subTxs))
+    expectFutureParams :: StakePoolParams era -> ImpTestM era ()
+    expectFutureParams pps =
+      Map.lookup (sppId pps) . psFutureStakePoolParams <$> getPState `shouldReturn` Just pps
+    expectRetiring :: KeyHash StakePool -> Bool -> ImpTestM era ()
+    expectRetiring kh expected =
+      Map.member kh . psRetiring <$> getPState `shouldReturn` expected
+
+    -- Changes to spp and whether conformance supports them
+    sppChanges :: [(String, StakePoolParams era -> ImpTestM era (StakePoolParams era), Bool)]
+    sppChanges =
+      [ ("the VRF", \pps -> (\vrf -> pps {sppVrf = vrf}) <$> freshKeyHashVRF, True)
+      , ("the pledge", \pps -> pure pps {sppPledge = sppPledge pps <> Coin 1}, True)
+      , ("the cost", \pps -> pure pps {sppCost = sppCost pps <> Coin 1}, True)
+      , ("the margin", \pps -> pure pps {sppMargin = 1 %! 2}, True)
+      ,
+        ( "the reward account"
+        , \pps -> (\accountAddress -> pps {sppAccountAddress = accountAddress}) <$> registerAccountAddress
+        , True
+        )
+      ,
+        ( "the owners"
+        , \pps -> (\owner -> pps {sppOwners = Set.insert owner (sppOwners pps)}) <$> freshKeyHash
+        , True
+        )
+      ,
+        ( "the relays"
+        , \pps -> (\relay -> pps {sppRelays = sppRelays pps SSeq.|> relay}) <$> arbitrary
+        , False
+        )
+      ,
+        ( "the metadata"
+        , \pps -> (\url -> pps {sppMetadata = SJust (PoolMetadata url mempty)}) <$> arbitrary
+        , False
+        )
+      ]
 
 -- | These need to run the POOL rule on its own, which needs the concrete rule
 -- types of Dijkstra, so can't be bundled in the era-polymorphic ones above

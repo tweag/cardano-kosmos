@@ -25,11 +25,11 @@ import Ouroboros.Consensus.Config
 import Ouroboros.Consensus.Ledger.Abstract
 import Ouroboros.Consensus.Ledger.Extended
 import Ouroboros.Consensus.Ledger.SupportsProtocol
-import Ouroboros.Consensus.Protocol.Abstract
 import Ouroboros.Consensus.Storage.ChainDB.API
   ( GetLoEFragment
   , LoE (LoEDisabled)
   )
+import Ouroboros.Consensus.Storage.ChainDB.Impl.Leios (leiosBlockInfo)
 import Ouroboros.Consensus.Storage.ChainDB.Impl.Types
   ( TraceEvent (..)
   )
@@ -41,6 +41,7 @@ import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.Backend as LedgerDB
 import qualified Ouroboros.Consensus.Storage.LedgerDB.V2.InMemory as InMemory
 import Ouroboros.Consensus.Storage.LeiosDB.API (LeiosDbHandle)
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB as PerasImmutableCertDB
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
 import Ouroboros.Consensus.Util.Args
@@ -58,6 +59,7 @@ data ChainDbArgs f m blk = ChainDbArgs
   , cdbLgrDbArgs :: LedgerDB.LedgerDbArgs f m blk
   , cdbPerasCertDbArgs :: PerasCertDB.PerasCertDbArgs f m blk
   , cdbPerasVoteDbArgs :: PerasVoteDB.PerasVoteDbArgs f m blk
+  , cdbPerasImmutableCertDbArgs :: PerasImmutableCertDB.PerasImmutableCertDbArgs f m blk
   , cdbsArgs :: ChainDbSpecificArgs f m blk
   }
 
@@ -153,6 +155,7 @@ defaultArgs =
     (LedgerDB.defaultArgs $ LedgerDB.SomeBackendArgs InMemory.InMemArgs)
     PerasCertDB.defaultArgs
     PerasVoteDB.defaultArgs
+    PerasImmutableCertDB.defaultArgs
     defaultSpecificArgs
 
 ensureValidateAll ::
@@ -171,7 +174,9 @@ ensureValidateAll args =
     }
 
 completeChainDbArgs ::
-  (ConsensusProtocol (BlockProtocol blk), IOLike m) =>
+  ( BlockSupportsProtocol blk
+  , IOLike m
+  ) =>
   ResourceRegistry m ->
   TopLevelConfig blk ->
   -- | Initial ledger
@@ -217,6 +222,7 @@ completeChainDbArgs
             { VolatileDB.volHasFS = mkVolFS $ RelativeMountPoint "volatile"
             , VolatileDB.volCheckIntegrity = checkIntegrity
             , VolatileDB.volCodecConfig = configCodec cdbsTopLevelConfig
+            , VolatileDB.volLeiosBlockInfo = leiosBlockInfo (configBlock cdbsTopLevelConfig)
             }
       , cdbLgrDbArgs =
           (cdbLgrDbArgs defArgs)
@@ -229,8 +235,15 @@ completeChainDbArgs
             , LedgerDB.lgrBackendArgs = flavorArgs
             }
       , cdbPerasCertDbArgs =
-          PerasCertDB.PerasCertDbArgs
-            { PerasCertDB.pcdbaTracer = PerasCertDB.pcdbaTracer (cdbPerasCertDbArgs defArgs)
+          (cdbPerasCertDbArgs defArgs)
+            { PerasCertDB.pcdbaCodecConfig = configCodec cdbsTopLevelConfig
+            , PerasCertDB.pcdbaHasFS = mkVolFS $ RelativeMountPoint "perascert"
+            }
+      , cdbPerasImmutableCertDbArgs =
+          (cdbPerasImmutableCertDbArgs defArgs)
+            { PerasImmutableCertDB.picdbaCodecConfig = configCodec cdbsTopLevelConfig
+            , PerasImmutableCertDB.picdbaHasFS =
+                mkImmFS $ RelativeMountPoint "perasimmutablecert"
             }
       , cdbPerasVoteDbArgs =
           PerasVoteDB.PerasVoteDbArgs
@@ -258,6 +271,10 @@ updateTracer trcr args =
     , cdbLgrDbArgs = (cdbLgrDbArgs args){LedgerDB.lgrTracer = TraceLedgerDBEvent >$< trcr}
     , cdbPerasCertDbArgs =
         (cdbPerasCertDbArgs args){PerasCertDB.pcdbaTracer = TracePerasCertDbEvent >$< trcr}
+    , cdbPerasImmutableCertDbArgs =
+        (cdbPerasImmutableCertDbArgs args)
+          { PerasImmutableCertDB.picdbaTracer = TracePerasImmutableCertDbEvent >$< trcr
+          }
     , cdbPerasVoteDbArgs =
         (cdbPerasVoteDbArgs args){PerasVoteDB.pvdbaTracer = TracePerasVoteDbEvent >$< trcr}
     , cdbsArgs = (cdbsArgs args){cdbsTracer = trcr}

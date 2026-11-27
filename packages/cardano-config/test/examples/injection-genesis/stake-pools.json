@@ -1,0 +1,34 @@
+{
+  "1dc0a846ec816bdcc5288c0b57871a0400e86728ad0851132e43883f": {
+    "cost": 0,
+    "margin": 0,
+    "metadata": null,
+    "owners": [],
+    "pledge": 0,
+    "publicKey": "1dc0a846ec816bdcc5288c0b57871a0400e86728ad0851132e43883f",
+    "relays": [],
+    "rewardAccount": {
+      "credential": {
+        "key hash": "22c700325ec932f59048a7258e89b5f166604f184e0809d16a495550"
+      },
+      "network": "Testnet"
+    },
+    "vrf": "ee8fdadab21abed48fadee52492596841c561640920d1c022fa8ae51d206c714"
+  },
+  "d3e16257b8c608ec4b2cb89621d7ddb60fc08839c1b491a598615fb5": {
+    "cost": 0,
+    "margin": 0,
+    "metadata": null,
+    "owners": [],
+    "pledge": 0,
+    "publicKey": "d3e16257b8c608ec4b2cb89621d7ddb60fc08839c1b491a598615fb5",
+    "relays": [],
+    "rewardAccount": {
+      "credential": {
+        "key hash": "3832f1051268ab7a7765142f21d695b7aaf40c576bf2d1a71894f0a4"
+      },
+      "network": "Testnet"
+    },
+    "vrf": "bbc57641002e501cf8bf98b776ba082c604e6af7c482f716934ed08d19c22733"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "Options": {
+    "": {
+      "severity": "Notice",
+      "detail": "DNormal",
+      "backends": [
+        "Stdout MachineFormat"
+      ]
+    }
+  },
+  "ApplicationName": "node-from-file"
+}

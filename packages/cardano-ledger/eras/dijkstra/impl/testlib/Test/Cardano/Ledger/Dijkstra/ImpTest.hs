@@ -33,14 +33,36 @@ module Test.Cardano.Ledger.Dijkstra.ImpTest (
   expectMempoolRejection,
   voteSubTx,
   declareTreasurySubTx,
+  registerDRepSubTx,
+  setupLeiosCommittee,
+  mkLeiosCert,
+  submitEndorserBlock,
+  submitFailingEndorserBlock,
+  makeEndorserBlock,
+  mkEbReferencesAnnouncement,
+  announceEndorserBlock,
 ) where
 
 import Cardano.Base.Typeable (Typeable)
+import Cardano.Crypto.DSIGN (createPossessionProofDSIGN, deriveVerKeyDSIGN, signDSIGN)
+import Cardano.Crypto.Hash.Class (hashToBytes)
+import Cardano.Crypto.Leios (
+  LeiosCert,
+  LeiosSigningKey,
+  aggregateLeiosCert,
+  getLeiosSeatId,
+ )
 import Cardano.Ledger.Allegra.Scripts (
   pattern RequireTimeExpire,
   pattern RequireTimeStart,
  )
 import Cardano.Ledger.BaseTypes
+import Cardano.Ledger.Binary (DecCBOR, EncCBOR)
+import Cardano.Ledger.Block (
+  Block,
+  EbReferencesAnnouncement (..),
+  ebReferencesAnnouncementBlockHeaderL,
+ )
 import Cardano.Ledger.Coin
 import Cardano.Ledger.Compactible
 import Cardano.Ledger.Conway.Governance (
@@ -55,7 +77,19 @@ import Cardano.Ledger.Conway.Governance (
 import qualified Cardano.Ledger.Conway.Rules as Conway
 import Cardano.Ledger.Conway.TxCert
 import Cardano.Ledger.Credential
-import Cardano.Ledger.Dijkstra (ApplyTxError, DijkstraEra, DijkstraEraForecast)
+import Cardano.Ledger.Dijkstra (
+  ApplyTxError,
+  DijkstraApplyBlock,
+  DijkstraEra,
+  DijkstraEraForecast,
+  EndorserBlockTransitionError (..),
+  applyEndorserBlockEither,
+ )
+import Cardano.Ledger.Dijkstra.Block.Endorser (
+  EbTransactions (..),
+  EraEndorserBlock (..),
+  pattern EbReferences,
+ )
 import Cardano.Ledger.Dijkstra.BlockBody (DijkstraEraBlockBody)
 import Cardano.Ledger.Dijkstra.Core
 import Cardano.Ledger.Dijkstra.Rules
@@ -78,14 +112,23 @@ import Cardano.Ledger.Shelley.Scripts (
 import Cardano.Ledger.State
 import Cardano.Ledger.Tools (ensureMinCoinTxOut)
 import Cardano.Ledger.Val
+import Control.Monad (foldM, forM)
+import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State (gets)
+import Control.State.Transition.Extended (SingEP (..), ValidationPolicy (..))
 import Data.Foldable
-import Data.List.NonEmpty (NonEmpty)
+import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.Map.Strict as Map
 import qualified Data.OMap.Strict as OMap
+import Data.Sequence.Strict (StrictSeq)
 import qualified Data.Set as Set
+import qualified Data.SimpleOMap.Strict as SimpleOMap
+import Data.Traversable (mapAccumM)
+import Data.Word (Word32)
 import Lens.Micro
+import Test.Cardano.Ledger.BlockHeader (TestBlockHeader)
 import Test.Cardano.Ledger.Conway.ImpTest
+import Test.Cardano.Ledger.Core.Binary.RoundTrip (roundTripEraExpectation)
 import Test.Cardano.Ledger.Dijkstra.Era
 import Test.Cardano.Ledger.Dijkstra.Examples (exampleDijkstraGenesis)
 import Test.Cardano.Ledger.Imp.Common
@@ -108,6 +151,19 @@ instance ShelleyEraImp DijkstraEra where
   modifyPParams = conwayModifyPParams
 
   fixupTx = dijkstraFixupTx
+  impWitsPState tx = do
+    pState <- getPState
+    withBothTxLevels
+      tx
+      ( \topTx ->
+          if topTx ^. isPhase2ValidTxL == Phase2Valid
+            then foldM applyPoolRegistrations pState (topTx ^. bodyTxL . subTransactionsTxBodyL)
+            else pure pState
+      )
+      (const (pure pState))
+  impScriptsProvided utxo tx =
+    withBothTxLevels tx (getScriptsProvided utxo) $ \subTx ->
+      getScriptsProvided utxo (mkTopTxWithSubTxs [subTx])
   expectTxSuccess = impBabbageExpectTxSuccess
   modifyImpInitProtVer = conwayModifyImpInitProtVer
   genRegTxCert = dijkstraGenRegTxCert
@@ -144,7 +200,9 @@ class
   , DijkstraEraTest era
   , DijkstraEraForecast era
   , DijkstraEraBlockBody era
+  , EraEndorserBlock era
   , InjectRuleFailure "BBODY" DijkstraBbodyPredFailure era
+  , InjectRuleFailure "BBODY" DijkstraLeiosCertPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraLedgerPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraPoolPredFailure era
   , InjectRuleFailure "LEDGER" EntitiesPredFailure era
@@ -157,9 +215,25 @@ class
   , InjectRuleFailure "LEDGER" DijkstraGovPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraSubGovPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraSubUtxowPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubPoolPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraSubDelegPredFailure era
   , InjectRuleFailure "LEDGER" DijkstraSubLedgerPredFailure era
+  , InjectRuleFailure "LEDGER" DijkstraSubGovCertPredFailure era
+  , InjectRuleFailure "EB" EbPredFailure era
+  , InjectRuleFailure "EB" EbWasNotAnnounced era
+  , InjectRuleFailure "EB" EbReferencesSizeTooBig era
+  , InjectRuleFailure "EB" EbAnnouncementSlotMismatch era
+  , InjectRuleFailure "EB" EbAnnouncementHashMismatch era
+  , InjectRuleFailure "EB" EbAnnouncementSizeMismatch era
+  , InjectRuleFailure "EB" EbAlreadyApplied era
+  , Show (PredicateFailure (EraRule "EBLEDGERS" era))
   , Inject (NonEmpty (Conway.PredicateFailure (EraRule "MEMPOOL" era))) (ApplyTxError era)
+  , STS (EraRule "EB" era)
+  , ToExpr (PredicateFailure (EraRule "EB" era))
+  , EncCBOR (PredicateFailure (EraRule "EB" era))
+  , DecCBOR (PredicateFailure (EraRule "EB" era))
+  , EraRuleFailure "EB" era ~ PredicateFailure (EraRule "EB" era)
+  , DijkstraApplyBlock TestBlockHeader era
   ) =>
   DijkstraEraImp era
 
@@ -222,6 +296,21 @@ instance InjectRuleFailure "SUBCERTS" DijkstraSubDelegPredFailure DijkstraEra wh
 
 instance InjectRuleFailure "LEDGER" DijkstraSubLedgerPredFailure DijkstraEra where
   injectFailure = DijkstraSubLedgersFailure . injectFailure @"SUBLEDGERS"
+
+instance InjectRuleFailure "LEDGER" DijkstraSubGovCertPredFailure DijkstraEra where
+  injectFailure = DijkstraSubLedgersFailure . injectFailure
+
+instance InjectRuleFailure "SUBLEDGERS" DijkstraSubGovCertPredFailure DijkstraEra where
+  injectFailure = SubLedgerFailure . injectFailure
+
+instance InjectRuleFailure "SUBLEDGER" DijkstraSubGovCertPredFailure DijkstraEra where
+  injectFailure = SubEntitiesFailure . injectFailure
+
+instance InjectRuleFailure "SUBENTITIES" DijkstraSubGovCertPredFailure DijkstraEra where
+  injectFailure = SubCertsFailure . injectFailure
+
+instance InjectRuleFailure "SUBCERTS" DijkstraSubGovCertPredFailure DijkstraEra where
+  injectFailure = SubCertFailure . injectFailure
 
 -- | A top level transaction that nests the given sub-transactions and
 -- is otherwise empty.
@@ -412,6 +501,25 @@ dijkstraFixupTx tx = do
   balancedInLegacy <- if isLegacy then balanceSubTransactions fixedUp else pure fixedUp
   babbageFixupTx balancedInLegacy
 
+applyPoolRegistrations ::
+  DijkstraEraImp era =>
+  PState era ->
+  Tx l era ->
+  ImpTestM era (PState era)
+applyPoolRegistrations pState tx = do
+  epochNo <- getsNES nesELL
+  deposit <- getsNES $ nesEsL . curPParamsEpochStateL . ppPoolDepositCompactL
+  let register ps = \case
+        RegPoolTxCert spp
+          | Map.member (sppId spp) (psStakePools ps) ->
+              ps & psFutureStakePoolParamsL %~ Map.insert (sppId spp) spp
+          | otherwise ->
+              ps
+                & psStakePoolsL
+                  %~ Map.insert (sppId spp) (mkStakePoolState epochNo SNothing deposit mempty spp)
+        _ -> ps
+  pure $ foldl' register pState (tx ^. bodyTxL . certsTxBodyL)
+
 detectLegacyMode ::
   DijkstraEraImp era =>
   Tx TopTx era ->
@@ -454,13 +562,20 @@ fixupSubTransactions ::
   Tx TopTx era ->
   ImpTestM era (Tx TopTx era)
 fixupSubTransactions tx = impAnn "fixupSubTransactions" $ do
-  fixedup <-
-    traverse
-      fixupSubTransaction
-      (OMap.elems (tx ^. bodyTxL . subTransactionsTxBodyL))
-  pure $ tx & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable fixedup
+  pState <- getPState
+  (_, fixedUp) <-
+    mapAccumM fixupSubTransaction pState (OMap.elems (tx ^. bodyTxL . subTransactionsTxBodyL))
+  pure $ tx & bodyTxL . subTransactionsTxBodyL .~ OMap.fromFoldable fixedUp
   where
-    fixupSubTransaction =
+    fixupSubTransaction pState subTx = do
+      fixedUp <- fixupSubTransactionSteps pState subTx
+      -- Certificates of a phase-2 invalid transaction are not applied
+      pStateAfter <-
+        if tx ^. isPhase2ValidTxL == Phase2Valid
+          then applyPoolRegistrations pState fixedUp
+          else pure pState
+      pure (pStateAfter, fixedUp)
+    fixupSubTransactionSteps pState =
       addSubTxIn
         >=> addNativeScriptTxWits
         >=> fixupAuxDataHash
@@ -470,7 +585,7 @@ fixupSubTransactions tx = impAnn "fixupSubTransactions" $ do
         >=> fixupTxOuts
         >=> addMissingRedeemers
         >=> fixupPPHash
-        >=> updateAddrTxWits
+        >=> updateAddrTxWitsWith pState
     addMissingRedeemers subTx = do
       let originalRedeemers = subTx ^. witsTxL . rdmrsTxWitsL
       withMaxRedeemers <- txWithMaxRedeemers subTx
@@ -532,3 +647,137 @@ mkBalancerSubTx consumed produced = do
               & bodyTxL . inputsTxBodyL .~ [newTxIn]
               & bodyTxL . outputsTxBodyL .~ [changeOut]
       Just <$> updateAddrTxWits subTx
+
+registerDRepSubTx :: DijkstraEraImp era => ImpTestM era (Credential DRepRole)
+registerDRepSubTx = do
+  drepCred <- KeyHashObj <$> freshKeyHash
+  drepDeposit <- getsPParams ppDRepDepositL
+  anchor <- arbitrary
+  submitTxAnn_ "Registering the DRep" $
+    mkTopTxWithSubTxs
+      [ mkBasicTx mkBasicTxBody
+          & bodyTxL . certsTxBodyL .~ [RegDRepTxCert drepCred drepDeposit anchor]
+      ]
+  expectDRepRegistered drepCred
+  pure drepCred
+
+-- | Sets up the given number of stake pools with BLS keys and equal stake delegated to them, and
+-- passes the two epochs it takes for them to be seated in the Leios committee. Returns the keys
+-- the pools vote with.
+setupLeiosCommittee ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  Int ->
+  ImpTestM era [LeiosSigningKey]
+setupLeiosCommittee n = impAnn "Set up Leios committee" $ do
+  signKeys <- replicateM n $ do
+    signKey <- arbitrary
+    let blsKey =
+          BlsKey (deriveVerKeyDSIGN signKey) (createPossessionProofDSIGN signKey)
+    khPool <- freshKeyHash
+    registerPoolWithParams (\pps -> pps {sppBlsKey = SJust blsKey}) khPool
+      =<< registerAccountAddress
+    stakingCred <- KeyHashObj <$> freshKeyHash
+    _ <- registerStakeCredential stakingCred
+    delegateStake stakingCred khPool
+    paymentKeyHash <- freshKeyHash @Payment
+    sendCoinTo_ (mkAddr paymentKeyHash stakingCred) (Coin 1_000_000_000)
+    pure signKey
+  passNEpochs 2
+  pure signKeys
+
+-- | Certifies the endorser block announced in the given block header with the votes of the
+-- given keys, each of which has to hold a seat in the current Leios committee.
+mkLeiosCert ::
+  HasCallStack =>
+  [LeiosSigningKey] ->
+  SafeHash EraIndependentBlockHeader ->
+  ImpTestM era LeiosCert
+mkLeiosCert signKeys headerHash = do
+  committee <- getsNES $ nesEsL . esSnapshotsL . ssStakeSetL . ssLeiosCommitteeL
+  votes <- forM signKeys $ \signKey -> do
+    seatId <- expectJust $ getLeiosSeatId (deriveVerKeyDSIGN signKey) committee
+    pure (seatId, signDSIGN () msg signKey)
+  expectRightDeep . aggregateLeiosCert committee $ Map.fromList votes
+  where
+    msg = hashToBytes $ extractHash headerHash
+
+-- | Submit an endorser block through `applyEndorserBlockEither`, the consensus endpoint, instead
+-- of running the EB rule directly.
+trySubmitEndorserBlock ::
+  forall era.
+  DijkstraEraImp era =>
+  EndorserBlock era ->
+  ImpTestM era [PredicateFailure (EraRule "EB" era)]
+trySubmitEndorserBlock eb = do
+  st <- getsNES id
+  globals <- gets (^. impGlobalsL)
+  case applyEndorserBlockEither @TestBlockHeader @era EPDiscard ValidateAll globals st eb of
+    Right (newSt, _) -> do
+      modifyNES $ const newSt
+      pure []
+    Left (EndorserBlockTransitionError failures) -> do
+      -- Verify that produced predicate failures are ready for the node-to-client protocol
+      liftIO $ forM_ failures $ roundTripEraExpectation @era
+      pure $ toList failures
+
+submitEndorserBlock ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  EndorserBlock era ->
+  ImpTestM era ()
+submitEndorserBlock eb = do
+  res <- trySubmitEndorserBlock eb
+  case res of
+    [] -> pure ()
+    _ : _ -> expectationFailure $ "Expected success, got\n" <> showExpr res
+
+submitFailingEndorserBlock ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  EndorserBlock era ->
+  NonEmpty (PredicateFailure (EraRule "EB" era)) ->
+  ImpTestM era ()
+submitFailingEndorserBlock eb expected = do
+  res <- trySubmitEndorserBlock eb
+  case res of
+    [] -> expectationFailure "Expected a failure, got success"
+    e : es -> (e :| es) `shouldBeExpr` expected
+
+makeEndorserBlock ::
+  ( DijkstraEraImp era
+  , HashAnnotated (Tx TopTx era) EraIndependentTx
+  ) =>
+  StrictSeq (Tx TopTx era) ->
+  ImpTestM era (EndorserBlock era)
+makeEndorserBlock txs = do
+  let
+    refs = SimpleOMap.fromFoldable $ (\tx -> (hashAnnotated tx, tx ^. sizeTxF)) <$> txs
+  pure $
+    mkBasicEndorserBlock
+      & transactionsEndorserBlockL .~ EbTransactions txs
+      & referencesEndorserBlockL .~ EbReferences refs
+
+mkEbReferencesAnnouncement :: EraEndorserBlock era => EndorserBlock era -> EbReferencesAnnouncement
+mkEbReferencesAnnouncement eb =
+  EbReferencesAnnouncement
+    { ebReferencesAnnouncementSize = fromIntegral @Int @Word32 $ originalBytesSize references
+    , ebReferencesAnnouncementHash = hashAnnotated references
+    }
+  where
+    references = eb ^. referencesEndorserBlockL
+
+announceEndorserBlock ::
+  ( HasCallStack
+  , DijkstraEraImp era
+  ) =>
+  EndorserBlock era ->
+  ImpTestM era (Block TestBlockHeader era)
+announceEndorserBlock eb = do
+  tickToCurSlot
+  withTxsInModifiedBlock
+    (ebReferencesAnnouncementBlockHeaderL .~ SJust (mkEbReferencesAnnouncement eb))
+    (pure ())

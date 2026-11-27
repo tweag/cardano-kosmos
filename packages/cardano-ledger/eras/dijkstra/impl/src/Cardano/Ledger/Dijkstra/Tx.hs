@@ -31,6 +31,8 @@ module Cardano.Ledger.Dijkstra.Tx (
   decodeDijkstraTopTxInMempool,
   decodeDijkstraTopTxInBlock,
   toCBORForBlockInclusion,
+  refScriptsSizeDijkstraStAnnTx,
+  exUnitsDijkstraStAnnTx,
 ) where
 
 import Cardano.Ledger.Allegra.TxBody (AllegraEraTxBody (..), StrictMaybe)
@@ -85,7 +87,9 @@ import Cardano.Ledger.MemoBytes (
   lensMemoRawType,
   mkMemoizedEra,
  )
+import Cardano.Ledger.MempoolTx.Internal (MempoolTx (UnsafeMkMempoolTx), unwrapMempoolTx)
 import Cardano.Ledger.Plutus (Language, PlutusWithContext)
+import Cardano.Ledger.Plutus.ExUnits (ExUnits)
 import Cardano.Ledger.Shelley.Tx (shelleyTxEqRaw)
 import Cardano.Ledger.State
 import Control.DeepSeq (NFData (..), deepseq)
@@ -142,9 +146,9 @@ instance EraTx era => DecCBOR (Annotator (DijkstraTopTxRaw era)) where
       isPhase2Valid <- decCBOR
       pure $ DijkstraTopTxRaw <$> bodyAnn <*> witsAnn <*> pure isPhase2Valid <*> sequence auxAnn
 
--- Note: 'EncCBOR' for 'DijkstraTopTx' emits the stored block-format bytes,
--- while 'EncCBOR' for a top-level 'DijkstraTx' and 'Tx' produces the mempool
--- format (see 'toCBORForMempoolSubmission')
+-- Note: 'EncCBOR' for 'DijkstraTopTx', as well as for a top-level 'DijkstraTx'
+-- and 'Tx', emits the stored block-format bytes. The mempool format is only
+-- produced for a 'MempoolTx' (see 'toCBORForMempoolSubmission')
 newtype DijkstraTopTx era = MkDijkstraTopTx (MemoBytes (DijkstraTopTxRaw era))
   deriving newtype (SafeToHash, EncCBOR)
   deriving (Generic)
@@ -217,8 +221,16 @@ deriving via
 instance (EraTx era, Typeable l) => ToCBOR (DijkstraTx l era) where
   toCBOR = toEraCBOR @era
 
+-- | A top-level transaction is encoded in the block format, while a sub-transaction is
+-- encoded as @[transaction_body, transaction_witness_set, auxiliary_data\/ nil]@.
 instance EraTx era => EncCBOR (DijkstraTx l era) where
-  encCBOR = toCBORForMempoolSubmission
+  encCBOR = \case
+    DijkstraTopTx t -> encCBOR t
+    DijkstraSubTx {dstBody, dstWits, dstAuxData} ->
+      encodeListLen 3
+        <> encCBOR dstBody
+        <> encCBOR dstWits
+        <> encodeNullStrictMaybe encCBOR dstAuxData
 
 instance SafeToHash (DijkstraTx TopTx era) where
   originalBytes (DijkstraTopTx t) = originalBytes t
@@ -262,7 +274,7 @@ decodeDijkstraTopTxInBlock = fmap DijkstraTopTx <$> decCBOR
 
 instance (EraTx era, Typeable l) => DecCBOR (Annotator (DijkstraTx l era)) where
   decCBOR = withSTxBothLevels @l $ \case
-    STopTx -> decodeDijkstraTopTxInMempool
+    STopTx -> decodeDijkstraTopTxInBlock
     SSubTx ->
       decodeRecordNamed "DijkstraSubTx" (const 3) $ do
         body <- decCBOR
@@ -327,7 +339,7 @@ instance EraTx DijkstraEra where
   validateNativeScript = validateDijkstraNativeScript
   {-# INLINE validateNativeScript #-}
 
-  getMinFeeTx = getConwayMinFeeTx
+  getMinFeeTx pp tx refScriptSize = getConwayMinFeeTx pp tx refScriptSize (getTotalExUnits tx)
 
   allInputsTxBodyF = dijkstraAllInputsTxBodyF
   {-# INLINE allInputsTxBodyF #-}
@@ -500,6 +512,12 @@ instance AlonzoEraTx DijkstraEra where
 instance Typeable l => DecCBOR (Annotator (Tx l DijkstraEra)) where
   decCBOR = fmap MkDijkstraTx <$> decCBOR
 
+instance EncCBOR (MempoolTx DijkstraEra) where
+  encCBOR = toCBORForMempoolSubmission . unDijkstraTx . unwrapMempoolTx
+
+instance DecCBOR (Annotator (MempoolTx DijkstraEra)) where
+  decCBOR = fmap (UnsafeMkMempoolTx . MkDijkstraTx) <$> decodeDijkstraTopTxInMempool
+
 validateDijkstraNativeScript ::
   ( EraTx era
   , DijkstraEraTxBody era
@@ -512,6 +530,12 @@ validateDijkstraNativeScript tx =
   where
     vhks = Set.map witVKeyHash (tx ^. witsTxL . addrTxWitsL)
 {-# INLINEABLE validateDijkstraNativeScript #-}
+
+refScriptsSizeDijkstraStAnnTx :: DijkstraStAnnTx TopTx era -> Int
+refScriptsSizeDijkstraStAnnTx DijkstraStAnnTopTx {dsattRefScriptsSize} = dsattRefScriptsSize
+
+exUnitsDijkstraStAnnTx :: DijkstraStAnnTx TopTx era -> ExUnits
+exUnitsDijkstraStAnnTx DijkstraStAnnTopTx {dsattExUnits} = dsattExUnits
 
 --------------------------------------------------------------------------------
 -- Serialisation and hashing
@@ -529,6 +553,10 @@ validateDijkstraNativeScript tx =
 -- transactions by their 'hashAnnotated', which can be checked against the raw
 -- bytes without decoding them.
 --
+-- The 'EncCBOR' and 'DecCBOR' instances for a top-level 'Tx' use the block
+-- format, while the mempool format is only used by the instances for
+-- 'MempoolTx'.
+--
 -- The mempool format is not stored. It is assembled from the components, which
 -- already store their own bytes. Sub-transactions do not store their bytes
 -- either, since they are part of the body of a top-level transaction.
@@ -542,19 +570,17 @@ instance HashAnnotated (Tx TopTx DijkstraEra) EraIndependentTx where
   hashAnnotated = hashAnnotated . unDijkstraTx
 
 -- | Encode to CBOR for the purposes of transmission from node to node, or from
--- wallet to node.
+-- wallet to node. This is the serialisation of a 'MempoolTx'.
 --
--- Note that this serialisation is neither the serialisation used on-chain
--- (which includes the `IsPhase2Valid` flag as the last element - see
--- 'toCBORForBlockInclusion'), nor the serialisation used for computing the
--- transaction size (which omits the `IsPhase2Valid` field for compatibility
--- with Mary - see 'toCBORForSizeComputation').
+-- This differs from the block format, which includes the `IsPhase2Valid` flag
+-- as the last element (see 'toCBORForBlockInclusion'). It currently matches
+-- the encoding used for fee-size computation (see 'toCBORForSizeComputation').
 toCBORForMempoolSubmission ::
-  ( EncCBOR (TxBody l era)
+  ( EncCBOR (TxBody TopTx era)
   , EncCBOR (TxWits era)
   , EncCBOR (TxAuxData era)
   ) =>
-  DijkstraTx l era ->
+  DijkstraTx TopTx era ->
   Encoding
 toCBORForMempoolSubmission = \case
   DijkstraTopTx
@@ -565,12 +591,6 @@ toCBORForMempoolSubmission = \case
           !> To dttrWits
           !> OmitC dttrIsPhase2Valid
           !> E (encodeNullStrictMaybe encCBOR) dttrAuxData
-  DijkstraSubTx {dstBody, dstWits, dstAuxData} ->
-    encode $
-      Rec DijkstraSubTx
-        !> To dstBody
-        !> To dstWits
-        !> E (encodeNullStrictMaybe encCBOR) dstAuxData
 
 toCBORForBlockInclusion :: SafeToHash (Tx TopTx era) => Tx TopTx era -> Encoding
 toCBORForBlockInclusion = encodePreEncoded . originalBytes
@@ -578,6 +598,8 @@ toCBORForBlockInclusion = encodePreEncoded . originalBytes
 data DijkstraStAnnTx l era where
   DijkstraStAnnTopTx ::
     { dsattTx :: !(Tx TopTx era)
+    , dsattRefScriptsSize :: Int
+    , dsattExUnits :: ExUnits
     , dsattScriptsNeeded :: ScriptsNeeded era
     , dsattScriptsProvided :: ScriptsProvided era
     , dsattPlutusLegacyMode :: Bool
@@ -585,6 +607,7 @@ data DijkstraStAnnTx l era where
     , dsattPlutusRunnableCache :: Map.Map ScriptHash (SupportedPlutusRunnable era)
     , dsattPlutusScriptsWithContext :: Either (NonEmpty (CollectError era)) [PlutusWithContext]
     , dsattSubTransactions :: [DijkstraStAnnTx SubTx era]
+    , dsattUTxO :: UTxO era
     } ->
     DijkstraStAnnTx TopTx era
   DijkstraStAnnSubTx ::
@@ -607,6 +630,7 @@ deriving instance
   , Eq (ScriptsProvided era)
   , Eq (CollectError era)
   , Eq (TxInfoResult era)
+  , Eq (UTxO era)
   ) =>
   Eq (DijkstraStAnnTx l era)
 
@@ -618,6 +642,7 @@ deriving instance
   , Show (ScriptsProvided era)
   , Show (CollectError era)
   , Show (TxInfoResult era)
+  , Show (UTxO era)
   ) =>
   Show (DijkstraStAnnTx l era)
 

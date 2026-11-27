@@ -1,0 +1,12 @@
+{
+    "$schema": "https://raw.githubusercontent.com/IntersectMBO/cardano-config/v2/schemas/config.schema.json",
+    "Version": 2,
+    "Configuration": {
+        "LocalConnections": {
+            "EnableGrpc": true,
+            "GrpcListenPort": 3001,
+            "GrpcTlsCertificateFile": "tls/server.pem",
+            "GrpcTlsPrivateKeyFile": "tls/server.key"
+        }
+    }
+}

@@ -1,7 +1,6 @@
 module Main (main) where
 
 import qualified Cardano.Configuration.CliArgs as CLI
-import Cardano.Crypto.Hash (Hash (UnsafeHash))
 import Cardano.Ledger.BaseTypes (StrictMaybe (SJust))
 import qualified Cardano.Tools.DBAnalyser.Block.Cardano as Cardano
 import qualified Cardano.Tools.DBAnalyser.Run as DBAnalyser
@@ -11,13 +10,20 @@ import qualified Cardano.Tools.DBSynthesizer.Run as DBSynthesizer
 import Cardano.Tools.DBSynthesizer.Types
 import qualified Cardano.Tools.DBTruncater.Run as DBTruncater
 import qualified Cardano.Tools.DBTruncater.Types as DBTruncater
-import Data.String (fromString)
+import qualified Data.ByteString.Char8 as BS8
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (isJust)
 import Ouroboros.Consensus.Block
 import Ouroboros.Consensus.Cardano.Block
-import Ouroboros.Consensus.Leios.Types (LeiosPoint (..))
+import Ouroboros.Consensus.Leios.Types
+  ( EndorserBlock
+  , LeiosPoint (..)
+  , endorserBlockFromTxBytes
+  , endorserBlockHash
+  )
 import Ouroboros.Consensus.Storage.LeiosDB
-  ( LeiosDbReader (testScanEbPoints)
-  , LeiosDbWriter (writeEbPoint)
+  ( LeiosDbReader (lookupEbBody)
+  , LeiosDbWriter (writeEbBody)
   , Promise (await)
   , withLeiosDBSQLite
   , withReader
@@ -27,6 +33,7 @@ import qualified Test.Cardano.Tools.DBAnalyser.NodeConfig
 import qualified Test.Cardano.Tools.Headers
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.ExpectedFailure (expectFailBecause)
 import Test.Util.TestEnv
 
 nodeConfig, chainDB, bulkCredentials :: FilePath
@@ -169,19 +176,21 @@ blockCountTest logStep = do
   -- the truncater runs: it opens the files itself and VACUUMs them.
   let volLeiosDb = chainDB <> "/leios.vol.db"
       immLeiosDb = chainDB <> "/leios.imm.db"
-      keptEb = MkLeiosPoint 0 (mkEbHash '1')
-      droppedEb = MkLeiosPoint 500000 (mkEbHash '2')
+      -- The same EB at both: the truncation goes by slot.
+      keptEb = MkLeiosPoint 0 (endorserBlockHash eb)
+      droppedEb = MkLeiosPoint 500000 (endorserBlockHash eb)
   withLeiosDBSQLite mempty volLeiosDb immLeiosDb $ \leiosDb ->
     withWriter leiosDb $ \con ->
-      mapM_ (\point -> await =<< writeEbPoint con point 500) [keptEb, droppedEb]
+      mapM_ (\point -> await =<< writeEbBody con point eb mempty) [keptEb, droppedEb]
 
   logStep "running truncation"
   DBTruncater.truncate testTruncaterConfig testBlockArgs
 
-  ebPoints <- withLeiosDBSQLite mempty volLeiosDb immLeiosDb $ \leiosDb ->
-    withReader leiosDb testScanEbPoints
-  ebPoints == [(0, pointEbHash keptEb)]
-    @? "the LeiosDb does not hold the kept EB alone: " ++ show ebPoints
+  held <- withLeiosDBSQLite mempty volLeiosDb immLeiosDb $ \leiosDb ->
+    withReader leiosDb $ \reader ->
+      mapM (fmap isJust . lookupEbBody reader) [keptEb, droppedEb]
+  held == [True, False]
+    @? "the LeiosDb does not hold the kept EB alone: " ++ show held
 
   logStep "running analysis after truncation"
   resultTruncated <- DBAnalyser.analyse testAnalyserConfig testBlockArgs
@@ -205,15 +214,26 @@ blockCountTest logStep = do
       expected
       (resultForged result)
 
-  mkEbHash c = UnsafeHash (fromString (replicate 32 c))
+  eb :: EndorserBlock
+  eb = endorserBlockFromTxBytes (BS8.pack "tx" :| [])
 
 tests :: TestTree
 tests =
   testGroup
     "cardano-tools"
-    [ testCaseSteps "synthesize and analyse: blockCount\n" blockCountTest
+    [ -- Both tests synthesize into the same ChainDB directory, so they must not
+      -- run concurrently.
+      sequentialTestGroup
+        "synthesis"
+        AllFinish
+        [ expectFailBecause
+            "IntersectMBO/ouroboros-consensus#2293 mounts perasimmutablecert/ in the ChainDB directory, which db-synthesizer does not recognise as a ChainDB directory"
+            $ testCaseSteps "synthesize and analyse: blockCount\n" blockCountTest
+        , expectFailBecause
+            "IntersectMBO/ouroboros-consensus#2293 mounts perasimmutablecert/ in the ChainDB directory, which db-synthesizer does not recognise as a ChainDB directory"
+            $ testCaseSteps "synthesize, analyse and truncate\n" blockCountTest
+        ]
     , Test.Cardano.Tools.DBAnalyser.NodeConfig.tests
-    , testCaseSteps "synthesize, analyse and truncate\n" blockCountTest
     , Test.Cardano.Tools.Headers.tests
     ]
 

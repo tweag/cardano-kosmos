@@ -79,6 +79,7 @@ module Test.Ouroboros.Storage.ChainDB.StateMachine
   , tests
   ) where
 
+import Cardano.Binary (FromCBOR, ToCBOR)
 import Cardano.Ledger.BaseTypes (NonZero (..), unsafeNonZero)
 import Codec.Serialise (Serialise)
 import Control.Exception (assert)
@@ -128,7 +129,7 @@ import Ouroboros.Consensus.Ledger.Inspect
 import Ouroboros.Consensus.Ledger.Peras (PerasState (..))
 import Ouroboros.Consensus.Ledger.SupportsProtocol
 import Ouroboros.Consensus.Ledger.Tables.Utils
-import Ouroboros.Consensus.Leios.Protocol (LeiosProtocol)
+import Ouroboros.Consensus.Leios.Protocol (trivialLeiosLedgerView)
 import Ouroboros.Consensus.Peras.Cert.Mock (MockPerasCert (..))
 import Ouroboros.Consensus.Peras.Context
   ( StateSupportsPerasEpochContext
@@ -150,6 +151,7 @@ import Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal
 import qualified Ouroboros.Consensus.Storage.LedgerDB.TraceEvent as LedgerDB
 import Ouroboros.Consensus.Storage.LeiosDB (LeiosDbHandle, newLeiosDBInMemory)
 import qualified Ouroboros.Consensus.Storage.PerasCertDB as PerasCertDB
+import qualified Ouroboros.Consensus.Storage.PerasImmutableCertDB as PerasImmutableCertDB
 import qualified Ouroboros.Consensus.Storage.PerasVoteDB as PerasVoteDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolatileDB
 import Ouroboros.Consensus.Util (split)
@@ -212,9 +214,15 @@ newtype Persistent a = Persistent {unPersistent :: a}
 
 -- | Commands
 data Cmd blk it flr
-  = -- | Add a block, with (possibly) some gap blocks leading to it.
+  = -- | Add a block, with the slot of its predecessor and (possibly) some gap
+    -- blocks leading to it.
+    --
+    -- The generator supplies the predecessor's slot because it knows it even
+    -- when the predecessor is a gap block that was never added, just as the
+    -- real node knows it from the header that incurred the fetch request.
+    --
     -- For more information about gap blocks, refer to 'GenState' below.
-    AddBlock blk (Persistent [blk])
+    AddBlock blk (WithOrigin SlotNo) (Persistent [blk])
   | -- | Add a Peras cert for a block, with (possibly) some gap blocks leading to it.
     -- For more information about gap blocks, refer to 'GenState' below.
     AddPerasCert (WithArrivalTime (ValidatedPerasCert blk)) (Persistent [blk])
@@ -265,6 +273,9 @@ data Cmd blk it flr
     PersistBlksThenGC
   | -- | Write a new 'LedgerDB' snapshot to disk and remove the oldest ones.
     UpdateLedgerSnapshots
+  | -- | Whether the VolatileDB contains the block at the tip of the
+    -- ImmutableDB, which the Chain DB must ensure.
+    VolatileDbHoldsImmutableTip
   | -- Corruption
     WipeVolatileDB
   deriving (Generic, Functor, Foldable, Traversable)
@@ -338,6 +349,7 @@ data Success blk it flr
   | MbChainUpdate (Maybe (ChainUpdate blk (AllComponents blk)))
   | MbPoint (Maybe (Point blk))
   | MaxSlot MaxSlotNo
+  | HoldsImmutableTip Bool
   | MbPerasRoundNo (Maybe PerasRoundNo)
   | PerasCertRes ChainDB.AddPerasCertChainSelOutcome
   | PerasVoteRes (ChainDB.AddPerasVoteResult blk, Maybe ChainDB.AddPerasCertChainSelOutcome)
@@ -379,9 +391,10 @@ type AllComponents blk =
 type TestConstraints blk =
   ( All Top (HardForkIndices blk)
   , ConsensusProtocol (BlockProtocol blk)
+  , LedgerView (BlockProtocol blk) ~ ()
   , LedgerSupportsProtocol blk
-  , LeiosProtocol (BlockProtocol blk)
   , BlockSupportsDiffusionPipelining blk
+  , BlockSupportsLeios blk
   , InspectLedger blk
   , Eq (ChainDepState (BlockProtocol blk))
   , Eq (LedgerState blk EmptyMK)
@@ -402,6 +415,8 @@ type TestConstraints blk =
   , ImmutableEraParams blk
   , StateSupportsPerasEpochContext blk
   , BlockSupportsPeras blk
+  , FromCBOR (Point blk)
+  , ToCBOR (Point blk)
   , PerasVote blk ~ MockPerasVote blk
   , PerasCert blk ~ MockPerasCert blk
   )
@@ -475,7 +490,7 @@ run ::
   m (Success blk (TestIterator m blk) (TestFollower m blk))
 run cfg env@ChainDBEnv{varDB, ..} cmd =
   readTVarIO varDB >>= \st@ChainDBState{chainDB = chainDB@ChainDB{..}, internal} -> case cmd of
-    AddBlock blk _ -> Point <$> advanceAndAdd st blk
+    AddBlock blk predSlot _ -> Point <$> advanceAndAdd st predSlot blk
     AddPerasCert cert _ -> PerasCertRes <$> addPerasCertSync chainDB cert
     AddPerasVote vote _ -> PerasVoteRes <$> addPerasVoteSync chainDB vote
     GetCurrentChain -> Chain <$> atomically getCurrentChain
@@ -512,6 +527,8 @@ run cfg env@ChainDBEnv{varDB, ..} cmd =
       -- TODO(geo2a): re-enable copying when the model has a notion of ledger state
       --              snapshots and can conditionally copy to ImmutableDB.
       ignore <$> intTryTakeSnapshot internal
+    VolatileDbHoldsImmutableTip ->
+      HoldsImmutableTip <$> atomically (intImmutableTipInVolatileDB internal)
     WipeVolatileDB -> Point <$> wipeVolatileDB st
  where
   mbGCedAllComponents = MbGCedAllComponents . MaybeGCedBlock True
@@ -521,10 +538,17 @@ run cfg env@ChainDBEnv{varDB, ..} cmd =
   follower = fmap Flr . giveWithEq
   ignore _ = Unit ()
 
-  advanceAndAdd :: ChainDBState m blk -> blk -> m (Point blk)
-  advanceAndAdd ChainDBState{chainDB} blk = do
+  advanceAndAdd ::
+    ChainDBState m blk -> WithOrigin SlotNo -> blk -> m (Point blk)
+  advanceAndAdd ChainDBState{chainDB} predSlot blk = do
     -- `blockProcessed` always returns 'Just'
-    res <- addBlock chainDB InvalidBlockPunishment.noPunishment blk
+    res <-
+      addBlock
+        chainDB
+        InvalidBlockPunishment.noPunishment
+        predSlot
+        (trivialLeiosLedgerView (Proxy @blk))
+        blk
     return $ case res of
       FailedToAddBlock f -> error $ "advanceAndAdd: block not added - " ++ f
       SuccesfullyAddedBlock pt -> pt
@@ -744,7 +768,7 @@ runPure ::
   DBModel blk ->
   (Resp blk IteratorId FollowerId, DBModel blk)
 runPure cfg = \case
-  AddBlock blk _ -> ok Point $ update (add blk)
+  AddBlock blk _ _ -> ok Point $ update (add blk)
   AddPerasCert cert _ -> ok PerasCertRes $ update (Model.addPerasCert cfg cert)
   AddPerasVote vote _ -> ok PerasVoteRes $ update (Model.addPerasVote cfg vote)
   GetCurrentChain -> ok Chain $ query (Model.volatileChain k getHeader)
@@ -778,6 +802,7 @@ runPure cfg = \case
   -- snapshots so that this aspect of the system would be explicitly
   -- specified. See https://github.com/IntersectMBO/ouroboros-network/issues/3375
   UpdateLedgerSnapshots -> ok Unit $ update_ id
+  VolatileDbHoldsImmutableTip -> ok HoldsImmutableTip $ query (const True)
   Close -> openOrClosed $ update_ Model.closeDB
   Reopen -> openOrClosed $ update_ Model.reopen
   WipeVolatileDB -> ok Point $ update (Model.wipeVolatileDB cfg)
@@ -912,6 +937,14 @@ data GenState blk
   -- 'genAddPerasCert'. We don't want to discard these because they can be used
   -- to fill gaps between existing blocks added via 'AddBlock', simulating
   -- blocks and certificates arriving out of order.
+  , generatedSlots :: Map (HeaderHash blk) SlotNo
+  -- ^ The slot of every block ever generated, so that 'genAddBlock' can supply
+  -- a block's predecessor slot.
+  --
+  -- Never pruned, unlike the model's own stores: garbage collection drops a
+  -- block from the VolatileDB, and only a block that was copied reaches the
+  -- ImmutableDB, so 'Model.blocks' can lose a predecessor that a later
+  -- generated block still names.
   }
   deriving Generic
 
@@ -927,6 +960,7 @@ emptyGenState :: GenState blk
 emptyGenState =
   GenState
     { seenBlocks = Map.empty
+    , generatedSlots = Map.empty
     }
 
 -- | Use the extra state stored in a generated command to update a model's
@@ -938,10 +972,10 @@ updateGenState ::
   GenState blk
 updateGenState cmd gs =
   case unAt cmd of
-    AddBlock blk (Persistent blks) ->
-      deleteSeenBlock blk $ saveNewSeenBlocks blks gs
-    AddPerasCert _ (Persistent blks) -> saveNewSeenBlocks blks gs
-    AddPerasVote _ (Persistent blks) -> saveNewSeenBlocks blks gs
+    AddBlock blk _ (Persistent blks) ->
+      deleteSeenBlock blk $ saveNewSeenBlocks blks $ saveSlots (blk : blks) gs
+    AddPerasCert _ (Persistent blks) -> saveNewSeenBlocks blks $ saveSlots blks gs
+    AddPerasVote _ (Persistent blks) -> saveNewSeenBlocks blks $ saveSlots blks gs
     _ -> gs
  where
   deleteSeenBlock blk gs' =
@@ -952,6 +986,13 @@ updateGenState cmd gs =
           Map.union
             (Map.fromList [(blockHash blk, blk) | blk <- blks])
             (seenBlocks gs')
+      }
+  saveSlots blks gs' =
+    gs'
+      { generatedSlots =
+          Map.union
+            (Map.fromList [(blockHash blk, blockSlot blk) | blk <- blks])
+            (generatedSlots gs')
       }
 
 -- | Execution model
@@ -1199,6 +1240,7 @@ generator loe genBlock genPerasBlock m@Model{..} =
         (if empty then 1 else 10, return PersistBlks)
       , (if empty then 1 else 10, return PersistBlksThenGC)
       , (if empty then 1 else 10, return UpdateLedgerSnapshots)
+      , (if empty then 1 else 10, return VolatileDbHoldsImmutableTip)
       , (if empty then 1 else 10, return WipeVolatileDB)
       ]
  where
@@ -1296,7 +1338,25 @@ generator loe genBlock genPerasBlock m@Model{..} =
   genAddBlock :: Gen (Cmd blk it flr)
   genAddBlock = do
     (blk, gapBlks) <- genBlock m
-    pure $ AddBlock blk gapBlks
+    pure $ AddBlock blk (genPredecessorSlot gapBlks blk) gapBlks
+
+  -- Every block the generators build sits on top of a block they have already
+  -- built, so its predecessor is either genesis or one of the blocks below,
+  -- even when it is a gap block that will never be added to the ChainDB or one
+  -- whose predecessor the model has since garbage-collected.
+  genPredecessorSlot :: Persistent [blk] -> blk -> WithOrigin SlotNo
+  genPredecessorSlot (Persistent gapBlks) blk = case blockPrevHash blk of
+    GenesisHash -> Origin
+    BlockHash h -> case Map.lookup h generated of
+      Nothing -> error "genAddBlock: predecessor was never generated"
+      Just predSlot -> NotOrigin predSlot
+   where
+    generated =
+      Map.union
+        -- The blocks this very call generated are not in 'generatedSlots' yet;
+        -- 'updateGenState' only sees the command once it is built.
+        (Map.fromList [(blockHash b, blockSlot b) | b <- gapBlks])
+        (generatedSlots genState)
 
   genAddPerasCert :: Gen (Cmd blk it flr)
   genAddPerasCert = do
@@ -1772,6 +1832,8 @@ deriving instance SOP.Generic (VolatileDB.TraceEvent blk)
 deriving instance SOP.HasDatatypeInfo (VolatileDB.TraceEvent blk)
 deriving instance SOP.Generic (PerasCertDB.TraceEvent blk)
 deriving instance SOP.HasDatatypeInfo (PerasCertDB.TraceEvent blk)
+deriving instance SOP.Generic (PerasImmutableCertDB.TraceEvent blk)
+deriving instance SOP.HasDatatypeInfo (PerasImmutableCertDB.TraceEvent blk)
 deriving instance SOP.Generic (PerasVoteDB.TraceEvent blk)
 deriving instance SOP.HasDatatypeInfo (PerasVoteDB.TraceEvent blk)
 deriving anyclass instance SOP.Generic (TraceChainSelStarvationEvent blk)
@@ -2596,6 +2658,7 @@ traceEventName = \case
   TraceImmutableDBEvent ev -> "ImmutableDB." <> constrName ev
   TraceVolatileDBEvent ev -> "VolatileDB." <> constrName ev
   TracePerasCertDbEvent ev -> "PerasCertDB." <> constrName ev
+  TracePerasImmutableCertDbEvent ev -> "PerasImmutableCertDB." <> constrName ev
   TracePerasVoteDbEvent ev -> "PerasVoteDB." <> constrName ev
   TraceLastShutdownUnclean -> "LastShutdownUnclean"
   TraceChainSelStarvationEvent ev -> "ChainSelStarvation." <> constrName ev
